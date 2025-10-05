@@ -62,8 +62,7 @@ static (Engine.IProgram, Engine.Value) MakeProgram()
     b
         .AddLi(FibN)
         .AddLiC(fib)
-        .AddCall(1, false)
-        .AddRt(1);
+        .AddCall(1, true);
     return (b.Build(), main);
 }
 

@@ -136,11 +136,12 @@ public partial class Engine
         // adjust Sa
         s.Sa -= f.Ac;
         // allocate the next frame and get reference
+        var rp = f.Rp;
         f = new Frame
         {
             Sp = s.Sa,
             Ac = args,
-            Rp = s.Pp
+            Rp = rp
         };
         // args are already on stack so Sa does not need to be adjusted
         // set the current program pointer to target location

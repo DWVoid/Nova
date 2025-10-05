@@ -8,11 +8,14 @@ public partial class Engine
     [StructLayout(LayoutKind.Sequential)]
     public unsafe struct GcHead
     {
-        // next field for GC marking process
-        public GcHead* GrNext;
-
         // next field for GC collection process 
-        public GcHead* BlNext;
+        public GcHead* NextA;
+
+        // next field for GC marking process
+        public GcHead* NextB;
+
+        // GcObject VTable. This should not be null
+        public GcVtb* Vt;
 
         // auxiliary data. only 32 bit is used. declared as nuint for alignment purpose
         // this allows actual data to be accessed by ((nint)this)+sizeof(GcHead)
@@ -21,14 +24,8 @@ public partial class Engine
         // [04-04]: if the object currently belongs to the blue list
         // [05-05]: if the object has been added to the blue list this GC cycle.
         // [06-06]: if the object has been added to the black list this GC cycle.
-        // [07-15]: reserved
-        // [09-09]: if extra vtable is present (as &data). otherwise the object is plain data
-        // [10-10]: if key hash has been computed and cached.
-        // [10-31]: reserved
+        // [07-31]: reserved
         public nuint Aux;
-
-        // key hash for table
-        public nint Kh;
 
         public GcState State
         {
@@ -39,8 +36,6 @@ public partial class Engine
         public const uint BlueBit = 1u << 4;
         public const uint BluedBit = 1u << 5;
         public const uint BlackedBit = 1u << 6;
-        public const uint HasVtBit = 1u << 9;
-        public const uint HasKhBit = 1u << 10;
         public const uint GcBits = 0xFF;
 
         public bool IsBlue => (Aux & BlueBit) != 0;
@@ -48,10 +43,6 @@ public partial class Engine
         public bool IsBlued => (Aux & BluedBit) != 0;
 
         public bool IsBlacked => (Aux & BlackedBit) != 0;
-
-        public bool HasVt => (Aux & HasVtBit) != 0;
-
-        public bool HasKh => (Aux & HasKhBit) != 0;
 
         public void SetBits(uint bits) => Aux |= bits;
 
@@ -62,19 +53,77 @@ public partial class Engine
     public unsafe struct GcVtb
     {
         // function to walk all referred object of the given object
-        public delegate* managed<GcHead*, Action<nuint>, void> Scan;
-
-        // function to release all associated resources of given object
-        public delegate* managed<GcHead*, void> Free;
+        public delegate* managed<GcHead*, Action<Value>, void> Scan;
 
         // function to implement custom move behavior of given object
         public delegate* managed<GcHead*, GcHead*, void> Move;
 
-        // function to determine if this needs to be finalized
-        public delegate* managed<GcHead*, bool> Finals;
+        // function to release all associated resources of given object
+        public delegate* managed<GcHead*, void> Free;
 
-        // function to compare if the left object (self) is equal to the other object in terms of table key
-        public delegate* managed<GcHead*, GcHead*, bool> Equal;
+        // reference to type to avoid storing full Value
+        public Type* Next;
+    }
+
+    private struct GcListA()
+    {
+        private unsafe GcHead* _h = null, _t = null;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe void Push(GcHead* o)
+        {
+            if (_t == null)
+                _h = o;
+            else
+                _t->NextA = o;
+            _t = o;
+            o->NextA = null;
+        }
+
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe GcHead* Pop()
+        {
+            var r = _h;
+            if (r == null) return null;
+            var n = r->NextA;
+            _h = n;
+            if (n == null) _t = null;
+            return r;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe bool Empty() => _h == null;
+    }
+
+    private struct GcListB()
+    {
+        private unsafe GcHead* _h = null, _t = null;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe void Push(GcHead* o)
+        {
+            if (_t == null)
+                _h = o;
+            else
+                _t->NextB = o;
+            _t = o;
+            o->NextB = null;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe GcHead* Pop()
+        {
+            var r = _h;
+            if (r == null) return null;
+            var n = r->NextB;
+            _h = n;
+            if (n == null) _t = null;
+            return r;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public unsafe bool Empty() => _h == null;
     }
 
     public enum GcState
@@ -84,7 +133,8 @@ public partial class Engine
         Black = 2 //  reachable from root, all children are Gray or Black
     }
 
-    private unsafe GcHead* _hBlue, _tBlue, _hGray, _tGray, _hBlack, _tBlack;
+    private GcListB _gcGray = new(), _gcBlack = new(), _gcFin = new();
+    private GcListA _gcBlue = new(), _gcHold = new();
     private bool _bWrite;
 
     public unsafe nint New(nint len)
@@ -97,75 +147,23 @@ public partial class Engine
         NativeMemory.Free((void*)ptr);
     }
 
-    // allocate enough memory and populate header with default
-    public unsafe GcHead* GcNew(nint len)
+    // allocate a new object on heap
+    public unsafe void* GcNew(nint len, GcVtb* vtb)
     {
         var mem = New(len + sizeof(GcHead));
-        *(GcHead*)mem = default;
-        return (GcHead*)mem;
+        *(GcHead*)mem = new GcHead { Vt = vtb };
+        return (void*)(mem + sizeof(GcHead));
     }
 
-    // allocate enough memory and populate header with default
-    public unsafe GcHead* GcNew(nint len, GcVtb* vtb)
-    {
-        var mem = GcNew(len + sizeof(nuint));
-        mem->SetBits(GcHead.HasVtBit);
-        *(GcVtb**)(mem + 1) = vtb;
-        return mem;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe void EnqueueBl(ref GcHead* h, ref GcHead* t, GcHead* ptr)
-    {
-        if (t == null)
-            h = ptr;
-        else
-            t->BlNext = ptr;
-        t = ptr;
-        ptr->BlNext = null;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe GcHead* DequeueBl(ref GcHead* h, ref GcHead* t)
-    {
-        var r = h;
-        if (r == null) return null;
-        var n = r->BlNext;
-        h = n;
-        if (n == null) t = null;
-        return r;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe void EnqueueGr(ref GcHead* h, ref GcHead* t, GcHead* ptr)
-    {
-        if (t == null)
-            h = ptr;
-        else
-            t->GrNext = ptr;
-        t = ptr;
-        ptr->GrNext = null;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe GcHead* DequeueGr(ref GcHead* h, ref GcHead* t)
-    {
-        var r = h;
-        if (r == null) return null;
-        var n = r->GrNext;
-        h = n;
-        if (n == null) t = null;
-        return r;
-    }
-
+    // replace GcObject o with GcObject n
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public unsafe void GcAssign(GcHead* o, GcHead* n)
     {
+        if (o == n) return;
         if (n != null) n->ClearBits(GcHead.BlueBit);
-        if (o != n) return;
         if (o == null) return;
         if (o->IsBlue) return;
-        if (!o->IsBlued) EnqueueBl(ref _hBlue, ref _tBlue, o);
+        if (!o->IsBlued) _gcBlue.Push(o);
         o->SetBits(GcHead.BlueBit | GcHead.BluedBit);
     }
 
@@ -179,9 +177,10 @@ public partial class Engine
         if (n->State is not GcState.White) return;
         if (t->State is not GcState.Black) return;
         t->State = GcState.Gray;
-        EnqueueGr(ref _hGray, ref _tGray, t);
+        _gcGray.Push(t);
     }
 
+    // replace GcObject o in GcObject t with GcObject n
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public unsafe void GcAssign(GcHead* t, GcHead* o, GcHead* n)
     {
@@ -189,53 +188,54 @@ public partial class Engine
         if (_bWrite) GcAssignOnWriteBarrier(t, o, n);
     }
 
-    private unsafe void WhiteToGray(nuint n)
+    private unsafe void WhiteToGray(Value v)
     {
-        var p = (GcHead*)n;
+        // consult the type info to see if this object is on heap
+        if (!v.T->IsHeap(v)) return;
+        var p = (GcHead*)(nuint)(v.V - sizeof(GcHead));
+        // transfer all white state objects to gray
         if (p->State is not GcState.White) return;
         p->State = GcState.Gray;
-        EnqueueGr(ref _hGray, ref _tGray, p);
+        _gcGray.Push(p);
     }
 
     private unsafe void GcProcessGrayList()
     {
         while (true)
         {
-            var n = DequeueGr(ref _hGray, ref _tGray);
+            var n = _gcGray.Pop();
             if (n == null) break;
-            // test if the object has a vtable. if so, call the scan function if any
-            if (n->HasVt)
-            {
-                var vt = *(GcVtb**)(n + 1);
-                if (vt->Scan != null) vt->Scan(n, WhiteToGray);
-            }
-
+            // call the scan function if any
+            var vt = n->Vt;
+            if (vt->Scan != null) vt->Scan(n, WhiteToGray);
             // all direct descendents enqueued, mark the current object black and also clear the blue flag if any
             // the reason why this list is kept is that we need it to be reset to white before next cycle
             n->State = GcState.Black;
             n->ClearBits(GcHead.BlueBit);
             if (n->IsBlacked) continue;
             n->SetBits(GcHead.BlackedBit);
-            EnqueueGr(ref _hBlack, ref _tBlack, n);
+            _gcBlack.Push(n);
         }
     }
 
-    private unsafe void WhiteToBlue(nuint n)
+    private unsafe void WhiteToBlue(Value v)
     {
-        var p = (GcHead*)n;
+        // consult the type info to see if this object is on heap
+        if (!v.T->IsHeap(v)) return;
+        var p = (GcHead*)(nuint)(v.V - sizeof(GcHead));
         // only mark white objects. gray and black are not to be released in this GC trigger
         if (p->State is not GcState.White) return;
         // only mark and add to list if blue flag is not set and blue in-list flag is not set
         if (p->IsBlue) return;
-        if (!p->IsBlued) EnqueueBl(ref _hBlue, ref _tBlue, p);
+        if (!p->IsBlued) _gcBlue.Push(p);
         p->SetBits(GcHead.BlueBit | GcHead.BluedBit);
     }
 
-    private unsafe void GcProcessBlueList(ref GcHead* hFin, ref GcHead* tFin)
+    private unsafe void GcProcessBlueList()
     {
         while (true)
         {
-            var n = DequeueBl(ref _hBlue, ref _tBlue);
+            var n = _gcBlue.Pop();
             if (n == null) break;
 
             // check if the blue flag is currently set.
@@ -247,27 +247,23 @@ public partial class Engine
                 continue;
             }
 
-            // test if the object has a vtable. if so, this object needs special processing before getting collected
-            if (n->HasVt)
+            var vt = n->Vt;
+            // check if this object requires finalization. if so, add it to list and continue to next
+            // the gray list Next is used here as the blue list is still in use here
+            if (vt->Next->Final != null)
             {
-                var vt = *(GcVtb**)(n + 1);
-                // check if this object requires finalization. if so, add it to list and continue to next
-                // the gray list Next is used here as the blue list is still in use here
-                if (vt->Finals != null)
-                {
-                    EnqueueGr(ref hFin, ref tFin, n);
-                    // the blue list flags are retained to check for prevent re-adding to blue list
-                    // while retaining the ability to check if the object is revived during finalization
-                    // no need to do anything further here
-                    continue;
-                }
-
-                // we have no finalizer tasks here
-                // mark all its descendents if needed
-                if (vt->Scan != null) vt->Scan(n, WhiteToBlue);
-                // free all internalized resource of this object
-                if (vt->Free != null) vt->Free(n);
+                _gcFin.Push(n);
+                // the blue list flags are retained to check for prevent re-adding to blue list
+                // while retaining the ability to check if the object is revived during finalization
+                // no need to do anything further here
+                continue;
             }
+
+            // we have no finalizer tasks here
+            // mark all its descendents if needed
+            if (vt->Scan != null) vt->Scan(n, WhiteToBlue);
+            // free all internalized resource of this object
+            if (vt->Free != null) vt->Free(n);
 
             // if it reaches here, we can be sure the object itself is safe to be released
             Free((nint)n);
@@ -276,7 +272,7 @@ public partial class Engine
 
     private unsafe void FreeObjectVt(GcHead* n)
     {
-        var vt = *(GcVtb**)(n + 1);
+        var vt = n->Vt;
         // mark all its descendents if needed
         if (vt->Scan != null) vt->Scan(n, WhiteToBlue);
         // free all internalized resource of this object
@@ -285,11 +281,11 @@ public partial class Engine
         Free((nint)n);
     }
 
-    private unsafe void GcProcessFinalizeReviveRescan(ref GcHead* hHold, ref GcHead* tHold)
+    private unsafe void GcProcessFinalizeReviveRescan()
     {
         while (true)
         {
-            var n = DequeueBl(ref hHold, ref tHold);
+            var n = _gcHold.Pop();
             if (n == null) break;
             if (n->State is not GcState.Black)
                 FreeObjectVt(n);
@@ -303,7 +299,7 @@ public partial class Engine
     {
         while (true)
         {
-            var n = DequeueGr(ref _hBlack, ref _tBlack);
+            var n = _gcBlack.Pop();
             if (n == null) break;
             n->ClearBits(GcHead.GcBits);
         }
@@ -317,18 +313,14 @@ public partial class Engine
         GcProcessGrayList();
         while (true)
         {
-            // finalization list
-            GcHead* hFin = null, tFin = null;
             // process the blue list
-            GcProcessBlueList(ref hFin, ref tFin);
+            GcProcessBlueList();
             // check if there is any finalization pending. if there is none then we are done here
-            if (hFin == null) break;
-            // finalization hold list
-            GcHead* hHold = null, tHold = null;
+            if (_gcFin.Empty()) break;
             // process the finalization list in order
             while (true)
             {
-                var n = DequeueGr(ref hFin, ref tFin);
+                var n = _gcFin.Pop();
                 if (n == null) break;
                 // TODO: actually fix this to be proper await
                 // (or handled via state machine as GC cannot have two run instances)
@@ -339,7 +331,7 @@ public partial class Engine
                 // since the in-list flag is retained from blue processing, it cannot be on blue-list now
                 // we can put it on a separate hold list using BlNext to check for live after next gray scan
                 if (!n->IsBlue)
-                    EnqueueBl(ref hHold, ref tHold, n);
+                    _gcHold.Push(n);
                 else
                     FreeObjectVt(n);
             }
@@ -347,7 +339,7 @@ public partial class Engine
             // now run the gray list scan again to tie the ends of finalization
             GcProcessGrayList();
             // process the hold list to pick out fake revives and kill the objects (not black after gray scan)
-            GcProcessFinalizeReviveRescan(ref hHold, ref tHold);
+            GcProcessFinalizeReviveRescan();
             // now we are back to square one with a packed blue list anc clear gray list
         }
 

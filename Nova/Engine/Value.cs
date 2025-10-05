@@ -45,6 +45,12 @@ public partial class Engine
         public unsafe delegate* managed <ref Stack, ref Frame, Value, byte, bool, void> Call;
 
         public unsafe delegate* managed <ref Stack, ref Frame, Value, Value, byte, bool, void> Calli;
+        
+        public unsafe delegate* managed <ref Stack, ref Frame, Value, void> Final;
+        
+        public unsafe delegate* managed <ref Stack, ref Frame, Value, void> Close;
+
+        public unsafe delegate* managed <Value, bool> IsHeap;
     }
 
     private static Value NullGet(ref Stack s, ref Frame f, Value t, Value n, bool r) => new();

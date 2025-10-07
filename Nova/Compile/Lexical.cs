@@ -206,20 +206,14 @@ public static partial class Compile
 
     private static bool TryGetSym(ref Graphemes text, out Graphemes token)
     {
-        var count = 0;
-
         foreach (var g in text)
             if (g.Chars[0] is >= '!' and <= '/' or >= ':' and <= '@' or >= '[' and <= '`' or >= '{' and <= '~')
-                ++count;
-            else
-                break;
-
-        if (count > 0)
-        {
-            token = text[..count];
-            text = text[count..];
-            return true;
-        }
+            {
+                token = text[..1];
+                text = text[1..];
+                return true;
+            }
+            else break;
 
         token = default;
         return false;

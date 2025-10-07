@@ -22,7 +22,7 @@ return;
 static long Fib(int n)
 {
     if (n <= 2) return 1;
-    return Fib(n - 1) +  Fib(n - 2);
+    return Fib(n - 1) + Fib(n - 2);
 }
 
 static void RunProgram(Engine.IProgram p, Engine.Value e)
@@ -34,6 +34,19 @@ static void RunProgram(Engine.IProgram p, Engine.Value e)
 
 static (Engine.IProgram, Engine.Value) MakeProgram()
 {
+    const string Code =
+        """
+        function fib(n)
+            if n <= 2
+                return 1
+            end
+            return fib(n - 1) + fib(n - 2);
+        end
+        
+        function main()
+            return fib(40)
+        end
+        """;
     using var b = Engine.CreateProgramBuilder();
     b.Tell(out var fibS);
     var fib = b.Procedure(fibS, 1, 1);

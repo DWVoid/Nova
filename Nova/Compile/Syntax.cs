@@ -1,467 +1,421 @@
 ﻿using System.Collections.Immutable;
+using System.Globalization;
+using System.Text;
 
 namespace Nova;
 
 public static partial class Compile
 {
-    // a syntax element
-    public interface ISyntax;
-
-
     // an abstract expression
-    public interface IExpr : ISyntax
-    {
-    }
+    public interface IExpr : Parse.ISyntax;
 
     // an abstract statement
-    public interface IStmt : ISyntax
-    {
-    }
+    public interface IStmt : Parse.ISyntax;
 
     // syntax representation of a block of statements
-    public class Block : ISyntax
-    {
-        public required ImmutableArray<IStmt> Stmts { get; init; }
-    }
-
-    // syntax representation of a translation (a source file, snippet, etc.)
-    public class Unit : ISyntax
-    {
-    }
-
-    private static Block SynBlock(ref SourceContext source, string delim = "")
-    {
-        var stmts = ImmutableArray.CreateBuilder<IStmt>();
-        while (TryStmt(ref source, out var stmt)) stmts.Add(stmt);
-        return new Block { Stmts = stmts.MoveToImmutable() };
-    }
-
-    private static bool TryStmt(ref SourceContext source, out IStmt syn)
-    {
-        SkipWs(ref source);
-        // first handle all cases that start with reserved keyword
-        var rewind = source.Text;
-        if (TryGetId(ref source.Text, out var tok))
-        {
-            switch (tok.Chars.ToString())
-            {
-                case "break":
-                    syn = new BreakStmt();
-                    return true;
-                case "goto":
-                    syn = StmtGoto(ref source);
-                    return true;
-                case "do":
-                    syn = StmtDo(ref source);
-                    return true;
-                case "while":
-                    syn = StmtWhile(ref source);
-                    return true;
-                case "repeat":
-                    syn = StmtRepeat(ref source);
-                    return true;
-                case "if":
-                    syn = StmtIf(ref source);
-                    return true;
-                case "for":
-                    syn = StmtFor(ref source);
-                    return true;
-                case "function":
-                    syn = StmtFunc(ref source, false);
-                    return true;
-                case "local":
-                    SkipWs(ref source);
-                    if (source.Text.Length >= 8 && source.Text.Chars[..8] is "function")
-                    {
-                        ExpectLiteral(ref source, "function");
-                        syn = StmtFunc(ref source, true);
-                    }
-                    else syn = StmtLocals(ref source);
-
-                    return true;
-                case "return":
-                    syn = StmtReturn(ref source);
-                    return true;
-            }
-
-            source.Text = rewind;
-        }
-
-        // then we look for ';' and labels
-        if (source.Text.Length >= 1 && source.Text.Chars[0] == ';')
-        {
-            ExpectSymbolic(ref source, ";");
-            syn = new EmptyStmt();
-            return true;
-        }
-
-        if (source.Text.Length >= 2 && source.Text.Chars[..2] is "::")
-        {
-            source.Text = source.Text[2..];
-            var text = GetId(ref source).ToSourceText(source.Lines);
-            SkipWs(ref source);
-            if (source.Text.Length < 2 || source.Text.Chars[..2] is not "::")
-                throw source.UnexpectedToken("'::'");
-            source.Text = source.Text[2..];
-            syn = new LabelStmt(text);
-            return true;
-        }
-
-        // look for discard stmt or assignment.
-        // both starts with prefix expr, so if multiple expr is found seperated with comma then an assigment is found
-        if (TrySynExpr(ref source, out var expr))
-        {
-            SkipWs(ref source);
-            if (source.Text.Length >= 1)
-            {
-                var l = ImmutableArray.CreateBuilder<IExpr>();
-                var r = ImmutableArray.CreateBuilder<IExpr>();
-                Next:
-                switch (source.Text.Chars[0])
-                {
-                    case ',':
-                    {
-                        l.Add(expr);
-                        NextLeft:
-                        ExpectSymbolic(ref source, ",");
-                        l.Add(SynExpr(ref source));
-                        SkipWs(ref source);
-                        if (source.Text.Length == 0 || source.Text.Chars[0] != ',') goto Next;
-                        goto NextLeft;
-                    }
-                    case '=':
-                    {
-                        ExpectSymbolic(ref source, "=");
-                        NextRight:
-                        r.Add(SynExpr(ref source));
-                        SkipWs(ref source);
-                        if (source.Text.Length == 0 || source.Text.Chars[0] != ',')
-                        {
-                            syn = new AssignStmt(l.MoveToImmutable(), r.MoveToImmutable());
-                            return true;
-                        }
-                        ExpectSymbolic(ref source, ",");
-                        goto NextRight;
-                    }
-                }
-            }
-
-            syn = new DiscardStmt(expr);
-            return true;
-        }
-
-        syn = null!;
-        return false;
-    }
+    public record Block(ImmutableArray<IStmt> Stmts) : Parse.ISyntax;
 
     private record EmptyStmt : IStmt;
 
+    private record LabelStmt(Parse.Source.Text Name) : IStmt;
+
     private record BreakStmt : IStmt;
 
-    private record DiscardStmt(IExpr Expr) : IStmt;
-    
-    private record AssignStmt(ImmutableArray<IExpr> Left, ImmutableArray<IExpr> Right): IStmt;
-
-    private record LabelStmt(SourceText Name) : IStmt;
-
-    private record GotoStmt(SourceText Name) : IStmt;
-
-    private static GotoStmt StmtGoto(scoped ref SourceContext source)
-    {
-        return new GotoStmt(GetId(ref source).ToSourceText(source.Lines));
-    }
+    private record GotoStmt(Parse.Source.Text Name) : IStmt;
 
     private record DoStmt(Block Block) : IStmt;
 
-    private static int ExpectLiteral(ref SourceContext source, params ReadOnlySpan<string> literal)
-    {
-        SkipWs(ref source);
-        if (TryGetId(ref source.Text, out var tok))
-            for (var i = 0; i < literal.Length; ++i)
-                if (tok.Chars.SequenceEqual(literal[i]))
-                    return i;
-        throw source.UnexpectedToken($"'{string.Join('|', literal)}'");
-    }
-
-    private static int ExpectSymbolic(ref SourceContext source, params ReadOnlySpan<string> literal)
-    {
-        SkipWs(ref source);
-        if (TryGetSym(ref source.Text, out var tok))
-            for (var i = 0; i < literal.Length; ++i)
-                if (tok.Chars.SequenceEqual(literal[i]))
-                    return i;
-        throw source.UnexpectedToken($"'{string.Join('|', literal)}'");
-    }
-
-    private static DoStmt StmtDo(ref SourceContext source)
-    {
-        var block = SynBlock(ref source);
-        ExpectLiteral(ref source, "end");
-        return new DoStmt(block);
-    }
-
     private record WhileStmt(IExpr Expr, Block Block) : IStmt;
-
-    private static WhileStmt StmtWhile(ref SourceContext source)
-    {
-        var expr = SynExpr(ref source);
-        ExpectLiteral(ref source, "do");
-        var block = SynBlock(ref source);
-        ExpectLiteral(ref source, "end");
-        return new WhileStmt(expr, block);
-    }
 
     private record RepeatStmt(IExpr Expr, Block Block) : IStmt;
 
-    private static RepeatStmt StmtRepeat(ref SourceContext source)
-    {
-        var block = SynBlock(ref source);
-        ExpectLiteral(ref source, "until");
-        return new RepeatStmt(SynExpr(ref source), block);
-    }
-
     private record IfStmt(ImmutableArray<(IExpr, Block)> List, Block? Else) : IStmt;
 
-    private static IfStmt StmtIf(ref SourceContext source)
-    {
-        var list = ImmutableArray.CreateBuilder<(IExpr, Block)>();
-        Next:
-        var expr = SynExpr(ref source);
-        ExpectLiteral(ref source, "then");
-        var block = SynBlock(ref source);
-        list.Add((expr, block));
-        switch (ExpectLiteral(ref source, "elseif", "else", "end"))
-        {
-            case 0:
-                goto Next;
-            case 1:
-                block = SynBlock(ref source);
-                ExpectLiteral(ref source, "end");
-                return new IfStmt(list.MoveToImmutable(), block);
-            case 2:
-                return new IfStmt(list.MoveToImmutable(), null);
-            default:
-                throw new ArgumentOutOfRangeException(nameof(source));
-        }
-    }
+    private record ForNumStmt(Parse.Source.Text Name, IExpr Init, IExpr Limit, IExpr Step, Block Block) : IStmt;
 
-    private record ForNumStmt(SourceText Name, IExpr Init, IExpr Limit, IExpr Step, Block Block) : IStmt;
+    private record ForIterStmt(ImmutableArray<Parse.Source.Text> Name, ImmutableArray<IExpr> Expr, Block Block) : IStmt;
 
-    private record ForIterStmt(ImmutableArray<SourceText> Name, ImmutableArray<IExpr> Expr, Block Block) : IStmt;
+    private record FuncBody(ImmutableArray<Parse.Source.Text> Par, Block Block);
 
-    private static IStmt StmtFor(ref SourceContext source)
-    {
-        var name = GetId(ref source).ToSourceText(source.Lines);
-        var names = ImmutableArray.CreateBuilder<SourceText>();
-        SkipWs(ref source);
-        // ReSharper disable once InvertIf
-        if (source.Text.Length == 0)
-        {
-            switch (source.Text.Chars[0])
-            {
-                case '=':
-                {
-                    ExpectSymbolic(ref source, "=");
-                    var init = SynExpr(ref source);
-                    ExpectSymbolic(ref source, ",");
-                    var limit = SynExpr(ref source);
-                    SkipWs(ref source);
-                    if (source.Text.Length == 0)
-                        throw source.UnexpectedToken("',|=|in'");
-                    IExpr step = ConstIntExpr.One;
-                    if (source.Text.Chars[0] == ',')
-                    {
-                        ExpectSymbolic(ref source, ",");
-                        step = SynExpr(ref source);
-                    }
+    private record FuncStmt(bool Local, bool Self, ImmutableArray<Parse.Source.Text> Path, FuncBody Body) : IStmt;
 
-                    ExpectLiteral(ref source, "do");
-                    var block = SynBlock(ref source);
-                    ExpectLiteral(ref source, "end");
-                    return new ForNumStmt(name, init, limit, step, block);
-                }
-                case ',':
-                    ExpectSymbolic(ref source, ",");
-                    names.Add(name);
-                    name = GetId(ref source).ToSourceText(source.Lines);
-                    SkipWs(ref source);
-                    // ReSharper disable once InvertIf
-                    if (source.Text.Length != 0)
-                    {
-                        if (source.Text.Chars[0] == ',') goto case ',';
-                        if (source.Text.Chars[0] == 'i') goto case 'i';
-                    }
-
-                    throw source.UnexpectedToken("',|in'");
-                case 'i':
-                {
-                    names.Add(name);
-                    ExpectLiteral(ref source, "in");
-                    var expr = ImmutableArray.CreateBuilder<IExpr>();
-                    Next:
-                    expr.Add(SynExpr(ref source));
-                    SkipWs(ref source);
-                    // ReSharper disable once InvertIf
-                    if (source.Text.Length != 0)
-                    {
-                        if (source.Text.Chars[0] == ',')
-                        {
-                            ExpectSymbolic(ref source, ",");
-                            goto Next;
-                        }
-
-                        if (source.Text.Chars[0] == 'd') goto Body;
-                    }
-
-                    throw source.UnexpectedToken("',|do'");
-                    Body:
-                    ExpectLiteral(ref source, "do");
-                    var block = SynBlock(ref source);
-                    ExpectLiteral(ref source, "end");
-                    return new ForIterStmt(names.MoveToImmutable(), expr.MoveToImmutable(), block);
-                }
-            }
-        }
-
-        throw source.UnexpectedToken("',|=|in'");
-    }
-
-    private record FuncBody(ImmutableArray<SourceText> Par, Block Block);
-
-    private record FuncStmt(bool Local, bool Self, ImmutableArray<SourceText> Path, FuncBody Body) : IStmt;
-
-    private static FuncBody SynFuncBody(ref SourceContext source)
-    {
-        ExpectSymbolic(ref source, "(");
-        var par = ImmutableArray.CreateBuilder<SourceText>();
-        Next:
-        SkipWs(ref source);
-        // ReSharper disable once InvertIf
-        if (source.Text.Length != 0)
-        {
-            switch (source.Text.Chars[0])
-            {
-                case ',':
-                    ExpectSymbolic(ref source, ",");
-                    goto default;
-                case ')':
-                    ExpectSymbolic(ref source, ")");
-                    goto Body;
-                case '.':
-                    if (source.Text.Length >= 3 && source.Text.Chars[..3] is "...")
-                    {
-                        var sym = source.Text[..3];
-                        source.Text = source.Text[3..];
-                        par.Add(sym.ToSourceText(source.Lines));
-                        goto case ')';
-                    }
-
-                    throw source.UnexpectedToken("'...'");
-                default:
-                    par.Add(GetId(ref source).ToSourceText(source.Lines));
-                    goto Next;
-            }
-        }
-
-        throw source.UnexpectedToken("',|)|...|<identifier>'");
-        Body:
-        var block = SynBlock(ref source);
-        ExpectLiteral(ref source, "end");
-        return new FuncBody(par.ToImmutable(), block);
-    }
-
-    private static FuncStmt StmtFunc(ref SourceContext source, bool local)
-    {
-        var self = false;
-        var names = ImmutableArray.CreateBuilder<SourceText>();
-        Next:
-        names.Add(GetId(ref source).ToSourceText(source.Lines));
-        SkipWs(ref source);
-        // ReSharper disable once InvertIf
-        if (source.Text.Length != 0)
-        {
-            switch (source.Text.Chars[0])
-            {
-                case '.':
-                    ExpectSymbolic(ref source, ".");
-                    goto Next;
-                case ':':
-                    self = true;
-                    ExpectSymbolic(ref source, ":");
-                    goto Next;
-                case '(':
-                    return new FuncStmt(local, self, names.MoveToImmutable(), SynFuncBody(ref source));
-            }
-        }
-
-        throw source.UnexpectedToken("'.|:|('");
-    }
-
-    private record AttrName(SourceText Name, ImmutableArray<SourceText> Attrs);
+    private record AttrName(Parse.Source.Text Name, ImmutableArray<Parse.Source.Text> Attrs);
 
     private record LocalsStmt(ImmutableArray<AttrName> Names, ImmutableArray<IExpr> Expr) : IStmt;
 
-    private static LocalsStmt StmtLocals(ref SourceContext source)
-    {
-        var names = ImmutableArray.CreateBuilder<AttrName>();
-        var expr = ImmutableArray.CreateBuilder<IExpr>();
-        Name:
-        var name = GetId(ref source).ToSourceText(source.Lines);
-        // we cannot consume here, so peek from text
-        SkipWs(ref source);
-        Next:
-        // ReSharper disable once InvertIf
-        if (source.Text.Length != 0)
-        {
-            switch (source.Text.Chars[0])
-            {
-                case '<':
-                {
-                    var attrs = ImmutableArray.CreateBuilder<SourceText>();
-                    NextAttr:
-                    ExpectSymbolic(ref source, "<");
-                    attrs.Add(GetId(ref source).ToSourceText(source.Lines));
-                    ExpectSymbolic(ref source, ">");
-                    SkipWs(ref source);
-                    if (source.Text.Length > 0 && source.Text.Chars[0] == '<') goto NextAttr;
-                    names.Add(new AttrName(name, attrs.MoveToImmutable()));
-                    goto Next;
-                }
-                case ',':
-                    ExpectSymbolic(ref source, ",");
-                    goto Name;
-                case '=':
-                {
-                    ExpectSymbolic(ref source, "=");
-                    NextExpr:
-                    expr.Add(SynExpr(ref source));
-                    SkipWs(ref source);
-                    if (source.Text.Length == 0 || source.Text.Chars[0] != ',') break;
-                    ExpectSymbolic(ref source, ",");
-                    goto NextExpr;
-                }
-            }
-        }
-
-        return new LocalsStmt(names.ToImmutable(), expr.ToImmutable());
-    }
-
     private record ReturnStmt(ImmutableArray<IExpr> Expr) : IStmt;
 
-    private static ReturnStmt StmtReturn(ref SourceContext source)
+    private record AssignStmt(ImmutableArray<IExpr> Left, ImmutableArray<IExpr> Right) : IStmt;
+
+    private record ExprStmt(IExpr Expr) : IStmt;
+
+    private static void BuildSyntaxStmt(Parse.ISyntaxBuilder sbd)
     {
-        // this is one of two cases where expr is optional
-        var list = ImmutableArray.CreateBuilder<IExpr>();
-        if (TrySynExpr(ref source, out var expr)) goto Push;
-        Next:
-        expr = SynExpr(ref source);
-        Push:
-        list.Add(expr);
-        SkipWs(ref source);
-        if (source.Text.Length == 0 || source.Text.Chars[0] != ',')
-            return new ReturnStmt(list.ToImmutable());
-        ExpectSymbolic(ref source, ",");
-        goto Next;
+        sbd.Sequence("StmtEmpty")
+            .Drop(";")
+            .Build(_ => new EmptyStmt());
+
+        sbd.Sequence("StmtLabel")
+            .Drop("::")
+            .Anchor()
+            .KeepRule("PpId")
+            .Drop("::")
+            .Build(it => new LabelStmt((Parse.Source.Text)it[0]));
+
+        sbd.Sequence("StmtBreak")
+            .Drop("break")
+            .Build(_ => new BreakStmt());
+
+        sbd.Sequence("StmtGoto")
+            .Drop("goto")
+            .Anchor()
+            .KeepRule("PpId")
+            .Build(it => new GotoStmt((Parse.Source.Text)it[0]));
+
+        sbd.Sequence("StmtDo")
+            .Drop("do")
+            .Anchor()
+            .KeepRule("Block")
+            .Drop("end")
+            .Build(it => new DoStmt((Block)it[0]));
+
+        sbd.Sequence("StmtWhile")
+            .Drop("while")
+            .Anchor()
+            .KeepRule("Expr")
+            .Drop("do")
+            .KeepRule("Block")
+            .Drop("end")
+            .Build(it => new WhileStmt((IExpr)it[0], (Block)it[1]));
+
+        sbd.Sequence("StmtRepeat")
+            .Drop("repeat")
+            .Anchor()
+            .KeepRule("Block")
+            .Drop("until")
+            .KeepRule("Expr")
+            .Build(it => new RepeatStmt((IExpr)it[1], (Block)it[0]));
+
+        sbd.Sequence("StmtIf")
+            .Drop("if")
+            .Anchor()
+            .KeepRule("Expr")
+            .Drop("then")
+            .KeepRule("Block")
+            .KeepRule("StmtIfElseIfClause", 0, int.MaxValue)
+            .KeepRule("StmtIfElseClause", 0, 1)
+            .Drop("end")
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<(IExpr, Block)>();
+                b.Add(((IExpr)it[0], (Block)it[1]));
+                foreach (var eif in (ImmutableArray<object>)it[2]) b.Add(((IExpr, Block))eif);
+                return new IfStmt(b.MoveToImmutable(), (Block?)it[3]);
+            });
+
+        sbd.Sequence("StmtIfElseIfClause")
+            .Drop("elseif")
+            .Anchor()
+            .KeepRule("Expr")
+            .Drop("then")
+            .KeepRule("Block")
+            .Build(it => ((IExpr)it[0], (Block)it[1]));
+
+        sbd.Sequence("StmtIfElseClause")
+            .Drop("else")
+            .Anchor()
+            .KeepRule("Block")
+            .Build(it => (Block)it[1]);
+
+        sbd.Sequence("StmtForNum")
+            .Drop("for")
+            .KeepRule("PpId")
+            .Drop("=")
+            .Anchor()
+            .KeepRule("Expr")
+            .KeepRule("StmtForNumExp", 1, 2)
+            .Drop("do")
+            .KeepRule("Block")
+            .Drop("end")
+            .Build(it =>
+            {
+                var e2 = (ImmutableArray<IExpr>)it[2];
+                return new ForNumStmt(
+                    (Parse.Source.Text)it[0],
+                    (IExpr)it[1],
+                    e2[0],
+                    e2.Length > 1 ? e2[1] : ConstIntExpr.One,
+                    (Block)it[3]
+                );
+            });
+
+        sbd.Sequence("StmtForNumExp")
+            .Drop(",")
+            .Anchor()
+            .KeepRule("Expr")
+            .Build(it => it[0]);
+
+        sbd.Sequence("NameListNext")
+            .Drop(",")
+            .KeepRule("PpId")
+            .Build(it => it[0]);
+
+        sbd.Sequence("NameList")
+            .KeepRule("PpId")
+            .Anchor()
+            .KeepRule("NameListNext", 0, int.MaxValue)
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<Parse.Source.Text>();
+                b.Add((Parse.Source.Text)it[0]);
+                b.AddRange((ImmutableArray<Parse.Source.Text>)it[1]);
+                return b.MoveToImmutable();
+            });
+
+        sbd.Sequence("ExprListNext")
+            .Drop(",")
+            .KeepRule("Expr")
+            .Build(it => it[0]);
+
+        sbd.Sequence("ExprList")
+            .KeepRule("Expr")
+            .Anchor()
+            .KeepRule("ExprListNext", 0, int.MaxValue)
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<IExpr>();
+                b.Add((IExpr)it[0]);
+                b.AddRange((ImmutableArray<IExpr>)it[1]);
+                return b.MoveToImmutable();
+            });
+
+        sbd.Sequence("StmtForIter")
+            .Drop("for")
+            .KeepRule("NameList")
+            .Drop("in")
+            .Anchor()
+            .KeepRule("ExprList")
+            .Drop("do")
+            .KeepRule("Block")
+            .Drop("end")
+            .Build(it => new ForIterStmt(
+                (ImmutableArray<Parse.Source.Text>)it[0],
+                (ImmutableArray<IExpr>)it[1],
+                (Block)it[2]
+            ));
+
+        sbd.Sequence("ParListVarArgA")
+            .Drop(",")
+            .Keep("...")
+            .Build(it => it[0]);
+
+        sbd.Sequence("ParListVarArgB")
+            .Keep("...")
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<Parse.Source.Text>();
+                b.Add((Parse.Source.Text)it[0]);
+                return b.MoveToImmutable();
+            });
+
+        sbd.Sequence("ParListNamed")
+            .KeepRule("NameList")
+            .KeepRule("ParListVarArgA", 0, 1)
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<Parse.Source.Text>();
+                b.AddRange((ImmutableArray<Parse.Source.Text>)it[0]);
+                var o = (ImmutableArray<ImmutableArray<Parse.Source.Text>>)it[1];
+                if (!o.IsEmpty) b.AddRange(o[0]);
+                return b;
+            });
+
+        sbd.Selection("ParList")
+            .BranchRule("ParListNamed")
+            .BranchRule("ParListVarArgsB");
+
+        sbd.Sequence("FuncBody")
+            .Drop("(")
+            .Anchor()
+            .KeepRule("ParList")
+            .Drop(")")
+            .KeepRule("Block")
+            .Drop("end")
+            .Build(it => new FuncBody((ImmutableArray<Parse.Source.Text>)it[0], (Block)it[1]));
+
+        sbd.Sequence("FuncNameDotElement").Drop(".").Keep("PpId").Build(it => it[0]);
+
+        sbd.Sequence("FuncNameSelfElement").Drop(":").Keep("PpId").Build(it => it[0]);
+
+        sbd.Sequence("StmtFunction")
+            .Drop("function")
+            .KeepRule("PpId")
+            .Anchor() // cannot anchor before name for ExprFunctionDef
+            .KeepRule("FuncNameDotElement", 0, int.MaxValue)
+            .KeepRule("FuncNameSelfElement", 0, 1)
+            .KeepRule("FuncBody")
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<Parse.Source.Text>();
+                b.AddRange((ImmutableArray<Parse.Source.Text>)it[1]);
+                var o = (ImmutableArray<Parse.Source.Text>)it[2];
+                b.AddRange(o);
+                return new FuncStmt(false, !o.IsEmpty, b.MoveToImmutable(), (FuncBody)it[3]);
+            });
+
+        sbd.Sequence("StmtLocalFunction")
+            .Drop("local")
+            .Drop("function")
+            .Anchor()
+            .KeepRule("PpId")
+            .KeepRule("FuncBody")
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<Parse.Source.Text>();
+                b.Add((Parse.Source.Text)it[0]);
+                return new FuncStmt(true, false, b.MoveToImmutable(), (FuncBody)it[1]);
+            });
+
+        sbd.Sequence("LocalsInit")
+            .Drop("=")
+            .Keep("ExprList")
+            .Build(it => it[0]);
+
+        sbd.Sequence("Attr")
+            .Drop("<")
+            .Anchor()
+            .KeepRule("PpId")
+            .Drop(">")
+            .Build(it => it[0]);
+
+        sbd.Sequence("AttrName")
+            .KeepRule("PpId")
+            .KeepRule("Attr", 0, int.MaxValue)
+            .Build(it => new AttrName(
+                (Parse.Source.Text)it[0],
+                (ImmutableArray<Parse.Source.Text>)it[1]
+            ));
+
+        sbd.Sequence("AttrNameListNext")
+            .Drop(",")
+            .KeepRule("AttrName")
+            .Build(it => it[0]);
+
+        sbd.Sequence("AttrNameList")
+            .KeepRule("AttrName")
+            .Anchor()
+            .KeepRule("AttrNameListNext", 0, int.MaxValue)
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<AttrName>();
+                b.Add((AttrName)it[0]);
+                b.AddRange((ImmutableArray<AttrName>)it[1]);
+                return b.MoveToImmutable();
+            });
+
+        sbd.Sequence("StmtLocals")
+            .Drop("local")
+            .KeepRule("AttrNameList")
+            .KeepRule("LocalsInit", 0, int.MinValue)
+            .Build(it =>
+            {
+                var o = (ImmutableArray<ImmutableArray<IExpr>>)it[1];
+                return new LocalsStmt(
+                    (ImmutableArray<AttrName>)it[0],
+                    o.IsEmpty ? ImmutableArray<IExpr>.Empty : o[0]
+                );
+            });
+
+        sbd.Sequence("StmtReturn")
+            .Drop("return")
+            .Anchor()
+            .KeepRule("ExprList", 0, 1)
+            .Build(it =>
+            {
+                var o = (ImmutableArray<ImmutableArray<IExpr>>)it[0];
+                return new ReturnStmt(o.IsEmpty ? ImmutableArray<IExpr>.Empty : o[0]);
+            });
+
+        sbd.Sequence("StmtAssign")
+            .KeepRule("ExprList")
+            .Anchor()
+            .Drop("=")
+            .KeepRule("ExprList")
+            .Build(it => new AssignStmt(
+                (ImmutableArray<IExpr>)it[0],
+                (ImmutableArray<IExpr>)it[1]
+            ));
+
+        sbd.Sequence("StmtExpr")
+            .KeepRule("Expr")
+            .Build(it => new ExprStmt((IExpr)it[0]));
+
+        sbd.Selection("Stmt")
+            .BranchRule("StmtEmpty")
+            .BranchRule("StmtLabel")
+            .BranchRule("StmtBreak")
+            .BranchRule("StmtGoto")
+            .BranchRule("StmtDo")
+            .BranchRule("StmtWhile")
+            .BranchRule("StmtRepeat")
+            .BranchRule("StmtForNum")
+            .BranchRule("StmtForIter")
+            .BranchRule("StmtFunction")
+            .BranchRule("StmtLocalFunction")
+            .BranchRule("StmtLocals")
+            .BranchRule("StmtReturn")
+            .BranchRule("StmtAssign")
+            .BranchRule("StmtExpr");
+
+        sbd.Sequence("Block")
+            .KeepRule("Stmt", 0, int.MaxValue)
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<IStmt>();
+                foreach (var o in it) b.Add((IStmt)o);
+                return new Block(b.MoveToImmutable());
+            });
+    }
+
+    private record UnaryOpExpr(IExpr Right, Parse.Source.Text Op) : IExpr;
+
+    private record BinaryOpExpr(IExpr Left, IExpr Right, Parse.Source.Text Op) : IExpr;
+
+    private static void BuildExprLvl(Parse.ISyntaxBuilder sbd, int lvl)
+    {
+        sbd.Selection($"ExprL{lvl}")
+            .BranchRule($"ExprDoL{lvl}")
+            .BranchRule($"ExprL{lvl + 1}");
+    }
+
+    private static void BuildExprOpLvl(Parse.ISyntaxBuilder sbd, int lvl, params ReadOnlySpan<string> ops)
+    {
+        var opb = sbd.Selection($"ExprOpL{lvl}");
+        foreach (var op in ops) opb.Branch(op);
+        BuildExprLvl(sbd, lvl);
+    }
+
+    private static void BuildUnaryExprLvl(Parse.ISyntaxBuilder sbd, int lvl, params ReadOnlySpan<string> ops)
+    {
+        sbd.Sequence($"ExprDoL{lvl}")
+            .KeepRule($"ExprOpL{lvl}")
+            .Anchor()
+            .KeepRule($"ExprL{lvl}")
+            .Build(it => new UnaryOpExpr((IExpr)it[1], (Parse.Source.Text)it[0]));
+        BuildExprOpLvl(sbd, lvl, ops);
+    }
+
+    private record IdExpr(Parse.Source.Text Id) : IExpr;
+
+    private record ConstNilExpr : IExpr
+    {
+        public static readonly ConstNilExpr Nil = new();
+    }
+
+    private record ConstBoolExpr(bool Bool) : IExpr
+    {
+        public static readonly ConstBoolExpr True = new(true);
+        public static readonly ConstBoolExpr False = new(false);
     }
 
     private record ConstIntExpr(long Num) : IExpr
@@ -471,14 +425,451 @@ public static partial class Compile
 
     private record ConstRealExpr(double Num) : IExpr;
 
-    private static IExpr SynExpr(ref SourceContext source)
+    private record ConstStrExpr(string Str) : IExpr;
+
+    private record FunctionDefExpr(FuncBody Body) : IExpr;
+
+    private record Field(IExpr Left, IExpr? Right);
+
+    private record TableConstructExpr(ImmutableArray<Field> Fields) : IExpr;
+
+    private interface IPrefixOperation;
+
+    private record PrefixIndexOperation(IExpr Index) : IPrefixOperation;
+
+    private record PrefixAccessOperation(Parse.Source.Text Access) : IPrefixOperation;
+
+    private record PrefixInvokeOperation(ImmutableArray<IExpr> Args) : IPrefixOperation;
+
+    private record PrefixExpr(IExpr Source, ImmutableArray<IPrefixOperation> Ops) : IExpr;
+
+    private record VarExpandExpr : IExpr
     {
-        return TrySynExpr(ref source, out var expr) ? expr : throw source.UnexpectedToken("<expr>");
+        public static readonly VarExpandExpr Expr = new();
     }
 
-    private static bool TrySynExpr(ref SourceContext source, out IExpr expr)
+    private static void BuildBinaryExprLvl(Parse.ISyntaxBuilder sbd, int lvl, params ReadOnlySpan<string> ops)
     {
-        expr = null!;
-        return false;
+        sbd.Sequence($"ExprDoL{lvl}")
+            .KeepRule($"ExprL{lvl + 1}")
+            .KeepRule($"ExprOpL{lvl}")
+            .Anchor()
+            .KeepRule($"ExprL{lvl}")
+            .Build(it => new BinaryOpExpr((IExpr)it[0], (IExpr)it[2], (Parse.Source.Text)it[1]));
+        BuildExprOpLvl(sbd, lvl, ops);
+    }
+
+    private static void BuildSyntaxExpr(Parse.ISyntaxBuilder sbd)
+    {
+        // prefix expr has the highest priority
+        sbd.Selection("Expr")
+            .BranchRule("PrefixExpr")
+            .BranchRule("ExprL1");
+
+        BuildBinaryExprLvl(sbd, 1, "or");
+        BuildBinaryExprLvl(sbd, 2, "and");
+        BuildBinaryExprLvl(sbd, 3, "<", ">", "<=", ">=", "~=", "==");
+        BuildBinaryExprLvl(sbd, 4, "|");
+        BuildBinaryExprLvl(sbd, 5, "~");
+        BuildBinaryExprLvl(sbd, 6, "&");
+        BuildBinaryExprLvl(sbd, 7, "<<", ">>");
+        BuildBinaryExprLvl(sbd, 8, "..");
+        BuildBinaryExprLvl(sbd, 9, "+", "-");
+        BuildBinaryExprLvl(sbd, 10, "*", "/", "//", "%");
+        BuildUnaryExprLvl(sbd, 11, "not", "#", "-", "~");
+        BuildBinaryExprLvl(sbd, 12, "^");
+
+        // this special rule does not produce a single value
+        sbd.Selection("ExprL14").BranchRule("ExprVarExpand");
+
+        sbd.Sequence("ExprVarExpand").Drop("...").Build(_ => VarExpandExpr.Expr);
+
+        sbd.Selection("PrefixChainElement")
+            .BranchRule("PrefixChainElementIndex")
+            .BranchRule("PrefixChainElementAccess")
+            .BranchRule("PrefixChainElementInvoke");
+
+        sbd.Sequence("PrefixChainElementIndex")
+            .Drop("[")
+            .Anchor()
+            .KeepRule("Expr")
+            .Drop("]")
+            .Build(it => new PrefixIndexOperation((IExpr)it[0]));
+
+        sbd.Sequence("PrefixChainElementAccess")
+            .Drop(".")
+            .KeepRule("PpId")
+            .Build(it => new PrefixAccessOperation((Parse.Source.Text)it[0]));
+
+        sbd.Selection("PrefixChainElementInvoke")
+            .BranchRule("PrefixChainElementInvokeByTable")
+            .BranchRule("PrefixChainElementInvokeByLiteral")
+            .BranchRule("PrefixChainElementInvokeByBracket");
+
+        sbd.Sequence("PrefixChainElementInvokeByTable")
+            .KeepRule("ExprTableConstruct")
+            .Build(it => new PrefixInvokeOperation([(IExpr)it[0]]));
+
+        sbd.Sequence("PrefixChainElementInvokeByLiteral")
+            .KeepRule("ExprLiteral")
+            .Build(it => new PrefixInvokeOperation([(IExpr)it[0]]));
+
+        sbd.Sequence("PrefixChainElementInvokeByBracket")
+            .Drop("(")
+            .Anchor()
+            .KeepRule("ExprList", 0, 1)
+            .Drop(")")
+            .Build(it =>
+            {
+                var o = (ImmutableArray<ImmutableArray<IExpr>>)it[0];
+                return new PrefixInvokeOperation(o.IsEmpty ? ImmutableArray<IExpr>.Empty : o[0]);
+            });
+
+        // these produces a single value
+        sbd.Selection("PrefixChainInitiator")
+            .BranchRule("ExprId")
+            .BranchRule("ExprNil")
+            .BranchRule("ExprTrue")
+            .BranchRule("ExprFalse")
+            .BranchRule("ExprNumeral")
+            .BranchRule("ExprLiteral")
+            .BranchRule("ExprFunctionDef")
+            .BranchRule("ExprTableConstruct");
+
+        sbd.Sequence("PrefixExpr")
+            .KeepRule("PrefixChainInitiator")
+            .KeepRule("PrefixChainElement", 0, int.MaxValue)
+            .Build(it => new PrefixExpr((IExpr)it[0], (ImmutableArray<IPrefixOperation>)it[1]));
+
+        sbd.Sequence("ExprId")
+            .KeepRule("PpId")
+            .Build(it => new IdExpr((Parse.Source.Text)it[0]));
+
+        sbd.Sequence("ExprNil").Drop("nil").Build(_ => ConstNilExpr.Nil);
+
+        sbd.Sequence("ExprTrue").Drop("true").Build(_ => ConstBoolExpr.True);
+
+        sbd.Sequence("ExprFalse").Drop("false").Build(_ => ConstBoolExpr.False);
+
+        sbd.Sequence("ExprNumeral")
+            .KeepRule("PpNum")
+            .Build(it => PpNumToConst((Parse.Source.Text)it[0]));
+
+        sbd.Sequence("ExprLiteral")
+            .KeepRule("PpStr")
+            .Build(it => PpStrToConst((Parse.Source.Text)it[0]));
+
+        sbd.Sequence("ExprFunctionDef")
+            .Drop("function")
+            .KeepRule("FuncBody")
+            .Build(it => new FunctionDefExpr((FuncBody)it[0]));
+
+        sbd.Sequence("ExprTableConstruct")
+            .Drop("{")
+            .Anchor()
+            .KeepRule("FieldList", 0, 1)
+            .Drop("}")
+            .Build(it =>
+            {
+                var o = (ImmutableArray<ImmutableArray<Field>>)it[0];
+                return new TableConstructExpr(o.IsEmpty ? ImmutableArray<Field>.Empty : o[0]);
+            });
+
+        sbd.Sequence("FieldList")
+            .KeepRule("Field")
+            .KeepRule("FieldWithSep", 0, int.MaxValue)
+            .DropRule("FieldSep", 0, 1)
+            .Build(it =>
+            {
+                var b = ImmutableArray.CreateBuilder<Field>();
+                b.Add((Field)it[0]);
+                b.AddRange((ImmutableArray<Field>)it[1]);
+                return new TableConstructExpr(b.MoveToImmutable());
+            });
+
+        sbd.Sequence("FieldWithSep")
+            .DropRule("FieldSep")
+            .KeepRule("Field")
+            .Build(it => it[0]);
+
+        sbd.Selection("Field")
+            .BranchRule("FieldIndex")
+            .BranchRule("FieldAssign")
+            .BranchRule("FieldExpr");
+
+        sbd.Sequence("FieldIndex")
+            .Drop("[")
+            .Anchor()
+            .KeepRule("Expr")
+            .Drop("]")
+            .Drop("=")
+            .KeepRule("Expr")
+            .Build(it => new Field((IExpr)it[0], (IExpr)it[1]));
+
+        sbd.Sequence("FieldAssign")
+            .KeepRule("ExprId")
+            .Drop("=")
+            .Anchor()
+            .KeepRule("Expr")
+            .Build(it => new Field((IExpr)it[0], (IExpr)it[1]));
+
+        sbd.Sequence("FieldExpr")
+            .KeepRule("Expr")
+            .Build(it => new Field((IExpr)it[0], null));
+
+        sbd.Selection("FieldSep").Branch(",").Branch(";");
+    }
+
+    private static IExpr PpNumToConst(Parse.Source.Text text)
+    {
+        var s = text.Chars;
+        var r = 0L;
+        var m = 0;
+        var real = false;
+        var frac = false;
+        var flip = false;
+        if (s.StartsWith("0x") || s.StartsWith("0X"))
+        {
+            var span = s[2..];
+            while (!span.IsEmpty)
+            {
+                switch (span[0])
+                {
+                    case >= '0' and <= '9':
+                        r = (r << 4) | (r - '0');
+                        break;
+                    case >= 'a' and <= 'f':
+                        r = (r << 4) | (r - 'a' + 10);
+                        break;
+                    case >= 'A' and <= 'F':
+                        r = (r << 4) | (r - 'A' + 10);
+                        break;
+                    case '.':
+                        real = true;
+                        continue;
+                    case 'P' or 'p':
+                        frac = true;
+                        break;
+                    default:
+                        throw new Exception("BAD_BINARY_NUMBER");
+                }
+
+                span = span[1..];
+                if (frac) break;
+                if (real) m -= 4;
+            }
+
+            if (frac)
+            {
+                if (span[0] is '-')
+                {
+                    flip = true;
+                    span = span[1..];
+                }
+
+                if (span[0] is '+') span = span[1..];
+                if (span.IsEmpty || !int.TryParse(span, NumberStyles.None, null, out var dec))
+                    throw new Exception("BAD_BINARY_FRACTIONAL");
+                m += flip ? -dec : dec;
+            }
+
+            return m != 0
+                ? new ConstRealExpr(r * Math.Pow(2, m))
+                : new ConstIntExpr(r);
+        }
+        else
+        {
+            var span = s;
+            while (!span.IsEmpty)
+            {
+                switch (span[0])
+                {
+                    case >= '0' and <= '9':
+                        r = (r << 4) | (r - '0');
+                        break;
+                    case '.':
+                        real = true;
+                        continue;
+                    case 'E' or 'e':
+                        frac = true;
+                        break;
+                    default:
+                        throw new Exception("BAD_DECIMAL_NUMBER");
+                }
+
+                span = span[1..];
+                if (frac) break;
+                if (real) --m;
+            }
+
+            if (frac)
+            {
+                if (span[0] is '-')
+                {
+                    flip = true;
+                    span = span[1..];
+                }
+
+                if (span[0] is '+') span = span[1..];
+                if (span.IsEmpty || !int.TryParse(span, NumberStyles.None, null, out var dec))
+                    throw new Exception("BAD_DECIMAL_FRACTIONAL");
+                m += flip ? -dec : dec;
+            }
+
+            return m != 0
+                ? new ConstRealExpr(r * Math.Pow(10, m))
+                : new ConstIntExpr(r);
+        }
+    }
+
+    private static ConstStrExpr PpStrToConst(Parse.Source.Text text)
+    {
+        var s = text.Chars;
+        if (s[0] is '\'' or '"') return new ConstStrExpr(PpStrHandleEscapes(s[1..^1]));
+        var trim = s[1..].IndexOf('[') + 2;
+        s = s[trim..^trim];
+        return new ConstStrExpr(PpStrStandardizeLn(s));
+    }
+
+    private static string PpStrHandleEscapes(ReadOnlySpan<char> s)
+    {
+        var sb = new StringBuilder(s.Length);
+        Span<char> rb = stackalloc char[3];
+        while (!s.IsEmpty)
+        {
+            if (s[0] is '\\' && s.Length >= 2)
+            {
+                switch (s[1])
+                {
+                    case 'a':
+                        sb.Append('\a');
+                        goto case '\0';
+                    case 'b':
+                        sb.Append('\b');
+                        goto case '\0';
+                    case 'f':
+                        sb.Append('\f');
+                        goto case '\0';
+                    case 'n':
+                        sb.Append('\n');
+                        goto case '\0';
+                    case 'r':
+                        sb.Append('\r');
+                        goto case '\0';
+                    case 't':
+                        sb.Append('\t');
+                        goto case '\0';
+                    case 'v':
+                        sb.Append('\v');
+                        goto case '\0';
+                    case '\\':
+                        sb.Append('\\');
+                        goto case '\0';
+                    case '"':
+                        sb.Append('"');
+                        goto case '\0';
+                    case '\'':
+                        sb.Append('\'');
+                        goto case '\0';
+                    case '\r' or '\n':
+                        if (s[1..].StartsWith("\r\n") || s[1..].StartsWith("\n\r"))
+                            s = s[3..];
+                        else
+                            s = s[2..];
+                        sb.Append('\n');
+                        break;
+                    case 'z':
+                        s = s[2..];
+                        while (!s.IsEmpty && s[0] is ' ' or '\t' or '\v' or '\f' or '\r' or '\n') s = s[1..];
+                        break;
+                    case 'x':
+                    {
+                        if (s.Length < 4 || !int.TryParse(s[2..4], NumberStyles.AllowHexSpecifier, null, out var i))
+                            throw new Exception("INVALID_STR_ESC_X");
+                        sb.Append((char)i);
+                        s = s[4..];
+                        break;
+                    }
+                    case 'u':
+                    {
+                        if (s.Length < 3 || s[2] != '{')
+                            throw new Exception("INVALID_STR_ESC_U_H");
+
+                        for (var i = 3; i <= 11 && s.Length > i; ++i)
+                        {
+                            if (s[i] != '}') continue;
+                            if (long.TryParse(s[3..i], NumberStyles.AllowHexSpecifier, null, out var v))
+                                if (v < int.MaxValue)
+                                {
+                                    s = s[(i + 1)..];
+                                    new Rune((int)v).TryEncodeToUtf16(rb, out var l);
+                                    sb.Append(rb[..l]);
+                                }
+
+                            throw new Exception("INVALID_STR_ESC_U_M");
+                        }
+
+                        throw new Exception("INVALID_STR_ESC_U_T");
+                        break;
+                    }
+                    case >= '0' and <= '9':
+                    {
+                        var l = s.Length >= 3 && s[2] is >= '0' and <= '9'
+                            ? s.Length >= 4 && s[3] is >= '0' and <= '9'
+                                ? 4
+                                : 3
+                            : 2;
+                        sb.Append((char)int.Parse(s[1..l], NumberStyles.None));
+                        s = s[l..];
+                        break;
+                    }
+                    case '\0':
+                        s = s[2..];
+                        break;
+                }
+            }
+            else sb.Append(s[0]);
+        }
+
+        return sb.ToString();
+    }
+
+    private static string PpStrStandardizeLn(ReadOnlySpan<char> s)
+    {
+        var init = false;
+        var sb = new StringBuilder(s.Length);
+        while (!s.IsEmpty)
+        {
+            if (s.StartsWith("\r\n") || s.StartsWith("\n\r"))
+            {
+                s = s[2..];
+                if (init) sb.Append('\n');
+            }
+            else if (s[0] is '\n' or '\r')
+            {
+                s = s[1..];
+                if (init) sb.Append('\n');
+            }
+            else
+            {
+                s = s[1..];
+                sb.Append(s[0]);
+            }
+
+            if (!init) init = true;
+        }
+
+        return sb.ToString();
+    }
+
+    private static void BuildSyntax()
+    {
+        var sbd = Parse.CreateSyntaxBuilder();
+        sbd.FromScan<IdScan>("PpId");
+        sbd.FromScan<WsScan>("PpWs");
+        sbd.FromScan<NumScan>("PpNum");
+        sbd.FromScan<StrScan>("PpStr");
+        BuildSyntaxStmt(sbd);
+        BuildSyntaxExpr(sbd);
     }
 }

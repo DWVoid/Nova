@@ -2,6 +2,8 @@
 using Nova;
 
 const int FibN = 40;
+Compile.BuildSyntax();
+/*
 
 var (pp, pe) = MakeProgram();
 {
@@ -16,7 +18,7 @@ var (pp, pe) = MakeProgram();
     RunProgram(pp, pe);
     Console.WriteLine(sw.ElapsedMilliseconds);
     sw.Stop();
-}
+}*/
 return;
 
 static long Fib(int n)
@@ -42,7 +44,7 @@ static (Engine.IProgram, Engine.Value) MakeProgram()
             end
             return fib(n - 1) + fib(n - 2);
         end
-        
+
         function main()
             return fib(40)
         end

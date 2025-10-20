@@ -105,7 +105,7 @@ public static class Parse
     {
         object? Try(ref Source.Cursor c);
     }
-    
+
     public interface IScan
     {
         bool Visit(in Grapheme g);
@@ -238,11 +238,122 @@ public static class Parse
 
         ISelectionBuilder Selection(string name);
 
-        ISequenceBuilder Sequence(string name, bool pack = false);
+        ISequenceBuilder Sequence(string name);
+
+        void Build();
     }
 
-    public static ISyntaxBuilder CreateSyntaxBuilder()
+    private sealed class RuleBuilder : ISyntaxBuilder
     {
-        return null!;
+        private readonly List<object> _list = [];
+        private readonly Dictionary<string, int> _named = [];
+        private readonly Dictionary<string, int> _const = [];
+
+        private sealed record CCst(string C);
+
+        private sealed record CSel(List<int> M);
+
+        private sealed record CSeq(
+            List<(int R, int L, int U, bool A, bool K)> M,
+            Func<ReadOnlySpan<object>, object> T
+        );
+
+        private static readonly object LazyMarker = new();
+
+        private int GetConst(string v)
+        {
+            if (_const.TryGetValue(v, out var c)) return c;
+            var r = _list.Count;
+            _list.Add(new CCst(v));
+            _const.Add(v, r);
+            return r;
+        }
+
+        private int GetNamed(string n)
+        {
+            if (_named.TryGetValue(n, out var c)) return c;
+            var r = _list.Count;
+            _list.Add(LazyMarker);
+            _named.Add(n, r);
+            return r;
+        }
+
+        private sealed class CSeqB(RuleBuilder h, string n) : ISequenceBuilder
+        {
+            private bool _anchor;
+            private readonly List<(int R, int L, int U, bool A, bool K)> _list = [];
+
+            public ISequenceBuilder Anchor()
+            {
+                _anchor = true;
+                return this;
+            }
+
+            private CSeqB Rule(int rule, int min, int max, bool keep)
+            {
+                _list.Add((rule, min, max, _anchor, keep));
+                if (_anchor) _anchor = false;
+                return this;
+            }
+
+            private CSeqB Drop(int rule, int min, int max) => Rule(rule, min, max, false);
+
+            private CSeqB Keep(int rule, int min, int max) => Rule(rule, min, max, true);
+
+            public ISequenceBuilder Drop(string text) => Drop(h.GetConst(text), 1, 1);
+
+            public ISequenceBuilder DropRule(string rule) => Drop(h.GetNamed(rule), 1, 1);
+
+            public ISequenceBuilder DropRule(string rule, int min, int max) => Drop(h.GetNamed(rule), min, max);
+
+            public ISequenceBuilder Keep(string text) => Keep(h.GetConst(text), 1, 1);
+
+            public ISequenceBuilder KeepRule(string rule) => Keep(h.GetNamed(rule), 1, 1);
+
+            public ISequenceBuilder KeepRule(string rule, int min, int max) => Keep(h.GetNamed(rule), min, max);
+
+            public void Build(Func<ReadOnlySpan<object>, object> map)
+            {
+                h._list[h.GetNamed(n)] = new CSeq(_list, map);
+            }
+        }
+
+        private sealed class CSelB(RuleBuilder h, string n) : ISelectionBuilder
+        {
+            private readonly CSel _s = (CSel)(h._list[h.GetNamed(n)] = new CSel([]));
+
+            public ISelectionBuilder Branch(string text)
+            {
+                _s.M.Add(h.GetConst(text));
+                return this;
+            }
+
+            public ISelectionBuilder BranchRule(string rule)
+            {
+                _s.M.Add(h.GetNamed(rule));
+                return this;
+            }
+        }
+
+        public void FromScan<TS>(string name) where TS : struct, IScan
+        {
+            // throw new NotImplementedException();
+        }
+
+        public ISelectionBuilder Selection(string name) => new CSelB(this, name);
+
+        public ISequenceBuilder Sequence(string name) => new CSeqB(this, name);
+        
+        public void Build()
+        {
+            // find unresolved rule names
+            foreach (var (n, i) in _named)
+                if (_list[i] == LazyMarker)
+                    Console.WriteLine($"Rule demanded but unresolved: {n}");
+            Console.WriteLine($"Found {_named.Count} named rules");
+            Console.WriteLine($"Found {_const.Count} const rules");
+        }
     }
+
+    public static ISyntaxBuilder CreateSyntaxBuilder() => new RuleBuilder();
 }

@@ -232,7 +232,7 @@ public static partial class Compile
 
         sbd.Selection("ParList")
             .BranchRule("ParListNamed")
-            .BranchRule("ParListVarArgsB");
+            .BranchRule("ParListVarArgB");
 
         sbd.Sequence("FuncBody")
             .Drop("(")
@@ -405,6 +405,17 @@ public static partial class Compile
         BuildExprOpLvl(sbd, lvl, ops);
     }
 
+    private static void BuildBinaryExprLvl(Parse.ISyntaxBuilder sbd, int lvl, params ReadOnlySpan<string> ops)
+    {
+        sbd.Sequence($"ExprDoL{lvl}")
+            .KeepRule($"ExprL{lvl + 1}")
+            .KeepRule($"ExprOpL{lvl}")
+            .Anchor()
+            .KeepRule($"ExprL{lvl}")
+            .Build(it => new BinaryOpExpr((IExpr)it[0], (IExpr)it[2], (Parse.Source.Text)it[1]));
+        BuildExprOpLvl(sbd, lvl, ops);
+    }
+
     private record IdExpr(Parse.Source.Text Id) : IExpr;
 
     private record ConstNilExpr : IExpr
@@ -448,17 +459,6 @@ public static partial class Compile
         public static readonly VarExpandExpr Expr = new();
     }
 
-    private static void BuildBinaryExprLvl(Parse.ISyntaxBuilder sbd, int lvl, params ReadOnlySpan<string> ops)
-    {
-        sbd.Sequence($"ExprDoL{lvl}")
-            .KeepRule($"ExprL{lvl + 1}")
-            .KeepRule($"ExprOpL{lvl}")
-            .Anchor()
-            .KeepRule($"ExprL{lvl}")
-            .Build(it => new BinaryOpExpr((IExpr)it[0], (IExpr)it[2], (Parse.Source.Text)it[1]));
-        BuildExprOpLvl(sbd, lvl, ops);
-    }
-
     private static void BuildSyntaxExpr(Parse.ISyntaxBuilder sbd)
     {
         // prefix expr has the highest priority
@@ -480,7 +480,7 @@ public static partial class Compile
         BuildBinaryExprLvl(sbd, 12, "^");
 
         // this special rule does not produce a single value
-        sbd.Selection("ExprL14").BranchRule("ExprVarExpand");
+        sbd.Selection("ExprL13").BranchRule("ExprVarExpand");
 
         sbd.Sequence("ExprVarExpand").Drop("...").Build(_ => VarExpandExpr.Expr);
 
@@ -862,7 +862,7 @@ public static partial class Compile
         return sb.ToString();
     }
 
-    private static void BuildSyntax()
+    public static void BuildSyntax()
     {
         var sbd = Parse.CreateSyntaxBuilder();
         sbd.FromScan<IdScan>("PpId");
@@ -871,5 +871,6 @@ public static partial class Compile
         sbd.FromScan<StrScan>("PpStr");
         BuildSyntaxStmt(sbd);
         BuildSyntaxExpr(sbd);
+        sbd.Build();
     }
 }

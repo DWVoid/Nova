@@ -176,14 +176,20 @@ public static class Parse
 
         ISequenceBuilder Sequence(string name);
 
-        void Build();
+        Func<string, Source, object> Build(params ReadOnlySpan<string> symbol);
     }
 
     private sealed class RuleBuilder : ISyntaxBuilder
     {
+        private static readonly object PlaceHolder = new();
+
+        private delegate bool Scan(Context c, ref Source.Cursor s);
+
+        private readonly List<Scan> _scan = [];
         private readonly List<object> _list = [];
         private readonly Dictionary<string, int> _named = [];
         private readonly Dictionary<string, int> _const = [];
+        private readonly Dictionary<string, int> _scans = [];
 
         private sealed record CCst(string C);
 
@@ -271,19 +277,47 @@ public static class Parse
             }
         }
 
+        private static bool ScanFinalize(Context c, Source.Cursor cc, ref Source.Cursor s)
+        {
+            switch (c.TopFrame().Keep)
+            {
+                case 0:
+                    break;
+                case 1:
+                    c.Nodes.Add(s.Slice(in cc));
+                    break;
+                case 2:
+                    c.Nodes.Add(PlaceHolder);
+                    break;
+            }
+
+            s = cc;
+            return true;
+        }
+
+        private void FromScan<TS>(TS init) where TS : struct, IScan
+        {
+            _scan.Add((c, ref s) =>
+            {
+                var cc = s;
+                var scan = init;
+                while (scan.Visit(cc.Current))
+                    if (cc.MoveNext())
+                        break;
+                return scan.Complete() && ScanFinalize(c, cc, ref s);
+            });
+        }
+
         public void FromScan<TS>(string name) where TS : struct, IScan
         {
-            // throw new NotImplementedException();
+            var r = _list.Count;
+            _scans.Add(name, r);
+            FromScan(new TS());
         }
 
         public ISelectionBuilder Selection(string name) => new CSelB(this, name);
 
         public ISequenceBuilder Sequence(string name) => new CSeqB(this, name);
-
-        private interface IRule
-        {
-            object? Try(ref Source.Cursor c);
-        }
 
         private struct Frame
         {
@@ -415,10 +449,6 @@ public static class Parse
         }
 
         private readonly record struct Ins(Op Op, int Arg);
-
-        private delegate bool Scan(Context c, ref Source.Cursor s);
-
-        private static readonly object PlaceHolder = new();
 
         private sealed class Parser(
             Ins[] ins,
@@ -569,23 +599,7 @@ public static class Parse
         }
 
 
-        private sealed class ScanRule<TS>(TS init) : IRule where TS : struct, IScan
-        {
-            public object? Try(ref Source.Cursor c)
-            {
-                var cc = c;
-                var scan = init;
-                while (scan.Visit(cc.Current))
-                    if (cc.MoveNext())
-                        break;
-                if (!scan.Complete()) return null;
-                var r = c.Slice(in cc);
-                c = cc;
-                return r;
-            }
-        }
-
-        public void Build()
+        public Func<string, Source, object> Build(params ReadOnlySpan<string> symbols)
         {
             // find unresolved rule names
             foreach (var (n, i) in _named)
@@ -593,7 +607,7 @@ public static class Parse
                     Console.WriteLine($"Rule demanded but unresolved: {n}");
             Console.WriteLine($"Found {_named.Count} named rules");
             Console.WriteLine($"Found {_const.Count} const rules");
-            // 
+            return (_, _) => null;
         }
     }
 

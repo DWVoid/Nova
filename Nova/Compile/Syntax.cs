@@ -862,7 +862,7 @@ public static partial class Compile
         return sb.ToString();
     }
 
-    public static void BuildSyntax()
+    public static Func<string, Parse.Source, object> BuildSyntax()
     {
         var sbd = Parse.CreateSyntaxBuilder();
         sbd.FromScan<IdScan>("PpId");
@@ -871,6 +871,6 @@ public static partial class Compile
         sbd.FromScan<StrScan>("PpStr");
         BuildSyntaxStmt(sbd);
         BuildSyntaxExpr(sbd);
-        sbd.Build();
+        return sbd.Build("Block");
     }
 }

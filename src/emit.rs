@@ -5,137 +5,227 @@ use crate::ast::{
 };
 use crate::token::{Comment, CommentKind, Span};
 
-pub struct Emitter {
+struct Formatter {
     out: String,
     indent: usize,
+    newline: bool,
 }
+
+impl Formatter {
+    fn new() -> Self {
+        Self {
+            out: String::new(),
+            indent: 0,
+            newline: true,
+        }
+    }
+
+    fn write(&mut self, text: &str) {
+        if self.newline {
+            for _ in 0..self.indent {
+                self.out.push(' ');
+            }
+            self.newline = false;
+        }
+        self.out.push_str(text);
+    }
+
+    fn write_line(&mut self, text: &str) {
+        if self.newline {
+            for _ in 0..self.indent {
+                self.out.push(' ');
+            }
+        }
+        self.out.push_str(text);
+        self.out.push('\n');
+        self.newline = true;
+    }
+
+    fn indent(&mut self) {
+        self.indent += 2;
+    }
+
+    fn unindent(&mut self) {
+        self.indent -= 2;
+    }
+}
+
+struct ListFormatter<'a> {
+    fmt: &'a mut Formatter,
+    first: bool,
+}
+
+impl<'a> ListFormatter<'a> {
+    fn new(fmt: &'a mut Formatter) -> Self {
+        let res = Self { fmt, first: true };
+        res.fmt.write("[");
+        res
+    }
+
+    fn new_named(fmt: &'a mut Formatter, name: &str) -> Self {
+        let res = Self { fmt, first: true };
+        res.fmt.write(name);
+        res.fmt.write(" [");
+        res
+    }
+
+    fn next(&mut self, field: impl Fn(&mut Formatter)) {
+        if self.first {
+            self.fmt.write_line("");
+            self.fmt.indent();
+            self.first = false
+        } else {
+            self.fmt.write_line(",")
+        }
+        field(self.fmt);
+    }
+}
+
+impl Drop for ListFormatter<'_> {
+    fn drop(&mut self) {
+        if !self.first {
+            self.fmt.write_line("");
+            self.fmt.unindent();
+        }
+        self.fmt.write("]")
+    }
+}
+
+struct TableFormatter<'a> {
+    fmt: &'a mut Formatter,
+    first: bool,
+}
+
+impl<'a> TableFormatter<'a> {
+    fn new(fmt: &'a mut Formatter, name: &str) -> Self {
+        let res = Self { fmt, first: true };
+        res.fmt.write(name);
+        res.fmt.write(" {");
+        res
+    }
+
+    fn next(&mut self, name: &str, field: impl Fn(&mut Formatter)) {
+        if self.first {
+            self.fmt.write_line("");
+            self.fmt.indent();
+            self.first = false
+        } else {
+            self.fmt.write_line(",")
+        }
+        self.fmt.write(name);
+        self.fmt.write(": ");
+        field(self.fmt);
+    }
+}
+
+impl Drop for TableFormatter<'_> {
+    fn drop(&mut self) {
+        if !self.first {
+            self.fmt.write_line("");
+            self.fmt.unindent();
+        }
+        self.fmt.write("}")
+    }
+}
+pub struct Emitter {}
 
 impl Emitter {
     pub fn emit_chunk(chunk: &Chunk) -> String {
-        let mut emitter = Self {
-            out: String::new(),
-            indent: 0,
-        };
-        emitter.write_chunk(chunk);
-        emitter.out
+        let mut fmt = Formatter::new();
+        Self::write_chunk(&mut fmt, chunk);
+        fmt.out
     }
 
-    fn write_chunk(&mut self, chunk: &Chunk) {
-        self.line("Chunk {");
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(chunk.span)));
-        self.write_comments_field("comments", &chunk.comments);
-        self.write_block_field("block", &chunk.block);
-        self.indent -= 2;
-        self.line("}");
+    fn write_chunk(f: &mut Formatter, chunk: &Chunk) {
+        let mut ftb = TableFormatter::new(f, "Chunk");
+        ftb.next("span", |f| f.write(&format_span(chunk.span)));
+        ftb.next("comments", |f| Self::write_comments(f, &chunk.comments));
+        ftb.next("block", |f| Self::write_block(f, &chunk.block));
     }
 
-    fn write_block_field(&mut self, label: &str, block: &Block) {
-        self.indent_line(&format!("{label}: Block {{"));
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(block.span)));
-        self.indent_line("stats: [");
-        self.indent += 2;
-        for stat in &block.stats {
-            self.write_stat(stat);
+    fn write_comments(f: &mut Formatter, comments: &[Comment]) {
+        let mut ftb = ListFormatter::new(f);
+        for comment in comments {
+            ftb.next(|f| Self::write_comment(f, comment));
         }
-        self.indent -= 2;
-        self.line("],");
-        self.write_ret_stat_field(&block.ret);
-        self.indent -= 2;
-        self.line("},");
     }
 
-    fn write_stat(&mut self, stat: &Stat) {
-        self.indent_line("Stat {");
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(stat.span)));
-        self.indent_line("kind: ");
-        self.write_stat_kind(&stat.kind);
-        self.line(",");
-        self.indent -= 2;
-        self.line("},");
+    fn write_comment(f: &mut Formatter, comment: &Comment) {
+        let mut ftb = TableFormatter::new(f, "Comment");
+        ftb.next("kind", |f| f.write(format_comment_kind(comment.kind)));
+        ftb.next("text", |f| f.write(&quoted(&comment.text)));
+        ftb.next("span", |f| f.write(&*format_span(comment.span)));
     }
 
-    fn write_stat_kind(&mut self, kind: &StatKind) {
+    fn write_block(f: &mut Formatter, block: &Block) {
+        let mut ftb = TableFormatter::new(f, "Block");
+        ftb.next("span", |f| f.write(&format_span(block.span)));
+        ftb.next("stats", |f| {
+            let mut ftb = ListFormatter::new(f);
+            for stat in &block.stats {
+                ftb.next(|f| Self::write_stat(f, stat));
+            }
+        });
+        ftb.next("ret", |f| Self::write_ret_stat(f, &block.ret));
+    }
+
+    fn write_stat(f: &mut Formatter, stat: &Stat) {
+        let mut ftb = TableFormatter::new(f, "Stat");
+        ftb.next("span", |f| f.write(&format_span(stat.span)));
+        ftb.next("kind", |f| Self::write_stat_kind(f, &stat.kind));
+    }
+
+    fn write_stat_kind(f: &mut Formatter, kind: &StatKind) {
         match kind {
-            StatKind::Empty => self.inline("StatKind::Empty"),
+            StatKind::Empty => f.write("StatKind::Empty"),
             StatKind::Assign { vars, exprs } => {
-                self.inline("StatKind::Assign {");
-                self.newline();
-                self.indent += 2;
-                self.write_vars_field("vars", vars);
-                self.write_exprs_field("exprs", exprs);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::Assign");
+                ftb.next("vars", |f| Self::write_vars(f, vars));
+                ftb.next("exprs", |f| Self::write_exps(f, exprs));
             }
             StatKind::LocalAssign { names, exprs } => {
-                self.inline("StatKind::LocalAssign {");
-                self.newline();
-                self.indent += 2;
-                self.write_local_names_field("names", names);
-                self.write_exprs_field("exprs", exprs);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::LocalAssign");
+                ftb.next("names", |f| Self::write_local_names(f, names));
+                ftb.next("exprs", |f| Self::write_exps(f, exprs));
             }
             StatKind::LocalFunction { name, func } => {
-                self.inline("StatKind::LocalFunction {");
-                self.newline();
-                self.indent += 2;
-                self.write_name_field("name", name);
-                self.write_func_body_field("func", func);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::LocalFunction");
+                ftb.next("name", |f| Self::write_name(f, name));
+                ftb.next("func", |f| Self::write_func_body(f, func));
             }
             StatKind::Function { name, func } => {
-                self.inline("StatKind::Function {");
-                self.newline();
-                self.indent += 2;
-                self.write_func_name_field("name", name);
-                self.write_func_body_field("func", func);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::Function");
+                ftb.next("name", |f| Self::write_func_name(f, name));
+                ftb.next("func", |f| Self::write_func_body(f, func));
             }
             StatKind::Do { block } => {
-                self.inline("StatKind::Do {");
-                self.newline();
-                self.indent += 2;
-                self.write_block_field("block", block);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::Do");
+                ftb.next("block", |f| Self::write_block(f, block));
             }
             StatKind::While { cond, block } => {
-                self.inline("StatKind::While {");
-                self.newline();
-                self.indent += 2;
-                self.write_exp_field("cond", cond);
-                self.write_block_field("block", block);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::While");
+                ftb.next("cond", |f| Self::write_exp(f, cond));
+                ftb.next("block", |f| Self::write_block(f, block));
             }
             StatKind::Repeat { block, cond } => {
-                self.inline("StatKind::Repeat {");
-                self.newline();
-                self.indent += 2;
-                self.write_block_field("block", block);
-                self.write_exp_field("cond", cond);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::Repeat");
+                ftb.next("block", |f| Self::write_block(f, block));
+                ftb.next("cond", |f| Self::write_exp(f, cond));
             }
-            StatKind::If { clauses, else_block } => {
-                self.inline("StatKind::If {");
-                self.newline();
-                self.indent += 2;
-                self.indent_line("clauses: [");
-                self.indent += 2;
-                for clause in clauses {
-                    self.write_if_clause(clause);
-                }
-                self.indent -= 2;
-                self.line("],");
-                self.write_optional_block_field("else_block", else_block.as_ref());
-                self.indent -= 2;
-                self.indent_line("}")
+            StatKind::If {
+                clauses,
+                else_block,
+            } => {
+                let mut ftb = TableFormatter::new(f, "StatKind::If");
+                ftb.next("clauses", |f| {
+                    let mut ftb = ListFormatter::new(f);
+                    for clause in clauses {
+                        ftb.next(|f| Self::write_if_clause(f, clause));
+                    }
+                });
+                ftb.next("else_block", |f| {
+                    Self::write_optional_block(f, else_block.as_ref())
+                });
             }
             StatKind::ForNumeric {
                 name,
@@ -144,489 +234,271 @@ impl Emitter {
                 step,
                 block,
             } => {
-                self.inline("StatKind::ForNumeric {");
-                self.newline();
-                self.indent += 2;
-                self.write_name_field("name", name);
-                self.write_exp_field("start", start);
-                self.write_exp_field("end", end);
-                self.write_optional_exp_field("step", step.as_ref());
-                self.write_block_field("block", block);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::ForNumeric");
+                ftb.next("name", |f| Self::write_name(f, name));
+                ftb.next("start", |f| Self::write_exp(f, start));
+                ftb.next("end", |f| Self::write_exp(f, end));
+                ftb.next("step", |f| Self::write_optional_exp(f, step.as_ref()));
+                ftb.next("block", |f| Self::write_block(f, block));
             }
-            StatKind::ForGeneric { names, exprs, block } => {
-                self.inline("StatKind::ForGeneric {");
-                self.newline();
-                self.indent += 2;
-                self.write_names_field("names", names);
-                self.write_exprs_field("exprs", exprs);
-                self.write_block_field("block", block);
-                self.indent -= 2;
-                self.indent_line("}")
+            StatKind::ForGeneric {
+                names,
+                exprs,
+                block,
+            } => {
+                let mut ftb = TableFormatter::new(f, "StatKind::ForGeneric");
+                ftb.next("names", |f| Self::write_names(f, names));
+                ftb.next("exprs", |f| Self::write_exps(f, exprs));
+                ftb.next("block", |f| Self::write_block(f, block));
             }
-            StatKind::Break => self.inline("StatKind::Break"),
+            StatKind::Break => f.write("StatKind::Break"),
             StatKind::Goto { label } => {
-                self.inline("StatKind::Goto {");
-                self.newline();
-                self.indent += 2;
-                self.write_name_field("label", label);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::Goto");
+                ftb.next("label", |f| Self::write_name(f, label));
             }
             StatKind::Label { label } => {
-                self.inline("StatKind::Label {");
-                self.newline();
-                self.indent += 2;
-                self.write_name_field("label", label);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::Label");
+                ftb.next("label", |f| Self::write_name(f, label));
             }
             StatKind::Call { call } => {
-                self.inline("StatKind::Call {");
-                self.newline();
-                self.indent += 2;
-                self.write_call_field("call", call);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "StatKind::Call");
+                ftb.next("call", |f| Self::write_function_call(f, call));
             }
         }
     }
 
-    fn write_ret_stat_field(&mut self, ret: &Option<RetStat>) {
-        match ret {
-            Some(ret) => {
-                self.indent_line("ret: RetStat {");
-                self.indent += 2;
-                self.line(&format!("span: {},", format_span(ret.span)));
-                self.write_exprs_field("exprs", &ret.exprs);
-                self.indent -= 2;
-                self.line("},");
-            }
-            None => self.line("ret: None,"),
+    fn write_vars(f: &mut Formatter, vars: &[Var]) {
+        let mut ftb = ListFormatter::new(f);
+        for var in vars {
+            ftb.next(|f| Self::write_var(f, var));
         }
     }
 
-    fn write_if_clause(&mut self, clause: &crate::ast::IfClause) {
-        self.indent_line("IfClause {");
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(clause.span)));
-        self.write_exp_field("cond", &clause.cond);
-        self.write_block_field("block", &clause.block);
-        self.indent -= 2;
-        self.line("},");
+    fn write_var(f: &mut Formatter, var: &Var) {
+        let mut ftb = TableFormatter::new(f, "Var");
+        ftb.next("span", |f| f.write(&format_span(var.span)));
+        ftb.next("kind", |f| match &var.kind {
+            VarKind::Name(name) => Self::write_name(f, name),
+            VarKind::Index { prefix, index } => {
+                let mut ftb = TableFormatter::new(f, "VarKind::Index");
+                ftb.next("prefix", |f| Self::write_prefix(f, prefix));
+                ftb.next("index", |f| Self::write_exp(f, index));
+            }
+            VarKind::Field { prefix, name } => {
+                let mut ftb = TableFormatter::new(f, "VarKind::Field");
+                ftb.next("prefix", |f| Self::write_prefix(f, prefix));
+                ftb.next("name", |f| Self::write_name(f, name));
+            }
+        });
     }
 
-    fn write_exp(&mut self, exp: &Exp) {
-        self.indent_line("Exp {");
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(exp.span)));
-        self.indent_line("kind: ");
-        self.write_exp_kind(&exp.kind);
-        self.line(",");
-        self.indent -= 2;
-        self.line("},");
-    }
-
-    fn write_exp_kind(&mut self, kind: &ExpKind) {
-        match kind {
-            ExpKind::Nil => self.inline("ExpKind::Nil"),
-            ExpKind::Bool(value) => self.inline(&format!("ExpKind::Bool({value})")),
-            ExpKind::Number(text) => self.inline(&format!("ExpKind::Number({})", quoted(text))),
-            ExpKind::String(text) => self.inline(&format!("ExpKind::String({})", quoted(text))),
-            ExpKind::Vararg => self.inline("ExpKind::Vararg"),
-            ExpKind::FuncDef(func) => {
-                self.inline("ExpKind::FuncDef {");
-                self.newline();
-                self.indent += 2;
-                self.write_func_body_field("func", func);
-                self.indent -= 2;
-                self.indent_line("}")
-            }
-            ExpKind::Table(table) => {
-                self.inline("ExpKind::Table {");
-                self.newline();
-                self.indent += 2;
-                self.write_table_field("table", table);
-                self.indent -= 2;
-                self.indent_line("}")
-            }
-            ExpKind::Prefix(prefix) => {
-                self.inline("ExpKind::Prefix {");
-                self.newline();
-                self.indent += 2;
-                self.write_prefix_field("prefix", prefix);
-                self.indent -= 2;
-                self.indent_line("}")
-            }
-            ExpKind::Unary { op, exp } => {
-                self.inline("ExpKind::Unary {");
-                self.newline();
-                self.indent += 2;
-                self.write_unary_op_field("op", *op);
-                self.write_exp_field("exp", exp);
-                self.indent -= 2;
-                self.indent_line("}")
-            }
-            ExpKind::Binary { op, left, right } => {
-                self.inline("ExpKind::Binary {");
-                self.newline();
-                self.indent += 2;
-                self.write_binary_op_field("op", *op);
-                self.write_exp_field("left", left);
-                self.write_exp_field("right", right);
-                self.indent -= 2;
-                self.indent_line("}")
-            }
+    fn write_names(f: &mut Formatter, names: &[Name]) {
+        let mut ftb = ListFormatter::new(f);
+        for name in names {
+            ftb.next(|f| Self::write_name(f, name));
         }
     }
 
-    fn write_table_field(&mut self, label: &str, table: &TableConstructor) {
-        self.indent_line(&format!("{label}: TableConstructor {{"));
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(table.span)));
-        self.indent_line("fields: [");
-        self.indent += 2;
-        for field in &table.fields {
-            self.write_field(field);
-        }
-        self.indent -= 2;
-        self.line("],");
-        self.indent -= 2;
-        self.line("},");
+    fn write_name(f: &mut Formatter, name: &Name) {
+        let mut ftb = TableFormatter::new(f, "Name");
+        ftb.next("span", |f| f.write(&format_span(name.span)));
+        ftb.next("value", |f| f.write(&quoted(&name.value)));
     }
 
-    fn write_field(&mut self, field: &Field) {
-        self.indent_line("Field {");
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(field.span)));
-        match &field.key {
-            Some(key) => {
-                self.indent_line("key: ");
-                self.write_field_key(key);
-                self.line(",");
-            }
-            None => self.line("key: None,"),
-        }
-        self.write_exp_field("value", &field.value);
-        self.indent -= 2;
-        self.line("},");
+    fn write_prefix(f: &mut Formatter, prefix: &PrefixExp) {
+        let mut ftb = TableFormatter::new(f, "PrefixExp");
+        ftb.next("span", |f| f.write(&format_span(prefix.span)));
+        ftb.next("kind", |f| match &prefix.kind {
+            PrefixExpKind::Var(var) => Self::write_var(f, var),
+            PrefixExpKind::Call(call) => Self::write_call(f, call),
+            PrefixExpKind::Paren(exp) => Self::write_exp(f, exp),
+        });
     }
 
-    fn write_field_key(&mut self, key: &FieldKey) {
-        match key {
-            FieldKey::Exp(exp) => {
-                self.inline("FieldKey::Exp(");
-                self.newline();
-                self.indent += 2;
-                self.write_exp(exp);
-                self.indent -= 2;
-                self.indent_line(")");
-            }
-            FieldKey::Name(name) => {
-                self.inline("FieldKey::Name(");
-                self.newline();
-                self.indent += 2;
-                self.write_name(name);
-                self.indent -= 2;
-                self.indent_line(")");
-            }
-        }
+    fn write_call(f: &mut Formatter, call: &FunctionCall) {
+        let mut ftb = TableFormatter::new(f, "FunctionCall");
+        ftb.next("span", |f| f.write(&format_span(call.span)));
+        ftb.next("prefix", |f| Self::write_prefix(f, &call.prefix));
+        ftb.next("kind", |f| match &call.method {
+            Some(method) => Self::write_name(f, method),
+            None => f.write("None"),
+        });
+        ftb.next("args", |f| Self::write_args(f, &call.args));
     }
 
-    fn write_func_body_field(&mut self, label: &str, func: &FuncBody) {
-        self.indent_line(&format!("{label}: FuncBody {{"));
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(func.span)));
-        self.write_names_field("params", &func.params);
-        self.line(&format!("is_vararg: {},", func.is_vararg));
-        self.write_block_field("block", &func.block);
-        self.indent -= 2;
-        self.line("},");
-    }
-
-    fn write_func_name_field(&mut self, label: &str, name: &FuncName) {
-        self.indent_line(&format!("{label}: FuncName {{"));
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(name.span)));
-        self.write_names_field("names", &name.names);
-        match &name.method {
-            Some(method) => {
-                self.indent_line("method: ");
-                self.write_name(method);
-                self.line(",");
-            }
-            None => self.line("method: None,"),
-        }
-        self.indent -= 2;
-        self.line("},");
-    }
-
-    fn write_prefix_field(&mut self, label: &str, prefix: &PrefixExp) {
-        self.indent_line(&format!("{label}: PrefixExp {{"));
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(prefix.span)));
-        self.indent_line("kind: ");
-        match &prefix.kind {
-            PrefixExpKind::Var(var) => {
-                self.write_var(var);
-            }
-            PrefixExpKind::Call(call) => {
-                self.write_call(call);
-            }
-            PrefixExpKind::Paren(exp) => {
-                self.write_exp(exp);
-            }
-        }
-        self.line(",");
-        self.indent -= 2;
-        self.line("},");
-    }
-
-    fn write_call_field(&mut self, label: &str, call: &FunctionCall) {
-        self.indent_line(&format!("{label}: FunctionCall {{"));
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(call.span)));
-        self.write_prefix_field("prefix", &call.prefix);
-        match &call.method {
-            Some(method) => {
-                self.indent_line("method: ");
-                self.write_name(method);
-                self.line(",");
-            }
-            None => self.line("method: None,"),
-        }
-        self.write_args_field("args", &call.args);
-        self.indent -= 2;
-        self.line("},");
-    }
-
-    fn write_args_field(&mut self, label: &str, args: &Args) {
-        self.indent_line(&format!("{label}: Args {{"));
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(args.span)));
-        self.indent_line("kind: ");
-        match &args.kind {
+    fn write_args(f: &mut Formatter, args: &Args) {
+        let mut ftb = TableFormatter::new(f, "Args");
+        ftb.next("span", |f| f.write(&format_span(args.span)));
+        ftb.next("kind", |f| match &args.kind {
             ArgsKind::ExpList(exprs) => {
-                self.inline("ArgsKind::ExpList[");
-                if exprs.is_empty() {
-                    self.inline("]");
-                } else {
-                    self.newline();
-                    self.indent += 2;
-                    for exp in exprs {
-                        self.write_exp(exp);
-                    }
-                    self.indent -= 2;
-                    self.indent_line("]");
+                let mut ftb = ListFormatter::new_named(f, "ArgsKind::ExpList");
+                for exp in exprs {
+                    ftb.next(|f| Self::write_exp(f, exp));
                 }
             }
             ArgsKind::Table(table) => {
-                self.inline("ArgsKind::Table {");
-                self.newline();
-                self.indent += 2;
-                self.write_table_field("table", table);
-                self.indent -= 2;
-                self.indent_line("}")
+                let mut ftb = TableFormatter::new(f, "ArgsKind::Table");
+                ftb.next("table", |f| Self::write_table(f, table));
             }
             ArgsKind::String(text) => {
-                self.inline(&format!("ArgsKind::String({})", quoted(text)));
+                f.write(&format!("ArgsKind::String({})", quoted(text)));
             }
+        });
+    }
+
+    fn write_exps(f: &mut Formatter, exps: &[Exp]) {
+        let mut ftb = ListFormatter::new(f);
+        for exp in exps {
+            ftb.next(|f| Self::write_exp(f, exp));
         }
-        self.line(",");
-        self.indent -= 2;
-        self.line("},");
     }
 
-    fn write_var(&mut self, var: &Var) {
-        self.indent_line("Var {");
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(var.span)));
-        self.indent_line("kind: ");
-        match &var.kind {
-            VarKind::Name(name) => self.write_name(name),
-            VarKind::Index { prefix, index } => {
-                self.inline("VarKind::Index {");
-                self.newline();
-                self.indent += 2;
-                self.write_prefix_field("prefix", prefix);
-                self.write_exp_field("index", index);
-                self.indent -= 2;
-                self.indent_line("}")
+    fn write_exp(f: &mut Formatter, exp: &Exp) {
+        let mut ftb = TableFormatter::new(f, "Exp");
+        ftb.next("span", |f| f.write(&format_span(exp.span)));
+        ftb.next("kind", |f| match &exp.kind {
+            ExpKind::Nil => f.write("ExpKind::Nil"),
+            ExpKind::Bool(value) => f.write(&format!("ExpKind::Bool({value})")),
+            ExpKind::Number(text) => f.write(&format!("ExpKind::Number({})", quoted(text))),
+            ExpKind::String(text) => f.write(&format!("ExpKind::String({})", quoted(text))),
+            ExpKind::Vararg => f.write("ExpKind::Vararg"),
+            ExpKind::FuncDef(func) => {
+                let mut ftb = TableFormatter::new(f, "ExpKind::FuncDef");
+                ftb.next("func", |f| Self::write_func_body(f, func));
             }
-            VarKind::Field { prefix, name } => {
-                self.inline("VarKind::Field {");
-                self.newline();
-                self.indent += 2;
-                self.write_prefix_field("prefix", prefix);
-                self.write_name_field("name", name);
-                self.indent -= 2;
-                self.indent_line("}")
+            ExpKind::Table(table) => {
+                let mut ftb = TableFormatter::new(f, "ExpKind::Table");
+                ftb.next("table", |f| Self::write_table(f, table));
             }
-        }
-        self.line(",");
-        self.indent -= 2;
-        self.line("},");
+            ExpKind::Prefix(prefix) => {
+                let mut ftb = TableFormatter::new(f, "ExpKind::Prefix");
+                ftb.next("prefix", |f| Self::write_prefix(f, prefix));
+            }
+            ExpKind::Unary { op, exp } => {
+                let mut ftb = TableFormatter::new(f, "ExpKind::Unary");
+                ftb.next("op", |f| f.write(format_un_op(*op)));
+                ftb.next("exp", |f| Self::write_exp(f, exp));
+            }
+            ExpKind::Binary { op, left, right } => {
+                let mut ftb = TableFormatter::new(f, "ExpKind::Binary");
+                ftb.next("op", |f| f.write(format_bin_op(*op)));
+                ftb.next("left", |f| Self::write_exp(f, left));
+                ftb.next("right", |f| Self::write_exp(f, right));
+            }
+        });
     }
 
-    fn write_name(&mut self, name: &Name) {
-        self.indent_line("Name {");
-        self.indent += 2;
-        self.line(&format!("value: {},", quoted(&name.value)));
-        self.line(&format!("span: {},", format_span(name.span)));
-        self.indent -= 2;
-        self.line("}");
+    fn write_func_name(f: &mut Formatter, name: &FuncName) {
+        let mut ftb = TableFormatter::new(f, "FuncName");
+        ftb.next("span", |f| f.write(&format_span(name.span)));
+        ftb.next("names", |f| Self::write_names(f, &name.names));
+        ftb.next("method", |f| match &name.method {
+            Some(method) => Self::write_name(f, method),
+            None => f.write("None"),
+        });
     }
 
-    fn write_local_names_field(&mut self, label: &str, names: &[LocalName]) {
-        self.indent_line(&format!("{label}: ["));
-        self.indent += 2;
+    fn write_func_body(f: &mut Formatter, func: &FuncBody) {
+        let mut ftb = TableFormatter::new(f, "FuncBody");
+        ftb.next("span", |f| f.write(&format_span(func.span)));
+        ftb.next("params", |f| Self::write_names(f, &func.params));
+        ftb.next("is_vararg", |f| f.write(&format!("{}", func.is_vararg)));
+        ftb.next("block", |f| Self::write_block(f, &func.block));
+    }
+
+    fn write_table(f: &mut Formatter, table: &TableConstructor) {
+        let mut ftb = TableFormatter::new(f, "TableConstructor");
+        ftb.next("span", |f| f.write(&format_span(table.span)));
+        ftb.next("fields", |f| {
+            let mut ftb = ListFormatter::new(f);
+            for field in &table.fields {
+                ftb.next(|f| Self::write_field(f, field));
+            }
+        });
+    }
+
+    fn write_field(f: &mut Formatter, field: &Field) {
+        let mut ftb = TableFormatter::new(f, "Field");
+        ftb.next("span", |f| f.write(&format_span(field.span)));
+        ftb.next("key", |f| match &field.key {
+            Some(key) => match key {
+                FieldKey::Exp(exp) => {
+                    f.write_line("FieldKey::Exp(");
+                    f.indent();
+                    Self::write_exp(f, exp);
+                    f.unindent();
+                    f.write(")");
+                }
+                FieldKey::Name(name) => {
+                    f.write_line("FieldKey::Name(");
+                    f.indent();
+                    Self::write_name(f, name);
+                    f.unindent();
+                    f.write(")");
+                }
+            },
+            None => f.write("None"),
+        });
+        ftb.next("value", |f| Self::write_exp(f, &field.value));
+    }
+
+    fn write_local_names(f: &mut Formatter, names: &[LocalName]) {
+        let mut ftb = ListFormatter::new(f);
         for name in names {
-            self.write_local_name(name);
-        }
-        self.indent -= 2;
-        self.line("],");
-    }
-
-    fn write_local_name(&mut self, local: &LocalName) {
-        self.indent_line("LocalName {");
-        self.indent += 2;
-        self.write_name_field("name", &local.name);
-        match local.attr {
-            Some(attr) => self.line(&format!("attr: {},", format_local_attr(attr))),
-            None => self.line("attr: None,"),
-        }
-        self.indent -= 2;
-        self.line("},");
-    }
-
-    fn write_vars_field(&mut self, label: &str, vars: &[Var]) {
-        self.indent_line(&format!("{label}: ["));
-        self.indent += 2;
-        for var in vars {
-            self.write_var(var);
-        }
-        self.indent -= 2;
-        self.line("],");
-    }
-
-    fn write_names_field(&mut self, label: &str, names: &[Name]) {
-        self.indent_line(&format!("{label}: ["));
-        self.indent += 2;
-        for name in names {
-            self.write_name(name);
-            self.line(",");
-        }
-        self.indent -= 2;
-        self.line("],");
-    }
-
-    fn write_name_field(&mut self, label: &str, name: &Name) {
-        self.indent_line(&format!("{label}: "));
-        self.write_name(name);
-        self.line(",");
-    }
-
-    fn write_exp_field(&mut self, label: &str, exp: &Exp) {
-        self.indent_line(&format!("{label}: "));
-        self.write_exp(exp);
-        self.line(",");
-    }
-
-    fn write_exprs_field(&mut self, label: &str, exprs: &[Exp]) {
-        self.indent_line(&format!("{label}: ["));
-        self.indent += 2;
-        for exp in exprs {
-            self.write_exp(exp);
-        }
-        self.indent -= 2;
-        self.line("],");
-    }
-
-    fn write_optional_exp_field(&mut self, label: &str, exp: Option<&Exp>) {
-        match exp {
-            Some(exp) => self.write_exp_field(label, exp),
-            None => self.line(&format!("{label}: None,")),
+            ftb.next(|f| Self::write_local_name(f, name));
         }
     }
 
-    fn write_optional_block_field(&mut self, label: &str, block: Option<&Block>) {
+    fn write_local_name(f: &mut Formatter, local: &LocalName) {
+        let mut ftb = TableFormatter::new(f, "LocalName");
+        ftb.next("name", |f| Self::write_name(f, &local.name));
+        ftb.next("attr", |f| match local.attr {
+            Some(attr) => f.write(format_local_attr(attr)),
+            None => f.write("None"),
+        });
+    }
+
+    fn write_if_clause(f: &mut Formatter, clause: &crate::ast::IfClause) {
+        let mut ftb = TableFormatter::new(f, "IfClause");
+        ftb.next("span", |f| f.write(&format_span(clause.span)));
+        ftb.next("cond", |f| Self::write_exp(f, &clause.cond));
+        ftb.next("block", |f| Self::write_block(f, &clause.block));
+    }
+
+    fn write_optional_block(f: &mut Formatter, block: Option<&Block>) {
         match block {
-            Some(block) => self.write_block_field(label, block),
-            None => self.line(&format!("{label}: None,")),
+            Some(block) => Self::write_block(f, block),
+            None => f.write("None"),
         }
     }
 
-    fn write_call(&mut self, call: &FunctionCall) {
-        self.indent_line("FunctionCall {");
-        self.indent += 2;
-        self.line(&format!("span: {},", format_span(call.span)));
-        self.write_prefix_field("prefix", &call.prefix);
-        match &call.method {
-            Some(method) => {
-                self.indent_line("method: ");
-                self.write_name(method);
-                self.line(",");
+    fn write_optional_exp(f: &mut Formatter, exp: Option<&Exp>) {
+        match exp {
+            Some(exp) => Self::write_exp(f, exp),
+            None => f.write("None"),
+        }
+    }
+
+    fn write_function_call(f: &mut Formatter, call: &FunctionCall) {
+        let mut ftb = TableFormatter::new(f, "FunctionCall");
+        ftb.next("span", |f| f.write(&format_span(call.span)));
+        ftb.next("prefix", |f| Self::write_prefix(f, &call.prefix));
+        ftb.next("method", |f| match &call.method {
+            Some(method) => Self::write_name(f, method),
+            None => f.write("None"),
+        });
+        ftb.next("args", |f| Self::write_args(f, &call.args));
+    }
+
+    fn write_ret_stat(fmt: &mut Formatter, ret: &Option<RetStat>) {
+        match ret {
+            Some(ret) => {
+                let mut ftb = TableFormatter::new(fmt, "StatKind::RetStat");
+                ftb.next("span", |f| f.write(&format_span(ret.span)));
+                ftb.next("exprs", |f| Self::write_exps(f, &ret.exprs));
             }
-            None => self.line("method: None,"),
+            None => fmt.write("None"),
         }
-        self.write_args_field("args", &call.args);
-        self.indent -= 2;
-        self.line("}");
-    }
-
-    fn write_comments_field(&mut self, label: &str, comments: &[Comment]) {
-        if comments.is_empty() {
-            return;
-        }
-        self.indent_line(&format!("{label}: ["));
-        self.indent += 2;
-        for comment in comments {
-            self.write_comment(comment);
-        }
-        self.indent -= 2;
-        self.line("],");
-    }
-
-    fn write_comment(&mut self, comment: &Comment) {
-        self.indent_line("Comment {");
-        self.indent += 2;
-        self.line(&format!("kind: {},", format_comment_kind(comment.kind)));
-        self.line(&format!("text: {},", quoted(&comment.text)));
-        self.line(&format!("span: {},", format_span(comment.span)));
-        self.indent -= 2;
-        self.line("},");
-    }
-
-    fn write_unary_op_field(&mut self, label: &str, op: UnOp) {
-        self.line(&format!("{label}: {},", format_un_op(op)));
-    }
-
-    fn write_binary_op_field(&mut self, label: &str, op: BinOp) {
-        self.line(&format!("{label}: {},", format_bin_op(op)));
-    }
-
-    fn line(&mut self, text: &str) {
-        self.indent_line(text);
-    }
-
-    fn indent_line(&mut self, text: &str) {
-        for _ in 0..self.indent {
-            self.out.push(' ');
-        }
-        self.out.push_str(text);
-        self.out.push('\n');
-    }
-
-    fn inline(&mut self, text: &str) {
-        for _ in 0..self.indent {
-            self.out.push(' ');
-        }
-        self.out.push_str(text);
-    }
-
-    fn newline(&mut self) {
-        self.out.push('\n');
     }
 }
 
@@ -703,7 +575,9 @@ fn format_bin_op(op: BinOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Block, Chunk, Exp, ExpKind, LocalName, Name, Stat, StatKind, TableConstructor};
+    use crate::ast::{
+        Block, Chunk, Exp, ExpKind, LocalName, Name, Stat, StatKind, TableConstructor,
+    };
     use crate::token::{Comment, CommentKind, Position, Span};
 
     fn span() -> Span {
@@ -753,12 +627,9 @@ mod tests {
             text: "-- \"hi\"".to_string(),
             span: span(),
         };
-        let mut emitter = Emitter {
-            out: String::new(),
-            indent: 0,
-        };
-        emitter.write_comment(&comment);
-        assert!(emitter.out.contains("\\\"hi\\\""));
+        let mut f = Formatter::new();
+        Emitter::write_comment(&mut f, &comment);
+        assert!(f.out.contains("\\\"hi\\\""));
     }
 
     #[test]
@@ -771,11 +642,8 @@ mod tests {
             span: span(),
             kind: ExpKind::Table(table),
         };
-        let mut emitter = Emitter {
-            out: String::new(),
-            indent: 0,
-        };
-        emitter.write_exp(&exp);
-        assert!(emitter.out.contains("TableConstructor"));
+        let mut f = Formatter::new();
+        Emitter::write_exp(&mut f, &exp);
+        assert!(f.out.contains("TableConstructor"));
     }
 }

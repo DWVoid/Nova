@@ -1,17 +1,9 @@
 use super::{BlockEnd, ParseError, Parser};
-use crate::ast::{
-    Comments, FuncName, IfClause, LocalAttr, LocalName, Name, PrefixExpKind, RetStat, Stat, StatKind,
-};
+use crate::ast::{FuncName, IfClause, LocalAttr, LocalName, Name, PrefixExpKind, RetStat, Stat, StatKind};
 use crate::token::{Keyword, Span, Symbol, TokenKind};
 
 impl Parser {
     pub(super) fn parse_block(&mut self, end: BlockEnd) -> Result<crate::ast::Block, ParseError> {
-        self.detached_stack.push(Vec::new());
-        let leading = if self.is_block_end(end) {
-            self.take_leading_comments_for_current()
-        } else {
-            Vec::new()
-        };
         let start = self.current().span.start;
         let mut end_pos = start;
         let mut stats = Vec::new();
@@ -19,8 +11,7 @@ impl Parser {
 
         while !self.is_block_end(end) {
             if self.is_keyword(Keyword::Return) {
-                let ret_leading = self.take_leading_comments_for_current();
-                let retstat = self.parse_retstat(ret_leading)?;
+                let retstat = self.parse_retstat()?;
                 end_pos = retstat.span.end;
                 ret = Some(retstat);
                 if self.is_symbol(Symbol::Semi) {
@@ -35,64 +26,53 @@ impl Parser {
         }
 
         let span = Span::new(start, end_pos);
-        let detached = self.detached_stack.pop().unwrap_or_default();
-        Ok(crate::ast::Block {
-            span,
-            leading_comments: leading,
-            stats,
-            ret,
-            detached_comments: detached,
-            trailing_comments: self.take_leading_comments_for_current(),
-        })
+        Ok(crate::ast::Block { span, stats, ret })
     }
 
     pub(super) fn parse_stat(&mut self) -> Result<Stat, ParseError> {
-        let leading = self.take_leading_comments_for_current();
         if self.is_symbol(Symbol::Semi) {
             let token = self.advance();
             return Ok(Stat {
                 span: token.span,
-                leading_comments: leading,
                 kind: StatKind::Empty,
-                trailing_comments: token.trailing,
             });
         }
 
         if self.is_keyword(Keyword::Local) {
-            return self.parse_local_stat(leading);
+            return self.parse_local_stat();
         }
         if self.is_keyword(Keyword::Function) {
-            return self.parse_function_stat(leading);
+            return self.parse_function_stat();
         }
         if self.is_keyword(Keyword::Do) {
-            return self.parse_do_stat(leading);
+            return self.parse_do_stat();
         }
         if self.is_keyword(Keyword::While) {
-            return self.parse_while_stat(leading);
+            return self.parse_while_stat();
         }
         if self.is_keyword(Keyword::Repeat) {
-            return self.parse_repeat_stat(leading);
+            return self.parse_repeat_stat();
         }
         if self.is_keyword(Keyword::If) {
-            return self.parse_if_stat(leading);
+            return self.parse_if_stat();
         }
         if self.is_keyword(Keyword::For) {
-            return self.parse_for_stat(leading);
+            return self.parse_for_stat();
         }
         if self.is_keyword(Keyword::Break) {
-            return self.parse_break_stat(leading);
+            return self.parse_break_stat();
         }
         if self.is_keyword(Keyword::Goto) {
-            return self.parse_goto_stat(leading);
+            return self.parse_goto_stat();
         }
         if self.is_label_start() {
-            return self.parse_label_stat(leading);
+            return self.parse_label_stat();
         }
 
-        self.parse_assign_or_call(leading)
+        self.parse_assign_or_call()
     }
 
-    fn parse_retstat(&mut self, leading: Comments) -> Result<RetStat, ParseError> {
+    fn parse_retstat(&mut self) -> Result<RetStat, ParseError> {
         let token = self.expect_keyword(Keyword::Return)?;
         let mut exprs = Vec::new();
         if !self.is_block_end(BlockEnd::Nested) && !self.is_symbol(Symbol::Semi) {
@@ -102,31 +82,22 @@ impl Parser {
             .last()
             .map(|exp| exp.span)
             .unwrap_or(token.span);
-        let trailing_comments = exprs
-            .last()
-            .map(|exp| exp.trailing_comments.clone())
-            .unwrap_or_else(|| self.take_trailing_comments());
         Ok(RetStat {
             span: token.span.merge(end_span),
-            leading_comments: leading,
             exprs,
-            trailing_comments,
         })
     }
 
-    fn parse_local_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_local_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::Local)?;
         if self.is_keyword(Keyword::Function) {
             let _fn_token = self.expect_keyword(Keyword::Function)?;
             let name = self.parse_name()?;
             let func = self.parse_func_body(token.span.start)?;
-            let trailing = self.take_trailing_comments();
             let span = token.span.merge(func.span);
             return Ok(Stat {
                 span,
-                leading_comments: leading,
                 kind: StatKind::LocalFunction { name, func },
-                trailing_comments: trailing,
             });
         }
 
@@ -145,46 +116,35 @@ impl Parser {
             end_span = exprs.last().map(|e| e.span).unwrap_or(eq.span);
         }
 
-        let trailing_comments = exprs
-            .last()
-            .map(|exp| exp.trailing_comments.clone())
-            .unwrap_or_else(|| self.take_trailing_comments());
         Ok(Stat {
             span: token.span.merge(end_span),
-            leading_comments: leading,
             kind: StatKind::LocalAssign { names, exprs },
-            trailing_comments,
         })
     }
 
-    fn parse_function_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_function_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::Function)?;
         let name = self.parse_func_name()?;
         let func = self.parse_func_body(token.span.start)?;
-        let trailing = self.take_trailing_comments();
         let span = token.span.merge(func.span);
         Ok(Stat {
             span,
-            leading_comments: leading,
             kind: StatKind::Function { name, func },
-            trailing_comments: trailing,
         })
     }
 
-    fn parse_do_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_do_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::Do)?;
         let block = self.parse_block(BlockEnd::Nested)?;
         let end = self.expect_keyword(Keyword::End)?;
         let span = token.span.merge(end.span);
         Ok(Stat {
             span,
-            leading_comments: leading,
             kind: StatKind::Do { block },
-            trailing_comments: self.take_trailing_comments(),
         })
     }
 
-    fn parse_while_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_while_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::While)?;
         let cond = self.parse_exp(0)?;
         let _do = self.expect_keyword(Keyword::Do)?;
@@ -193,13 +153,11 @@ impl Parser {
         let span = token.span.merge(end.span);
         Ok(Stat {
             span,
-            leading_comments: leading,
             kind: StatKind::While { cond, block },
-            trailing_comments: self.take_trailing_comments(),
         })
     }
 
-    fn parse_repeat_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_repeat_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::Repeat)?;
         let block = self.parse_block(BlockEnd::Nested)?;
         let _until = self.expect_keyword(Keyword::Until)?;
@@ -207,13 +165,11 @@ impl Parser {
         let span = token.span.merge(cond.span);
         Ok(Stat {
             span,
-            leading_comments: leading,
             kind: StatKind::Repeat { block, cond },
-            trailing_comments: self.take_trailing_comments(),
         })
     }
 
-    fn parse_if_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_if_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::If)?;
         let cond = self.parse_exp(0)?;
         let _then = self.expect_keyword(Keyword::Then)?;
@@ -222,30 +178,17 @@ impl Parser {
         let first_span = token.span.merge(block.span);
         clauses.push(IfClause {
             span: first_span,
-            leading_comments: leading,
             cond,
             block,
-            trailing_comments: self.take_trailing_comments(),
         });
 
         while self.is_keyword(Keyword::ElseIf) {
-            let else_leading = self.take_leading_comments();
             let elseif = self.expect_keyword(Keyword::ElseIf)?;
             let cond = self.parse_exp(0)?;
             let _then = self.expect_keyword(Keyword::Then)?;
             let block = self.parse_block(BlockEnd::Nested)?;
             let span = elseif.span.merge(block.span);
-            clauses.push(IfClause {
-                span,
-                leading_comments: if else_leading.is_empty() {
-                    elseif.leading
-                } else {
-                    else_leading
-                },
-                cond,
-                block,
-                trailing_comments: self.take_trailing_comments(),
-            });
+            clauses.push(IfClause { span, cond, block });
         }
 
         let else_block = if self.is_keyword(Keyword::Else) {
@@ -258,16 +201,11 @@ impl Parser {
         let span = token.span.merge(end.span);
         Ok(Stat {
             span,
-            leading_comments: clauses
-                .first()
-                .map(|c| c.leading_comments.clone())
-                .unwrap_or_else(Vec::new),
             kind: StatKind::If { clauses, else_block },
-            trailing_comments: self.take_trailing_comments(),
         })
     }
 
-    fn parse_for_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_for_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::For)?;
         let name = self.parse_name()?;
         if self.is_symbol(Symbol::Assign) {
@@ -287,7 +225,6 @@ impl Parser {
             let span = token.span.merge(end_kw.span);
             return Ok(Stat {
                 span,
-                leading_comments: leading,
                 kind: StatKind::ForNumeric {
                     name,
                     start,
@@ -295,7 +232,6 @@ impl Parser {
                     step,
                     block,
                 },
-                trailing_comments: self.take_trailing_comments(),
             });
         }
 
@@ -312,35 +248,29 @@ impl Parser {
         let span = token.span.merge(end_kw.span);
         Ok(Stat {
             span,
-            leading_comments: leading,
             kind: StatKind::ForGeneric { names, exprs, block },
-            trailing_comments: self.take_trailing_comments(),
         })
     }
 
-    fn parse_break_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_break_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::Break)?;
         Ok(Stat {
             span: token.span,
-            leading_comments: leading,
             kind: StatKind::Break,
-            trailing_comments: self.take_trailing_comments(),
         })
     }
 
-    fn parse_goto_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_goto_stat(&mut self) -> Result<Stat, ParseError> {
         let token = self.expect_keyword(Keyword::Goto)?;
         let label = self.parse_name()?;
         let span = token.span.merge(label.span);
         Ok(Stat {
             span,
-            leading_comments: leading,
             kind: StatKind::Goto { label },
-            trailing_comments: self.take_trailing_comments(),
         })
     }
 
-    fn parse_label_stat(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_label_stat(&mut self) -> Result<Stat, ParseError> {
         let start = self.expect_symbol(Symbol::Colon)?;
         let _second = self.expect_symbol(Symbol::Colon)?;
         let label = self.parse_name()?;
@@ -349,13 +279,11 @@ impl Parser {
         let span = start.span.merge(end.span);
         Ok(Stat {
             span,
-            leading_comments: leading,
             kind: StatKind::Label { label },
-            trailing_comments: self.take_trailing_comments(),
         })
     }
 
-    fn parse_assign_or_call(&mut self, leading: Comments) -> Result<Stat, ParseError> {
+    fn parse_assign_or_call(&mut self) -> Result<Stat, ParseError> {
         let prefix = self.parse_prefixexp()?;
         match &prefix.kind {
             PrefixExpKind::Call(call) => {
@@ -367,9 +295,7 @@ impl Parser {
                 }
                 return Ok(Stat {
                     span: prefix.span,
-                    leading_comments: leading,
                     kind: StatKind::Call { call: call.clone() },
-                    trailing_comments: prefix.trailing_comments.clone(),
                 });
             }
             PrefixExpKind::Var(_) => {}
@@ -414,18 +340,12 @@ impl Parser {
         let eq = self.expect_symbol(Symbol::Assign)?;
         let exprs = self.parse_exp_list(0)?;
         let end_span = exprs.last().map(|e| e.span).unwrap_or(eq.span);
-        let trailing_comments = exprs
-            .last()
-            .map(|e| e.trailing_comments.clone())
-            .unwrap_or_else(Vec::new);
         Ok(Stat {
             span: vars
                 .last()
                 .map(|v| v.span.merge(end_span))
                 .unwrap_or(end_span),
-            leading_comments: leading,
             kind: StatKind::Assign { vars, exprs },
-            trailing_comments,
         })
     }
 
@@ -472,13 +392,7 @@ impl Parser {
         if let Some(method) = &method {
             span = span.merge(method.span);
         }
-        Ok(FuncName {
-            span,
-            leading_comments: names[0].leading_comments.clone(),
-            names,
-            method,
-            trailing_comments: Vec::new(),
-        })
+        Ok(FuncName { span, names, method })
     }
 
     pub(crate) fn parse_name(&mut self) -> Result<Name, ParseError> {
@@ -488,8 +402,6 @@ impl Parser {
             return Ok(Name {
                 value,
                 span: token.span,
-                leading_comments: token.leading,
-                trailing_comments: token.trailing,
             });
         }
         Err(ParseError {

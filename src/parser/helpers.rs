@@ -1,6 +1,5 @@
 use super::{Assoc, BlockEnd, ParseError, Parser};
-use crate::ast::Comments;
-use crate::token::{Comment, Keyword, Symbol, Token, TokenKind};
+use crate::token::{Keyword, Symbol, Token, TokenKind};
 use std::mem;
 
 impl Parser {
@@ -71,7 +70,7 @@ impl Parser {
         })
     }
 
-    pub(crate) fn take_leading_comments(&mut self) -> Comments {
+    pub(crate) fn take_leading_comments(&mut self) -> Vec<crate::token::Comment> {
         let mut comments = Vec::new();
         if self.tokens.is_empty() {
             return comments;
@@ -80,7 +79,7 @@ impl Parser {
         comments
     }
 
-    pub(crate) fn take_trailing_comments(&mut self) -> Comments {
+    pub(crate) fn take_trailing_comments(&mut self) -> Vec<crate::token::Comment> {
         if self.index == 0 {
             return Vec::new();
         }
@@ -157,51 +156,4 @@ impl Parser {
             _ => None,
         }
     }
-
-    pub(crate) fn take_leading_comments_for_current(&mut self) -> Comments {
-        if self.tokens.is_empty() {
-            return Vec::new();
-        }
-        let target_line = self.current().span.start.line;
-        let comments = mem::take(&mut self.tokens[self.index].leading);
-        let (leading, detached) = split_leading_comments(comments, target_line);
-        if !detached.is_empty() {
-            if let Some(slot) = self.detached_stack.last_mut() {
-                slot.extend(detached);
-            }
-        }
-        leading
-    }
-}
-
-fn split_leading_comments(comments: Comments, target_line: usize) -> (Comments, Comments) {
-    if comments.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    let mut groups: Vec<Vec<Comment>> = Vec::new();
-    for comment in comments {
-        if let Some(last_group) = groups.last_mut() {
-            let prev = last_group.last().unwrap();
-            if comment.span.start.line > prev.span.end.line + 1 {
-                groups.push(vec![comment]);
-            } else {
-                last_group.push(comment);
-            }
-        } else {
-            groups.push(vec![comment]);
-        }
-    }
-
-    let last_comment = groups.last().and_then(|group| group.last());
-    if let Some(last_comment) = last_comment {
-        if target_line > last_comment.span.end.line + 1 {
-            let detached: Comments = groups.into_iter().flatten().collect();
-            return (Vec::new(), detached);
-        }
-    }
-
-    let leading = groups.pop().unwrap_or_default();
-    let detached: Comments = groups.into_iter().flatten().collect();
-    (leading, detached)
 }

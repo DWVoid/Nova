@@ -24,9 +24,8 @@ impl Emitter {
         self.line("Chunk {");
         self.indent += 2;
         self.line(&format!("span: {},", format_span(chunk.span)));
-        self.write_comments_field("leading_comments", &chunk.leading_comments);
+        self.write_comments_field("comments", &chunk.comments);
         self.write_block_field("block", &chunk.block);
-        self.write_comments_field("trailing_comments", &chunk.trailing_comments);
         self.indent -= 2;
         self.line("}");
     }
@@ -35,7 +34,6 @@ impl Emitter {
         self.indent_line(&format!("{label}: Block {{"));
         self.indent += 2;
         self.line(&format!("span: {},", format_span(block.span)));
-        self.write_comments_field("leading_comments", &block.leading_comments);
         self.indent_line("stats: [");
         self.indent += 2;
         for stat in &block.stats {
@@ -44,8 +42,6 @@ impl Emitter {
         self.indent -= 2;
         self.line("],");
         self.write_ret_stat_field(&block.ret);
-        self.write_comments_field("detached_comments", &block.detached_comments);
-        self.write_comments_field("trailing_comments", &block.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -54,11 +50,9 @@ impl Emitter {
         self.indent_line("Stat {");
         self.indent += 2;
         self.line(&format!("span: {},", format_span(stat.span)));
-        self.write_comments_field("leading_comments", &stat.leading_comments);
         self.indent_line("kind: ");
         self.write_stat_kind(&stat.kind);
         self.line(",");
-        self.write_comments_field("trailing_comments", &stat.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -73,7 +67,7 @@ impl Emitter {
                 self.write_vars_field("vars", vars);
                 self.write_exprs_field("exprs", exprs);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::LocalAssign { names, exprs } => {
                 self.inline("StatKind::LocalAssign {");
@@ -82,7 +76,7 @@ impl Emitter {
                 self.write_local_names_field("names", names);
                 self.write_exprs_field("exprs", exprs);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::LocalFunction { name, func } => {
                 self.inline("StatKind::LocalFunction {");
@@ -91,7 +85,7 @@ impl Emitter {
                 self.write_name_field("name", name);
                 self.write_func_body_field("func", func);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::Function { name, func } => {
                 self.inline("StatKind::Function {");
@@ -100,7 +94,7 @@ impl Emitter {
                 self.write_func_name_field("name", name);
                 self.write_func_body_field("func", func);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::Do { block } => {
                 self.inline("StatKind::Do {");
@@ -108,7 +102,7 @@ impl Emitter {
                 self.indent += 2;
                 self.write_block_field("block", block);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::While { cond, block } => {
                 self.inline("StatKind::While {");
@@ -117,7 +111,7 @@ impl Emitter {
                 self.write_exp_field("cond", cond);
                 self.write_block_field("block", block);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::Repeat { block, cond } => {
                 self.inline("StatKind::Repeat {");
@@ -126,7 +120,7 @@ impl Emitter {
                 self.write_block_field("block", block);
                 self.write_exp_field("cond", cond);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::If { clauses, else_block } => {
                 self.inline("StatKind::If {");
@@ -141,7 +135,7 @@ impl Emitter {
                 self.line("],");
                 self.write_optional_block_field("else_block", else_block.as_ref());
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::ForNumeric {
                 name,
@@ -159,7 +153,7 @@ impl Emitter {
                 self.write_optional_exp_field("step", step.as_ref());
                 self.write_block_field("block", block);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::ForGeneric { names, exprs, block } => {
                 self.inline("StatKind::ForGeneric {");
@@ -169,7 +163,7 @@ impl Emitter {
                 self.write_exprs_field("exprs", exprs);
                 self.write_block_field("block", block);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::Break => self.inline("StatKind::Break"),
             StatKind::Goto { label } => {
@@ -178,7 +172,7 @@ impl Emitter {
                 self.indent += 2;
                 self.write_name_field("label", label);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::Label { label } => {
                 self.inline("StatKind::Label {");
@@ -186,7 +180,7 @@ impl Emitter {
                 self.indent += 2;
                 self.write_name_field("label", label);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             StatKind::Call { call } => {
                 self.inline("StatKind::Call {");
@@ -194,7 +188,7 @@ impl Emitter {
                 self.indent += 2;
                 self.write_call_field("call", call);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
         }
     }
@@ -205,9 +199,7 @@ impl Emitter {
                 self.indent_line("ret: RetStat {");
                 self.indent += 2;
                 self.line(&format!("span: {},", format_span(ret.span)));
-                self.write_comments_field("leading_comments", &ret.leading_comments);
                 self.write_exprs_field("exprs", &ret.exprs);
-                self.write_comments_field("trailing_comments", &ret.trailing_comments);
                 self.indent -= 2;
                 self.line("},");
             }
@@ -219,10 +211,8 @@ impl Emitter {
         self.indent_line("IfClause {");
         self.indent += 2;
         self.line(&format!("span: {},", format_span(clause.span)));
-        self.write_comments_field("leading_comments", &clause.leading_comments);
         self.write_exp_field("cond", &clause.cond);
         self.write_block_field("block", &clause.block);
-        self.write_comments_field("trailing_comments", &clause.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -231,11 +221,9 @@ impl Emitter {
         self.indent_line("Exp {");
         self.indent += 2;
         self.line(&format!("span: {},", format_span(exp.span)));
-        self.write_comments_field("leading_comments", &exp.leading_comments);
         self.indent_line("kind: ");
         self.write_exp_kind(&exp.kind);
         self.line(",");
-        self.write_comments_field("trailing_comments", &exp.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -253,7 +241,7 @@ impl Emitter {
                 self.indent += 2;
                 self.write_func_body_field("func", func);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             ExpKind::Table(table) => {
                 self.inline("ExpKind::Table {");
@@ -261,7 +249,7 @@ impl Emitter {
                 self.indent += 2;
                 self.write_table_field("table", table);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             ExpKind::Prefix(prefix) => {
                 self.inline("ExpKind::Prefix {");
@@ -269,7 +257,7 @@ impl Emitter {
                 self.indent += 2;
                 self.write_prefix_field("prefix", prefix);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             ExpKind::Unary { op, exp } => {
                 self.inline("ExpKind::Unary {");
@@ -278,7 +266,7 @@ impl Emitter {
                 self.write_unary_op_field("op", *op);
                 self.write_exp_field("exp", exp);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             ExpKind::Binary { op, left, right } => {
                 self.inline("ExpKind::Binary {");
@@ -288,7 +276,7 @@ impl Emitter {
                 self.write_exp_field("left", left);
                 self.write_exp_field("right", right);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
         }
     }
@@ -297,7 +285,6 @@ impl Emitter {
         self.indent_line(&format!("{label}: TableConstructor {{"));
         self.indent += 2;
         self.line(&format!("span: {},", format_span(table.span)));
-        self.write_comments_field("leading_comments", &table.leading_comments);
         self.indent_line("fields: [");
         self.indent += 2;
         for field in &table.fields {
@@ -305,7 +292,6 @@ impl Emitter {
         }
         self.indent -= 2;
         self.line("],");
-        self.write_comments_field("trailing_comments", &table.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -314,7 +300,6 @@ impl Emitter {
         self.indent_line("Field {");
         self.indent += 2;
         self.line(&format!("span: {},", format_span(field.span)));
-        self.write_comments_field("leading_comments", &field.leading_comments);
         match &field.key {
             Some(key) => {
                 self.indent_line("key: ");
@@ -324,7 +309,6 @@ impl Emitter {
             None => self.line("key: None,"),
         }
         self.write_exp_field("value", &field.value);
-        self.write_comments_field("trailing_comments", &field.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -354,11 +338,9 @@ impl Emitter {
         self.indent_line(&format!("{label}: FuncBody {{"));
         self.indent += 2;
         self.line(&format!("span: {},", format_span(func.span)));
-        self.write_comments_field("leading_comments", &func.leading_comments);
         self.write_names_field("params", &func.params);
         self.line(&format!("is_vararg: {},", func.is_vararg));
         self.write_block_field("block", &func.block);
-        self.write_comments_field("trailing_comments", &func.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -367,7 +349,6 @@ impl Emitter {
         self.indent_line(&format!("{label}: FuncName {{"));
         self.indent += 2;
         self.line(&format!("span: {},", format_span(name.span)));
-        self.write_comments_field("leading_comments", &name.leading_comments);
         self.write_names_field("names", &name.names);
         match &name.method {
             Some(method) => {
@@ -377,7 +358,6 @@ impl Emitter {
             }
             None => self.line("method: None,"),
         }
-        self.write_comments_field("trailing_comments", &name.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -386,7 +366,6 @@ impl Emitter {
         self.indent_line(&format!("{label}: PrefixExp {{"));
         self.indent += 2;
         self.line(&format!("span: {},", format_span(prefix.span)));
-        self.write_comments_field("leading_comments", &prefix.leading_comments);
         self.indent_line("kind: ");
         match &prefix.kind {
             PrefixExpKind::Var(var) => {
@@ -400,7 +379,6 @@ impl Emitter {
             }
         }
         self.line(",");
-        self.write_comments_field("trailing_comments", &prefix.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -409,7 +387,6 @@ impl Emitter {
         self.indent_line(&format!("{label}: FunctionCall {{"));
         self.indent += 2;
         self.line(&format!("span: {},", format_span(call.span)));
-        self.write_comments_field("leading_comments", &call.leading_comments);
         self.write_prefix_field("prefix", &call.prefix);
         match &call.method {
             Some(method) => {
@@ -420,7 +397,6 @@ impl Emitter {
             None => self.line("method: None,"),
         }
         self.write_args_field("args", &call.args);
-        self.write_comments_field("trailing_comments", &call.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -429,7 +405,6 @@ impl Emitter {
         self.indent_line(&format!("{label}: Args {{"));
         self.indent += 2;
         self.line(&format!("span: {},", format_span(args.span)));
-        self.write_comments_field("leading_comments", &args.leading_comments);
         self.indent_line("kind: ");
         match &args.kind {
             ArgsKind::ExpList(exprs) => {
@@ -452,14 +427,13 @@ impl Emitter {
                 self.indent += 2;
                 self.write_table_field("table", table);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             ArgsKind::String(text) => {
                 self.inline(&format!("ArgsKind::String({})", quoted(text)));
             }
         }
         self.line(",");
-        self.write_comments_field("trailing_comments", &args.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -468,7 +442,6 @@ impl Emitter {
         self.indent_line("Var {");
         self.indent += 2;
         self.line(&format!("span: {},", format_span(var.span)));
-        self.write_comments_field("leading_comments", &var.leading_comments);
         self.indent_line("kind: ");
         match &var.kind {
             VarKind::Name(name) => self.write_name(name),
@@ -479,7 +452,7 @@ impl Emitter {
                 self.write_prefix_field("prefix", prefix);
                 self.write_exp_field("index", index);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
             VarKind::Field { prefix, name } => {
                 self.inline("VarKind::Field {");
@@ -488,11 +461,10 @@ impl Emitter {
                 self.write_prefix_field("prefix", prefix);
                 self.write_name_field("name", name);
                 self.indent -= 2;
-                self.indent_line("}");
+                self.indent_line("}")
             }
         }
         self.line(",");
-        self.write_comments_field("trailing_comments", &var.trailing_comments);
         self.indent -= 2;
         self.line("},");
     }
@@ -502,8 +474,6 @@ impl Emitter {
         self.indent += 2;
         self.line(&format!("value: {},", quoted(&name.value)));
         self.line(&format!("span: {},", format_span(name.span)));
-        self.write_comments_field("leading_comments", &name.leading_comments);
-        self.write_comments_field("trailing_comments", &name.trailing_comments);
         self.indent -= 2;
         self.line("}");
     }
@@ -591,7 +561,6 @@ impl Emitter {
         self.indent_line("FunctionCall {");
         self.indent += 2;
         self.line(&format!("span: {},", format_span(call.span)));
-        self.write_comments_field("leading_comments", &call.leading_comments);
         self.write_prefix_field("prefix", &call.prefix);
         match &call.method {
             Some(method) => {
@@ -602,7 +571,6 @@ impl Emitter {
             None => self.line("method: None,"),
         }
         self.write_args_field("args", &call.args);
-        self.write_comments_field("trailing_comments", &call.trailing_comments);
         self.indent -= 2;
         self.line("}");
     }
@@ -735,9 +703,7 @@ fn format_bin_op(op: BinOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{
-        Block, Chunk, Exp, ExpKind, LocalName, Name, Stat, StatKind, TableConstructor,
-    };
+    use crate::ast::{Block, Chunk, Exp, ExpKind, LocalName, Name, Stat, StatKind, TableConstructor};
     use crate::token::{Comment, CommentKind, Position, Span};
 
     fn span() -> Span {
@@ -749,41 +715,31 @@ mod tests {
         let name = Name {
             value: "x".to_string(),
             span: span(),
-            leading_comments: vec![],
-            trailing_comments: vec![],
         };
         let exp = Exp {
             span: span(),
-            leading_comments: vec![],
             kind: ExpKind::Number("1".to_string()),
-            trailing_comments: vec![],
         };
         let stat = Stat {
             span: span(),
-            leading_comments: vec![Comment {
-                kind: CommentKind::Line,
-                text: "-- hello".to_string(),
-                span: span(),
-            }],
             kind: StatKind::LocalAssign {
                 names: vec![LocalName { name, attr: None }],
                 exprs: vec![exp],
             },
-            trailing_comments: vec![],
         };
         let block = Block {
             span: span(),
-            leading_comments: vec![],
             stats: vec![stat],
             ret: None,
-            detached_comments: vec![],
-            trailing_comments: vec![],
         };
         let chunk = Chunk {
             span: span(),
-            leading_comments: vec![],
+            comments: vec![Comment {
+                kind: CommentKind::Line,
+                text: "-- hello".to_string(),
+                span: span(),
+            }],
             block,
-            trailing_comments: vec![],
         };
         let text = Emitter::emit_chunk(&chunk);
         assert!(text.contains("Chunk"));
@@ -809,15 +765,11 @@ mod tests {
     fn emits_table_constructor() {
         let table = TableConstructor {
             span: span(),
-            leading_comments: vec![],
             fields: vec![],
-            trailing_comments: vec![],
         };
         let exp = Exp {
             span: span(),
-            leading_comments: vec![],
             kind: ExpKind::Table(table),
-            trailing_comments: vec![],
         };
         let mut emitter = Emitter {
             out: String::new(),

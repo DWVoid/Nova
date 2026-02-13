@@ -9,15 +9,11 @@ impl Parser {
                 let name = self.parse_name()?;
                 let var = Var {
                     span: name.span,
-                    leading_comments: vec![],
                     kind: VarKind::Name(name),
-                    trailing_comments: vec![],
                 };
                 PrefixExp {
                     span: var.span,
-                    leading_comments: vec![],
                     kind: PrefixExpKind::Var(var),
-                    trailing_comments: vec![],
                 }
             }
             TokenKind::Symbol(Symbol::LParen) => {
@@ -26,9 +22,7 @@ impl Parser {
                 let close = self.expect_symbol(Symbol::RParen)?;
                 PrefixExp {
                     span: open.span.merge(close.span),
-                    leading_comments: open.leading,
                     kind: PrefixExpKind::Paren(Box::new(expr)),
-                    trailing_comments: close.trailing,
                 }
             }
             _ => {
@@ -49,18 +43,14 @@ impl Parser {
                 let name = self.parse_name()?;
                 let var = Var {
                     span: prefix.span.merge(name.span),
-                    leading_comments: vec![],
                     kind: VarKind::Field {
                         prefix: Box::new(prefix),
                         name,
                     },
-                    trailing_comments: self.take_trailing_comments(),
                 };
                 prefix = PrefixExp {
                     span: var.span,
-                    leading_comments: vec![],
                     kind: PrefixExpKind::Var(var),
-                    trailing_comments: vec![],
                 };
                 continue;
             }
@@ -71,18 +61,14 @@ impl Parser {
                 let close = self.expect_symbol(Symbol::RBracket)?;
                 let var = Var {
                     span: prefix.span.merge(close.span),
-                    leading_comments: vec![],
                     kind: VarKind::Index {
                         prefix: Box::new(prefix),
                         index: Box::new(index),
                     },
-                    trailing_comments: self.take_trailing_comments(),
                 };
                 prefix = PrefixExp {
                     span: var.span,
-                    leading_comments: vec![],
                     kind: PrefixExpKind::Var(var),
-                    trailing_comments: vec![],
                 };
                 continue;
             }
@@ -94,17 +80,13 @@ impl Parser {
                 let span = prefix.span.merge(args.span);
                 let call = FunctionCall {
                     span,
-                    leading_comments: vec![],
                     prefix: Box::new(prefix),
                     method: Some(method),
                     args,
-                    trailing_comments: self.take_trailing_comments(),
                 };
                 prefix = PrefixExp {
                     span: call.span,
-                    leading_comments: vec![],
                     kind: PrefixExpKind::Call(call),
-                    trailing_comments: vec![],
                 };
                 continue;
             }
@@ -114,17 +96,13 @@ impl Parser {
                 let span = prefix.span.merge(args.span);
                 let call = FunctionCall {
                     span,
-                    leading_comments: vec![],
                     prefix: Box::new(prefix),
                     method: None,
                     args,
-                    trailing_comments: self.take_trailing_comments(),
                 };
                 prefix = PrefixExp {
                     span: call.span,
-                    leading_comments: vec![],
                     kind: PrefixExpKind::Call(call),
-                    trailing_comments: vec![],
                 };
                 continue;
             }

@@ -211,46 +211,33 @@ fn parses_for_generic_statement() {
 #[test]
 fn attaches_trailing_comment_to_statement() {
     let chunk = parse_chunk("x = 1 -- trailing");
-    let stat = &chunk.block.stats[0];
-    assert_eq!(stat.trailing_comments.len(), 1);
+    assert!(chunk.comments.iter().any(|c| c.text.contains("trailing")));
 }
 
 #[test]
 fn attaches_trailing_comment_to_expression() {
     let chunk = parse_chunk("return { a = 1 -- trailing\n }");
-    let ret = chunk.block.ret.unwrap();
-    match &ret.exprs[0].kind {
-        ExpKind::Table(table) => {
-            let field = &table.fields[0];
-            assert_eq!(field.value.trailing_comments.len(), 1);
-        }
-        _ => panic!("expected table expression"),
-    }
+    assert!(chunk.comments.iter().any(|c| c.text.contains("trailing")));
 }
 
 #[test]
 fn collects_detached_comments_in_block() {
     let chunk = parse_chunk("-- a\n\n-- b\nreturn 1");
-    if let Some(ret) = &chunk.block.ret {
-        assert_eq!(ret.leading_comments.len(), 1);
-        assert_eq!(ret.leading_comments[0].span.start.line, 3);
-    }
-    assert_eq!(chunk.block.detached_comments.len(), 1);
-    assert_eq!(chunk.block.leading_comments.len(), 0);
+    assert_eq!(chunk.comments.len(), 2);
+    assert!(chunk.comments.iter().any(|c| c.text.contains("-- a")));
+    assert!(chunk.comments.iter().any(|c| c.text.contains("-- b")));
 }
 
 #[test]
 fn parses_label_with_leading_comment() {
     let chunk = parse_chunk("-- label\n::lbl::");
-    let stat = &chunk.block.stats[0];
-    assert_eq!(stat.leading_comments.len(), 1);
+    assert!(chunk.comments.iter().any(|c| c.text.contains("label")));
 }
 
 #[test]
 fn parses_local_attr_with_comment() {
     let chunk = parse_chunk("-- local\nlocal x <const> = 1");
-    let stat = &chunk.block.stats[0];
-    assert_eq!(stat.leading_comments.len(), 1);
+    assert!(chunk.comments.iter().any(|c| c.text.contains("local")));
 }
 
 #[test]
@@ -320,8 +307,5 @@ fn e2e_preserves_comments_in_ast() {
     "#;
     let chunk = parse_chunk(src);
     assert_eq!(chunk.block.stats.len(), 1);
-    let stat = &chunk.block.stats[0];
-    assert_eq!(stat.leading_comments.len(), 1);
-    assert_eq!(stat.trailing_comments.len(), 1);
-    assert_eq!(chunk.block.detached_comments.len(), 1);
+    assert_eq!(chunk.comments.len(), 3);
 }

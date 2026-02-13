@@ -23,11 +23,17 @@
   - Include comment text and exact source span.
   - **Offsets**: spans use grapheme-cluster offsets; line counting uses ASCII line breaks.
 
-### 1.1.1 Example Output Style (Sketch)
+### 1.2 Comment Preservation Model (Updated)
+- **All comments are stored only on `Chunk`.**
+- Parser collects every comment token (leading and trailing) into `Chunk.comments`.
+- AST nodes below `Chunk` do not carry comment fields, so no attachment rules are applied.
+- The order of comments is preserved as they appear in the token stream.
+
+### 1.2.1 Example Output Style (Sketch)
 ```
 Chunk {
   span: 0..42,
-  leading_comments: [
+  comments: [
     Comment { kind: Line, text: "-- hello", span: 0..8 },
   ],
   block: Block {
@@ -36,23 +42,12 @@ Chunk {
         names: ["x"],
         exprs: [Exp::Number(1.0)],
         span: 9..18,
-        trailing_comments: [],
       },
     ],
     ret: None,
   },
 }
 ```
-
-### 1.2 Comment Preservation Model
-- Parse comments as tokens (trivia) and attach to AST nodes.
-- Attachment rule (deterministic):
-  - **Leading comments**: contiguous comments immediately preceding a node with no blank lines.
-  - **Trailing comments**: comments on the same line after a node.
-  - **Detached comments**: comments separated by blank lines; keep at block level.
-- Represent comment spans: `{ kind: "line"|"block", text: String, span: {start,end} }`.
-
-Deliverable: `docs/frontend/parser_plan.md` (this document) + AST format appendix.
 
 ## 2) Rust Module Layout (Under 1000 LOC per file)
 
@@ -94,50 +89,37 @@ Target files (estimate):
 - Keep Lua 5.4 grammar fidelity.
 - Unit tests: AST construction helpers and debug output.
 
-### Step 4 — Parser (Statements and Blocks) (In Progress)
+### Step 4 — Parser (Statements and Blocks) (Done)
 - Implement parser for chunk, block, and statement types.
-- **Currently implemented**: empty statement (`;`), `return` (with/without exprs), assignments, local assignments, function declarations, control-flow (`if/elseif/else`, `while`, `repeat`, `for`), `do`, `break`, `goto`, and labels.
-- **Comment attachment (partial)**: leading comments are split by blank lines (detached vs attached); trailing comments are attached at statement/return boundaries and propagated into expressions and prefix chains.
-- **Rule added**: prefer trailing comments from the last expression when a statement wraps an expression list (return/assign/call).
-- **Missing**: edge cases where both statement and expression could legitimately own trailing comments.
-- Attach comments to AST nodes per rules.
-- Unit tests: parse and round-trip test for statement types.
+- All statements and control flow are implemented (see earlier progress).
+- **Comment model updated**: parser no longer attaches comments to nodes.
+- All comments are collected at `Chunk.comments`.
 
-### Step 5 — Expression Parsing (In Progress)
-- Implement expression parsing with precedence:
-  - `or`, `and`, comparisons, bitwise ops, shifts, concatenation, arithmetic, unary, exponentiation.
-  - Right/left associativity as defined in `3.4.8`.
-- Expression parsing now includes prefix-expression suffixes (`.`, `[]`, call, method).
-- **Currently implemented**: literals, unary/binary ops, tables, varargs (with function-body guard), function expressions, prefix expressions, calls/method calls, table fields.
-- Unit tests: expression precedence and associativity, unary ops, concatenation.
+### Step 5 — Expression Parsing (Done)
+- Expression parsing and prefix chains are complete.
+- **Comment attachment removed** in expressions, tables, and prefix chains.
 
-### Step 6 — AST Emission (In Progress)
-- Implement AST to text emission:
-  - Pretty-print AST nodes with stable field ordering.
-  - Manual string escaping for Lua syntax.
-  - Include comment text and spans.
-- Unit tests: emitted output matches golden files, comments and spans present.
+### Step 6 — AST Emission (Done)
+- AST pretty-printer now prints `Chunk.comments` only.
+- No per-node comment fields are emitted.
 
 ## 3.1) Current Status (Checked Against Workspace)
 
 - `src/token.rs` and `src/lexer.rs` are complete and tested.
-- `src/ast.rs` added with Lua 5.4 AST node definitions and basic tests.
+- `src/ast.rs` now stores comments only on `Chunk` (`Chunk.comments`).
 - Parser is split into modules under `src/parser/` with `src/parser/mod.rs` as the entry point.
-- `src/parser/stat.rs` covers statements, blocks, and control flow parsing.
-- `src/parser/expr.rs` covers expression parsing, table constructors, and function bodies.
-- `src/parser/prefix.rs` covers prefix-expression suffixes and call arguments.
-- `src/parser/helpers.rs` provides token helpers and precedence utilities.
-- `src/parser/tests.rs` holds parser unit tests.
-- `src/emit.rs` implements a structured, multi-line AST pretty-printer for all current AST nodes.
+- `src/parser/stat.rs`, `src/parser/expr.rs`, and `src/parser/prefix.rs` no longer attach comments to nodes.
+- `src/parser/helpers.rs` retains token helpers only; comment attachment helpers were removed.
+- `src/parser/tests.rs` now asserts comments only on `Chunk`.
+- `src/emit.rs` prints `Chunk.comments` only.
 - `src/main.rs` wires stdin -> lexer -> parser -> emitter.
 
 ### Known Gaps
-- Detached comments are only tracked at the block level; per-node detached behavior is still coarse.
-- Some trailing comment precedence edge cases remain (multi-expression statements).
-- Label syntax errors still rely on generic token expectations; more targeted diagnostics are possible.
+- Comment ordering is tied to token stream order (leading/trailing combined). If you want stable positional sorting, add a span-based sort step.
+- Diagnostics still use generic error messages for label syntax issues.
 
 ### Next Steps
-- Decide whether per-node detached comments are needed beyond block-level aggregation.
+- Decide whether `Chunk.comments` should be sorted by span or preserve token order only.
 - Add targeted diagnostics for label syntax (e.g., missing closing `::`).
 - Clean up remaining warnings in `src/emit.rs` and `src/token.rs`.
 
@@ -186,29 +168,9 @@ Target files (estimate):
 
 ## Appendix B — Documentation Remarks (Non-code Ideas)
 
-- AST pretty-printer should avoid trailing whitespace and align braces consistently.
-- Consider a small `Printer` helper with explicit indentation control.
-- Keep `Span` printable as `start..end` plus optional line/col if needed.
-- Line breaks count only ASCII `\n`, `\r\n`, and `\r` sequences.
-- Grapheme offsets are used for `Span` display and comparisons; byte offsets are retained for slicing.
-- When emitting AST, prefer explicit `Span` formatting (`start..end`) and keep line/col optional.
-- Consider a small `AstNodeId` counter only if needed for debugging; do not expose in output.
-- AST nodes currently include comment vectors on most constructs; parser will decide exact attachment.
-- `Stat` and `Exp` are wrapper structs to keep span/comments consistent for printing.
-- Consider a separate `DetachedComments` list on `Block` for blank-line-separated trivia.
-- Emitter currently prints structured AST nodes with stable ordering; prefer this over `Debug` output.
-- Parser errors should include near-token context when available.
-- Early parser support includes `return` without expressions; expression parsing will extend this.
-- Block end detection currently keyed to `end`, `else`, `elseif`, `until`, and EOF.
-- Prefix-expression parsing now supports chained field/index access and call/method suffixes.
-- Comment attachment for suffix chains should prefer trailing comments on the last suffix token.
-- Statement parsing will need careful ambiguity handling between assignment vs function call statements.
-- Detached comments should be populated at block boundaries (blank-line separation).
-- Local attributes (`<const>`, `<close>`) are parsed after each local name; consider dedicated diagnostics for invalid attributes.
-- Labels are parsed as `::name::`; ensure comment attachment and span selection are well-defined.
-- Statement parsing now covers assignment vs call disambiguation based on prefix-expression kind.
-- Trailing comments are now attached to statements/returns via last-consumed token trivia.
-- Detached comment handling still needs a dedicated pass in `parse_block`.
-- Consider a helper to drain pending comment trivia to avoid accidental reuse.
-- Added tests for detached comments, label comments, and local-attribute comments in `src/parser/tests.rs`.
-- Multi-expression statements currently use the last expression to supply trailing comments.
+- Comment handling is now centralized: only `Chunk` carries comments.
+- `Chunk.comments` is built by collecting leading + trailing comment trivia from all tokens.
+- If you need per-node comments later, reintroduce attachment rules in parser modules.
+- Span and grapheme rules remain unchanged.
+- Emitters should only display the `Chunk.comments` list to avoid duplication.
+- Tests should validate comments only at the `Chunk` level.

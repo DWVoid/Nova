@@ -5,8 +5,8 @@ mod stat;
 #[cfg(test)]
 mod tests;
 
-use crate::ast::Chunk;
-use crate::token::{Position, Token};
+use crate::ast::{Chunk, Comments};
+use crate::token::{Comment, Position, Token, TokenKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseError {
@@ -18,7 +18,6 @@ pub struct Parser {
     tokens: Vec<Token>,
     index: usize,
     vararg_allowed: bool,
-    detached_stack: Vec<crate::ast::Comments>,
 }
 
 impl Parser {
@@ -27,23 +26,34 @@ impl Parser {
             tokens,
             index: 0,
             vararg_allowed: false,
-            detached_stack: Vec::new(),
         }
     }
 
     pub fn parse_chunk(mut self) -> Result<Chunk, ParseError> {
+        let comments = collect_all_comments(&self.tokens);
         let block = self.parse_block(BlockEnd::Chunk)?;
-        let leading = block.leading_comments.clone();
         let eof = self.expect_eof()?;
-        let trailing = eof.leading;
         let span = block.span.merge(eof.span);
         Ok(Chunk {
             span,
-            leading_comments: leading,
+            comments,
             block,
-            trailing_comments: trailing,
         })
     }
+}
+
+fn collect_all_comments(tokens: &[Token]) -> Comments {
+    let mut out: Vec<Comment> = Vec::new();
+    for token in tokens {
+        out.extend(token.leading.iter().cloned());
+        out.extend(token.trailing.iter().cloned());
+    }
+    if let Some(last) = tokens.last() {
+        if let TokenKind::Eof = last.kind {
+            out.extend(last.leading.iter().cloned());
+        }
+    }
+    out
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

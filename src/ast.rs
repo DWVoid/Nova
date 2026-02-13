@@ -5,27 +5,21 @@ pub type Comments = Vec<Comment>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chunk {
     pub span: Span,
-    pub leading_comments: Comments,
+    pub comments: Comments,
     pub block: Block,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub span: Span,
-    pub leading_comments: Comments,
     pub stats: Vec<Stat>,
     pub ret: Option<RetStat>,
-    pub detached_comments: Comments,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Stat {
     pub span: Span,
-    pub leading_comments: Comments,
     pub kind: StatKind,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,18 +50,14 @@ pub enum StatKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetStat {
     pub span: Span,
-    pub leading_comments: Comments,
     pub exprs: Vec<Exp>,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct IfClause {
     pub span: Span,
-    pub leading_comments: Comments,
     pub cond: Exp,
     pub block: Block,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,25 +76,19 @@ pub enum LocalAttr {
 pub struct Name {
     pub value: String,
     pub span: Span,
-    pub leading_comments: Comments,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FuncName {
     pub span: Span,
-    pub leading_comments: Comments,
     pub names: Vec<Name>,
     pub method: Option<Name>,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Var {
     pub span: Span,
-    pub leading_comments: Comments,
     pub kind: VarKind,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,9 +101,7 @@ pub enum VarKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrefixExp {
     pub span: Span,
-    pub leading_comments: Comments,
     pub kind: PrefixExpKind,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -132,19 +114,15 @@ pub enum PrefixExpKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionCall {
     pub span: Span,
-    pub leading_comments: Comments,
     pub prefix: Box<PrefixExp>,
     pub method: Option<Name>,
     pub args: Args,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Args {
     pub span: Span,
-    pub leading_comments: Comments,
     pub kind: ArgsKind,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -157,9 +135,7 @@ pub enum ArgsKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exp {
     pub span: Span,
-    pub leading_comments: Comments,
     pub kind: ExpKind,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -179,28 +155,22 @@ pub enum ExpKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FuncBody {
     pub span: Span,
-    pub leading_comments: Comments,
     pub params: Vec<Name>,
     pub is_vararg: bool,
     pub block: Block,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableConstructor {
     pub span: Span,
-    pub leading_comments: Comments,
     pub fields: Vec<Field>,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub span: Span,
-    pub leading_comments: Comments,
     pub key: Option<FieldKey>,
     pub value: Exp,
-    pub trailing_comments: Comments,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -261,37 +231,27 @@ mod tests {
         let name = Name {
             value: "x".to_string(),
             span: span(),
-            leading_comments: vec![],
-            trailing_comments: vec![],
         };
         let exp = Exp {
             span: span(),
-            leading_comments: vec![],
             kind: ExpKind::Number("1".to_string()),
-            trailing_comments: vec![],
         };
         let stat = Stat {
             span: span(),
-            leading_comments: vec![comment.clone()],
             kind: StatKind::LocalAssign {
                 names: vec![LocalName { name, attr: None }],
                 exprs: vec![exp],
             },
-            trailing_comments: vec![],
         };
         let block = Block {
             span: span(),
-            leading_comments: vec![],
             stats: vec![stat],
             ret: None,
-            detached_comments: vec![],
-            trailing_comments: vec![],
         };
         let chunk = Chunk {
             span: span(),
-            leading_comments: vec![comment],
+            comments: vec![comment],
             block,
-            trailing_comments: vec![],
         };
         assert_eq!(chunk.block.stats.len(), 1);
     }

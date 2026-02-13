@@ -1,6 +1,5 @@
 use super::{Assoc, BlockEnd, ParseError, Parser};
 use crate::token::{Keyword, Symbol, Token, TokenKind};
-use std::mem;
 
 impl Parser {
     pub(crate) fn advance(&mut self) -> Token {
@@ -68,22 +67,6 @@ impl Parser {
             message: format!("expected keyword {:?}", keyword),
             position: token.span.start,
         })
-    }
-
-    pub(crate) fn take_leading_comments(&mut self) -> Vec<crate::token::Comment> {
-        let mut comments = Vec::new();
-        if self.tokens.is_empty() {
-            return comments;
-        }
-        comments.append(&mut self.tokens[self.index].leading);
-        comments
-    }
-
-    pub(crate) fn take_trailing_comments(&mut self) -> Vec<crate::token::Comment> {
-        if self.index == 0 {
-            return Vec::new();
-        }
-        mem::take(&mut self.tokens[self.index - 1].trailing)
     }
 
     pub(crate) fn expect_eof(&mut self) -> Result<Token, ParseError> {

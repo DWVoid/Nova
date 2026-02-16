@@ -1,5 +1,5 @@
 use super::{BlockEnd, ParseError, Parser};
-use crate::ast::{FuncName, IfClause, LocalAttr, LocalName, Name, PrefixExpKind, RetStat, Stat, StatKind};
+use crate::ast::{IfClause, Name, PrefixExpKind, RetStat, Stat, StatKind};
 use crate::token::{Keyword, Span, Symbol, TokenKind};
 
 impl Parser {
@@ -38,12 +38,6 @@ impl Parser {
             });
         }
 
-        if self.is_keyword(Keyword::Local) {
-            return self.parse_local_stat();
-        }
-        if self.is_keyword(Keyword::Function) {
-            return self.parse_function_stat();
-        }
         if self.is_keyword(Keyword::Do) {
             return self.parse_do_stat();
         }
@@ -61,6 +55,9 @@ impl Parser {
         }
         if self.is_keyword(Keyword::Break) {
             return self.parse_break_stat();
+        }
+        if self.is_keyword(Keyword::Continue) {
+            return self.parse_continue_stat();
         }
         if self.is_keyword(Keyword::Goto) {
             return self.parse_goto_stat();
@@ -88,48 +85,19 @@ impl Parser {
         })
     }
 
-    fn parse_local_stat(&mut self) -> Result<Stat, ParseError> {
-        let token = self.expect_keyword(Keyword::Local)?;
-        if self.is_keyword(Keyword::Function) {
-            let _fn_token = self.expect_keyword(Keyword::Function)?;
-            let name = self.parse_name()?;
-            let func = self.parse_func_body(token.span.start)?;
-            let span = token.span.merge(func.span);
-            return Ok(Stat {
-                span,
-                kind: StatKind::LocalFunction { name, func },
-            });
-        }
-
-        let mut names = Vec::new();
-        names.push(self.parse_local_name()?);
-        while self.is_symbol(Symbol::Comma) {
-            self.advance();
-            names.push(self.parse_local_name()?);
-        }
-
-        let mut exprs = Vec::new();
-        let mut end_span = names.last().map(|n| n.name.span).unwrap_or(token.span);
-        if self.is_symbol(Symbol::Assign) {
-            let eq = self.advance();
-            exprs = self.parse_exp_list(0)?;
-            end_span = exprs.last().map(|e| e.span).unwrap_or(eq.span);
-        }
-
+    fn parse_break_stat(&mut self) -> Result<Stat, ParseError> {
+        let token = self.expect_keyword(Keyword::Break)?;
         Ok(Stat {
-            span: token.span.merge(end_span),
-            kind: StatKind::LocalAssign { names, exprs },
+            span: token.span,
+            kind: StatKind::Break,
         })
     }
 
-    fn parse_function_stat(&mut self) -> Result<Stat, ParseError> {
-        let token = self.expect_keyword(Keyword::Function)?;
-        let name = self.parse_func_name()?;
-        let func = self.parse_func_body(token.span.start)?;
-        let span = token.span.merge(func.span);
+    fn parse_continue_stat(&mut self) -> Result<Stat, ParseError> {
+        let token = self.expect_keyword(Keyword::Continue)?;
         Ok(Stat {
-            span,
-            kind: StatKind::Function { name, func },
+            span: token.span,
+            kind: StatKind::Continue,
         })
     }
 
@@ -252,37 +220,6 @@ impl Parser {
         })
     }
 
-    fn parse_break_stat(&mut self) -> Result<Stat, ParseError> {
-        let token = self.expect_keyword(Keyword::Break)?;
-        Ok(Stat {
-            span: token.span,
-            kind: StatKind::Break,
-        })
-    }
-
-    fn parse_goto_stat(&mut self) -> Result<Stat, ParseError> {
-        let token = self.expect_keyword(Keyword::Goto)?;
-        let label = self.parse_name()?;
-        let span = token.span.merge(label.span);
-        Ok(Stat {
-            span,
-            kind: StatKind::Goto { label },
-        })
-    }
-
-    fn parse_label_stat(&mut self) -> Result<Stat, ParseError> {
-        let start = self.expect_symbol(Symbol::Colon)?;
-        let _second = self.expect_symbol(Symbol::Colon)?;
-        let label = self.parse_name()?;
-        let _third = self.expect_symbol(Symbol::Colon)?;
-        let end = self.expect_symbol(Symbol::Colon)?;
-        let span = start.span.merge(end.span);
-        Ok(Stat {
-            span,
-            kind: StatKind::Label { label },
-        })
-    }
-
     fn parse_assign_or_call(&mut self) -> Result<Stat, ParseError> {
         let prefix = self.parse_prefixexp()?;
         match &prefix.kind {
@@ -349,50 +286,27 @@ impl Parser {
         })
     }
 
-    fn parse_local_name(&mut self) -> Result<LocalName, ParseError> {
-        let name = self.parse_name()?;
-        let attr = if self.is_symbol(Symbol::Less) {
-            self.advance();
-            let attr_name = self.parse_name()?;
-            let _gt = self.expect_symbol(Symbol::Greater)?;
-            match attr_name.value.as_str() {
-                "const" => Some(LocalAttr::Const),
-                "close" => Some(LocalAttr::Close),
-                _ => {
-                    return Err(ParseError {
-                        message: format!("unknown local attribute: {}", attr_name.value),
-                        position: attr_name.span.start,
-                    })
-                }
-            }
-        } else {
-            None
-        };
-        Ok(LocalName { name, attr })
+    fn parse_goto_stat(&mut self) -> Result<Stat, ParseError> {
+        let token = self.expect_keyword(Keyword::Goto)?;
+        let label = self.parse_name()?;
+        let span = token.span.merge(label.span);
+        Ok(Stat {
+            span,
+            kind: StatKind::Goto { label },
+        })
     }
 
-    fn parse_func_name(&mut self) -> Result<FuncName, ParseError> {
-        let mut names = Vec::new();
-        names.push(self.parse_name()?);
-        while self.is_symbol(Symbol::Dot) {
-            self.advance();
-            names.push(self.parse_name()?);
-        }
-        let method = if self.is_symbol(Symbol::Colon) {
-            self.advance();
-            Some(self.parse_name()?)
-        } else {
-            None
-        };
-
-        let mut span = names[0].span;
-        for name in &names[1..] {
-            span = span.merge(name.span);
-        }
-        if let Some(method) = &method {
-            span = span.merge(method.span);
-        }
-        Ok(FuncName { span, names, method })
+    fn parse_label_stat(&mut self) -> Result<Stat, ParseError> {
+        let start = self.expect_symbol(Symbol::Colon)?;
+        let _second = self.expect_symbol(Symbol::Colon)?;
+        let label = self.parse_name()?;
+        let _third = self.expect_symbol(Symbol::Colon)?;
+        let end = self.expect_symbol(Symbol::Colon)?;
+        let span = start.span.merge(end.span);
+        Ok(Stat {
+            span,
+            kind: StatKind::Label { label },
+        })
     }
 
     pub(crate) fn parse_name(&mut self) -> Result<Name, ParseError> {
@@ -411,7 +325,7 @@ impl Parser {
     }
 
     fn is_label_start(&self) -> bool {
-        matches!(self.current().kind, TokenKind::Symbol(Symbol::Colon))
-            && matches!(self.peek(1).kind, TokenKind::Symbol(Symbol::Colon))
+        matches!(self.current().kind, crate::token::TokenKind::Symbol(Symbol::Colon))
+            && matches!(self.peek(1).kind, crate::token::TokenKind::Symbol(Symbol::Colon))
     }
 }

@@ -40,49 +40,29 @@ fn main() {
 #[test]
 fn test_full() {
     let code = r#"
-    -- Short, feature-rich Lua snippet for compiler testing
+    -- Short, feature-rich Nova snippet for compiler testing
 
-local function fold(tbl, init, f, ...)
-  local acc = init
-  for i = 1, #tbl do
-    acc = f(acc, tbl[i], ...)
-  end
-  return acc
+use System;
+namespace Example;
+
+export define Pair struct
+  a: integer;
+  b: integer;
 end
 
-local function make_adder(x)
-  return function(y) return x + y end
+export define add (x: integer, y: integer): integer
+  return x + y
 end
 
-local t = { 1, 2, 3, 4, 5 }
-local add = make_adder(10)
-
-local sum = fold(t, 0, function(a, b) return a + b end)
-local mapped = {}
-for i, v in ipairs(t) do
-  mapped[i] = add(v)
-end
-
-local function classify(n)
-  if n % 2 == 0 then
-    return "even"
-  elseif n % 3 == 0 then
-    return "div3"
+export define demo (): integer
+  var p = { a = 1, b = 2 }
+  var sum = add(p.a, p.b)
+  if sum > 2 then
+    return sum
   else
-    return "other"
+    return 0
   end
 end
-
-local stats = { even = 0, div3 = 0, other = 0 }
-for _, v in ipairs(mapped) do
-  local k = classify(v)
-  stats[k] = stats[k] + 1
-end
-
-local msg = string.format("sum=%d, even=%d, div3=%d, other=%d",
-  sum, stats.even, stats.div3, stats.other)
-
-print(msg)
     "#;
     let tokens = match Lexer::new(code).lex_all() {
         Ok(tokens) => tokens,

@@ -8,6 +8,14 @@ impl Parser {
         token
     }
 
+    pub(crate) fn checkpoint(&self) -> usize {
+        self.index
+    }
+
+    pub(crate) fn restore(&mut self, checkpoint: usize) {
+        self.index = checkpoint;
+    }
+
     pub(crate) fn peek(&self, offset: usize) -> &Token {
         let idx = (self.index + offset).min(self.tokens.len() - 1);
         &self.tokens[idx]

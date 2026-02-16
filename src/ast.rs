@@ -6,7 +6,146 @@ pub type Comments = Vec<Comment>;
 pub struct Chunk {
     pub span: Span,
     pub comments: Comments,
-    pub block: Block,
+    pub uses: Vec<UseDecl>,
+    pub namespace: NamespaceDecl,
+    pub items: Vec<TopItem>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TopItem {
+    Definition(Definition),
+    Implementation(Implementation),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseDecl {
+    pub span: Span,
+    pub path: Vec<Name>,
+    pub tail: Option<UseTail>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum UseTail {
+    Selector(Vec<UseItem>),
+    Alias(Name),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseItem {
+    pub name: Name,
+    pub alias: Option<Name>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NamespaceDecl {
+    pub span: Span,
+    pub path: Vec<Name>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Visibility {
+    pub span: Span,
+    pub scopes: Option<Vec<Name>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Definition {
+    pub span: Span,
+    pub decorators: Vec<Decorator>,
+    pub visibility: Option<Visibility>,
+    pub name: Name,
+    pub type_spec: Option<TypeSpec>,
+    pub expr: DefExpr,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DefExpr {
+    Struct(StructDef),
+    Enum(EnumDef),
+    Variant(VariantDef),
+    Trait(TraitDef),
+    Exp(Exp),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decorator {
+    pub span: Span,
+    pub name: Name,
+    pub args: Option<Vec<Exp>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeName {
+    pub span: Span,
+    pub parts: Vec<Name>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeSpec {
+    pub span: Span,
+    pub ty: TypeName,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StructDef {
+    pub span: Span,
+    pub fields: Vec<FieldDecl>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldDecl {
+    pub span: Span,
+    pub name: Name,
+    pub type_spec: TypeSpec,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumDef {
+    pub span: Span,
+    pub type_spec: TypeSpec,
+    pub members: Vec<EnumMember>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnumMember {
+    pub span: Span,
+    pub name: Name,
+    pub value: Exp,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VariantDef {
+    pub span: Span,
+    pub members: Vec<VariantMember>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VariantMember {
+    pub span: Span,
+    pub name: Name,
+    pub type_spec: TypeSpec,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitDef {
+    pub span: Span,
+    pub sigs: Vec<TraitSig>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraitSig {
+    pub span: Span,
+    pub name: Name,
+    pub params: Vec<Param>,
+    pub return_type: TypeSpec,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Implementation {
+    pub span: Span,
+    pub trait_type: Option<TypeName>,
+    pub target: TypeName,
+    pub items: Vec<Definition>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -26,9 +165,6 @@ pub struct Stat {
 pub enum StatKind {
     Empty,
     Assign { vars: Vec<Var>, exprs: Vec<Exp> },
-    LocalAssign { names: Vec<LocalName>, exprs: Vec<Exp> },
-    LocalFunction { name: Name, func: FuncBody },
-    Function { name: FuncName, func: FuncBody },
     Do { block: Block },
     While { cond: Exp, block: Block },
     Repeat { block: Block, cond: Exp },
@@ -42,6 +178,7 @@ pub enum StatKind {
     },
     ForGeneric { names: Vec<Name>, exprs: Vec<Exp>, block: Block },
     Break,
+    Continue,
     Goto { label: Name },
     Label { label: Name },
     Call { call: FunctionCall },
@@ -61,28 +198,15 @@ pub struct IfClause {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct LocalName {
-    pub name: Name,
-    pub attr: Option<LocalAttr>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LocalAttr {
-    Const,
-    Close,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct Name {
     pub value: String,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct FuncName {
-    pub span: Span,
-    pub names: Vec<Name>,
-    pub method: Option<Name>,
+pub struct Param {
+    pub name: Name,
+    pub type_spec: Option<TypeSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +220,13 @@ pub enum VarKind {
     Name(Name),
     Index { prefix: Box<PrefixExp>, index: Box<Exp> },
     Field { prefix: Box<PrefixExp>, name: Name },
+    Decl { kind: VarDeclKind, name: Name, type_spec: Option<TypeSpec> },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VarDeclKind {
+    Var,
+    Val,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -128,8 +259,7 @@ pub struct Args {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ArgsKind {
     ExpList(Vec<Exp>),
-    Table(TableConstructor),
-    String(String),
+    Initializer(Initializer),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -144,24 +274,24 @@ pub enum ExpKind {
     Bool(bool),
     Number(String),
     String(String),
-    Vararg,
-    FuncDef(FuncBody),
-    Table(TableConstructor),
+    Initializer(Initializer),
     Prefix(PrefixExp),
+    Lambda(LambdaExpr),
     Unary { op: UnOp, exp: Box<Exp> },
     Binary { op: BinOp, left: Box<Exp>, right: Box<Exp> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct FuncBody {
+pub struct LambdaExpr {
     pub span: Span,
-    pub params: Vec<Name>,
-    pub is_vararg: bool,
+    pub is_const: bool,
+    pub params: Vec<Param>,
+    pub return_type: TypeSpec,
     pub block: Block,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TableConstructor {
+pub struct Initializer {
     pub span: Span,
     pub fields: Vec<Field>,
 }
@@ -238,8 +368,15 @@ mod tests {
         };
         let stat = Stat {
             span: span(),
-            kind: StatKind::LocalAssign {
-                names: vec![LocalName { name, attr: None }],
+            kind: StatKind::Assign {
+                vars: vec![Var {
+                    span: span(),
+                    kind: VarKind::Decl {
+                        kind: VarDeclKind::Var,
+                        name,
+                        type_spec: None,
+                    },
+                }],
                 exprs: vec![exp],
             },
         };
@@ -251,8 +388,38 @@ mod tests {
         let chunk = Chunk {
             span: span(),
             comments: vec![comment],
-            block,
+            uses: Vec::new(),
+            namespace: NamespaceDecl {
+                span: span(),
+                path: Vec::new(),
+            },
+            items: vec![TopItem::Definition(Definition {
+                span: span(),
+                decorators: Vec::new(),
+                visibility: None,
+                name: Name {
+                    value: "f".to_string(),
+                    span: span(),
+                },
+                type_spec: None,
+                expr: DefExpr::Exp(Exp {
+                    span: span(),
+                    kind: ExpKind::Lambda(LambdaExpr {
+                        span: span(),
+                        is_const: false,
+                        params: Vec::new(),
+                        return_type: TypeSpec {
+                            span: span(),
+                            ty: TypeName {
+                                span: span(),
+                                parts: Vec::new(),
+                            },
+                        },
+                        block,
+                    }),
+                }),
+            })],
         };
-        assert_eq!(chunk.block.stats.len(), 1);
+        assert_eq!(chunk.items.len(), 1);
     }
 }

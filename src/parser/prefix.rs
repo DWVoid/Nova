@@ -1,6 +1,6 @@
 use super::{ParseError, Parser};
-use crate::ast::{FunctionCall, PrefixExp, PrefixExpKind, Var, VarKind};
-use crate::token::{Symbol, TokenKind};
+use crate::ast::{FunctionCall, PrefixExp, PrefixExpKind, Var, VarDeclKind, VarKind};
+use crate::token::{Keyword, Symbol, TokenKind};
 
 impl Parser {
     pub(crate) fn parse_prefixexp(&mut self) -> Result<PrefixExp, ParseError> {
@@ -10,6 +10,36 @@ impl Parser {
                 let var = Var {
                     span: name.span,
                     kind: VarKind::Name(name),
+                };
+                PrefixExp {
+                    span: var.span,
+                    kind: PrefixExpKind::Var(var),
+                }
+            }
+            TokenKind::Keyword(Keyword::Var) | TokenKind::Keyword(Keyword::Val) => {
+                let decl_kind = if self.is_keyword(Keyword::Var) {
+                    VarDeclKind::Var
+                } else {
+                    VarDeclKind::Val
+                };
+                let start = self.advance();
+                let name = self.parse_name()?;
+                let type_spec = if self.is_symbol(Symbol::Colon) {
+                    Some(self.parse_type_spec()?)
+                } else {
+                    None
+                };
+                let mut span = start.span.merge(name.span);
+                if let Some(spec) = &type_spec {
+                    span = span.merge(spec.span);
+                }
+                let var = Var {
+                    span,
+                    kind: VarKind::Decl {
+                        kind: decl_kind,
+                        name,
+                        type_spec,
+                    },
                 };
                 PrefixExp {
                     span: var.span,
@@ -27,7 +57,7 @@ impl Parser {
             }
             _ => {
                 return Err(ParseError {
-                    message: "expected name or '('".to_string(),
+                    message: "expected name, declaration, or '('".to_string(),
                     position: self.current().span.start,
                 })
             }
@@ -116,9 +146,7 @@ impl Parser {
     pub(crate) fn is_args_start(&self) -> bool {
         matches!(
             self.current().kind,
-            TokenKind::Symbol(Symbol::LParen)
-                | TokenKind::Symbol(Symbol::LBrace)
-                | TokenKind::StringLiteral(_)
+            TokenKind::Symbol(Symbol::LParen) | TokenKind::Symbol(Symbol::LBrace)
         )
     }
 }

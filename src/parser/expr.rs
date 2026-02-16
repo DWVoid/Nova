@@ -1,6 +1,6 @@
 use super::{Assoc, BlockEnd, ParseError, Parser};
-use crate::ast::{Args, ArgsKind, Exp, ExpKind, Field, FieldKey, FuncBody, Name, TableConstructor};
-use crate::token::{Keyword, Position, Symbol, TokenKind};
+use crate::ast::{Args, ArgsKind, Exp, ExpKind, Field, FieldKey, Initializer, LambdaExpr};
+use crate::token::{Keyword, Symbol, TokenKind};
 
 impl Parser {
     pub(super) fn parse_exp_list(&mut self, min_prec: u8) -> Result<Vec<Exp>, ParseError> {
@@ -91,36 +91,41 @@ impl Parser {
                     kind: ExpKind::Bool(false),
                 })
             }
-            TokenKind::Symbol(Symbol::DotDotDot) => {
-                if !self.vararg_allowed {
-                    return Err(ParseError {
-                        message: "vararg usage outside vararg function".to_string(),
-                        position: token.span.start,
+            TokenKind::Symbol(Symbol::LBrace) => {
+                let init = self.parse_initializer()?;
+                Ok(Exp {
+                    span: init.span,
+                    kind: ExpKind::Initializer(init),
+                })
+            }
+            TokenKind::Keyword(Keyword::Const) => {
+                if self.can_start_lambda()? {
+                    let lambda = self.parse_lambda_expr()?;
+                    return Ok(Exp {
+                        span: lambda.span,
+                        kind: ExpKind::Lambda(lambda),
                     });
                 }
-                self.advance();
-                Ok(Exp {
-                    span: token.span,
-                    kind: ExpKind::Vararg,
+                Err(ParseError {
+                    message: "expected lambda after 'const'".to_string(),
+                    position: token.span.start,
                 })
             }
-            TokenKind::Symbol(Symbol::LBrace) => {
-                let table = self.parse_table_constructor()?;
+            TokenKind::Symbol(Symbol::LParen) => {
+                if self.can_start_lambda()? {
+                    let lambda = self.parse_lambda_expr()?;
+                    return Ok(Exp {
+                        span: lambda.span,
+                        kind: ExpKind::Lambda(lambda),
+                    });
+                }
+                let prefix = self.parse_prefixexp()?;
                 Ok(Exp {
-                    span: table.span,
-                    kind: ExpKind::Table(table),
+                    span: prefix.span,
+                    kind: ExpKind::Prefix(prefix),
                 })
             }
-            TokenKind::Keyword(Keyword::Function) => {
-                let start = self.advance();
-                let func = self.parse_func_body(start.span.start)?;
-                let span = start.span.merge(func.span);
-                Ok(Exp {
-                    span,
-                    kind: ExpKind::FuncDef(func),
-                })
-            }
-            TokenKind::Identifier(_) | TokenKind::Symbol(Symbol::LParen) => {
+            TokenKind::Identifier(_) => {
                 let prefix = self.parse_prefixexp()?;
                 Ok(Exp {
                     span: prefix.span,
@@ -134,52 +139,91 @@ impl Parser {
         }
     }
 
-    pub(super) fn parse_func_body(&mut self, start: Position) -> Result<FuncBody, ParseError> {
-        let _open = self.expect_symbol(Symbol::LParen)?;
-        let (params, is_vararg) = self.parse_parlist()?;
-        let _close = self.expect_symbol(Symbol::RParen)?;
+    fn can_start_lambda(&mut self) -> Result<bool, ParseError> {
+        let checkpoint = self.checkpoint();
+        if self.is_keyword(Keyword::Const) {
+            self.advance();
+        }
+        if !self.is_symbol(Symbol::LParen) {
+            self.restore(checkpoint);
+            return Ok(false);
+        }
+        self.advance();
+        if !self.is_symbol(Symbol::RParen) {
+            if !self.skip_lambda_param()? {
+                self.restore(checkpoint);
+                return Ok(false);
+            }
+            while self.is_symbol(Symbol::Comma) {
+                self.advance();
+                if !self.skip_lambda_param()? {
+                    self.restore(checkpoint);
+                    return Ok(false);
+                }
+            }
+        }
+        if !self.is_symbol(Symbol::RParen) {
+            self.restore(checkpoint);
+            return Ok(false);
+        }
+        self.advance();
+        let has_type = self.is_symbol(Symbol::Colon);
+        self.restore(checkpoint);
+        Ok(has_type)
+    }
 
-        let prev_vararg = self.vararg_allowed;
-        self.vararg_allowed = is_vararg;
+    fn skip_lambda_param(&mut self) -> Result<bool, ParseError> {
+        if !matches!(self.current().kind, TokenKind::Identifier(_)) {
+            return Ok(false);
+        }
+        self.advance();
+        if self.is_symbol(Symbol::Colon) {
+            self.advance();
+            if !self.skip_type_name() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn skip_type_name(&mut self) -> bool {
+        if !matches!(self.current().kind, TokenKind::Identifier(_)) {
+            return false;
+        }
+        self.advance();
+        while self.is_symbol(Symbol::Dot) {
+            self.advance();
+            if !matches!(self.current().kind, TokenKind::Identifier(_)) {
+                return false;
+            }
+            self.advance();
+        }
+        true
+    }
+
+    fn parse_lambda_expr(&mut self) -> Result<LambdaExpr, ParseError> {
+        let start = self.current().span.start;
+        let is_const = if self.is_keyword(Keyword::Const) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let params = self.parse_param_list()?;
+        let return_type = self.parse_type_spec()?;
         let block = self.parse_block(BlockEnd::Nested)?;
-        self.vararg_allowed = prev_vararg;
-
         let end = self.expect_keyword(Keyword::End)?;
         let span = crate::token::Span::new(start, end.span.end);
-        Ok(FuncBody {
+        Ok(LambdaExpr {
             span,
+            is_const,
             params,
-            is_vararg,
+            return_type,
             block,
         })
     }
 
-    fn parse_parlist(&mut self) -> Result<(Vec<Name>, bool), ParseError> {
-        if self.is_symbol(Symbol::RParen) {
-            return Ok((Vec::new(), false));
-        }
-
-        if self.is_symbol(Symbol::DotDotDot) {
-            let _dots = self.advance();
-            return Ok((Vec::new(), true));
-        }
-
-        let mut params = Vec::new();
-        let mut is_vararg = false;
-        params.push(self.parse_name()?);
-        while self.is_symbol(Symbol::Comma) {
-            self.advance();
-            if self.is_symbol(Symbol::DotDotDot) {
-                self.advance();
-                is_vararg = true;
-                break;
-            }
-            params.push(self.parse_name()?);
-        }
-        Ok((params, is_vararg))
-    }
-
-    pub(super) fn parse_table_constructor(&mut self) -> Result<TableConstructor, ParseError> {
+    pub(super) fn parse_initializer(&mut self) -> Result<Initializer, ParseError> {
         let open = self.expect_symbol(Symbol::LBrace)?;
         let mut fields = Vec::new();
         while !self.is_symbol(Symbol::RBrace) {
@@ -196,7 +240,7 @@ impl Parser {
         }
         let close = self.expect_symbol(Symbol::RBrace)?;
         let span = open.span.merge(close.span);
-        Ok(TableConstructor { span, fields })
+        Ok(Initializer { span, fields })
     }
 
     fn parse_field(&mut self) -> Result<Field, ParseError> {
@@ -252,21 +296,14 @@ impl Parser {
                 })
             }
             TokenKind::Symbol(Symbol::LBrace) => {
-                let table = self.parse_table_constructor()?;
+                let init = self.parse_initializer()?;
                 Ok(Args {
-                    span: table.span,
-                    kind: ArgsKind::Table(table),
-                })
-            }
-            TokenKind::StringLiteral(text) => {
-                self.advance();
-                Ok(Args {
-                    span: token.span,
-                    kind: ArgsKind::String(text),
+                    span: init.span,
+                    kind: ArgsKind::Initializer(init),
                 })
             }
             _ => Err(ParseError {
-                message: "expected function call arguments".to_string(),
+                message: "expected call arguments".to_string(),
                 position: token.span.start,
             }),
         }

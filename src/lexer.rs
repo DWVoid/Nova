@@ -408,9 +408,7 @@ impl<'a> Lexer<'a> {
 
     fn lex_symbol(&mut self, start_pos: Position) -> Result<Token, LexError> {
         let slice = self.current_slice();
-        let (kind, consume) = if slice.starts_with("...") {
-            (TokenKind::Symbol(Symbol::DotDotDot), "...")
-        } else if slice.starts_with("..") {
+        let (kind, consume) = if slice.starts_with("..") {
             (TokenKind::Symbol(Symbol::DotDot), "..")
         } else if slice.starts_with("==") {
             (TokenKind::Symbol(Symbol::EqEq), "==")
@@ -455,6 +453,7 @@ impl<'a> Lexer<'a> {
                 ':' => Symbol::Colon,
                 ',' => Symbol::Comma,
                 '.' => Symbol::Dot,
+                '@' => Symbol::At,
                 _ => {
                     return Err(LexError {
                         message: format!("unexpected character: {ch}"),
@@ -483,26 +482,38 @@ fn is_ident_continue(ch: char) -> bool {
 fn keyword_from_str(text: &str) -> Option<Keyword> {
     Some(match text {
         "and" => Keyword::And,
+        "as" => Keyword::As,
         "break" => Keyword::Break,
+        "const" => Keyword::Const,
+        "continue" => Keyword::Continue,
+        "define" => Keyword::Define,
         "do" => Keyword::Do,
         "else" => Keyword::Else,
         "elseif" => Keyword::ElseIf,
         "end" => Keyword::End,
+        "enum" => Keyword::Enum,
+        "export" => Keyword::Export,
         "false" => Keyword::False,
         "for" => Keyword::For,
-        "function" => Keyword::Function,
         "goto" => Keyword::Goto,
         "if" => Keyword::If,
+        "implement" => Keyword::Implement,
         "in" => Keyword::In,
-        "local" => Keyword::Local,
+        "namespace" => Keyword::Namespace,
         "nil" => Keyword::Nil,
         "not" => Keyword::Not,
         "or" => Keyword::Or,
         "repeat" => Keyword::Repeat,
         "return" => Keyword::Return,
+        "struct" => Keyword::Struct,
         "then" => Keyword::Then,
+        "trait" => Keyword::Trait,
         "true" => Keyword::True,
         "until" => Keyword::Until,
+        "use" => Keyword::Use,
+        "val" => Keyword::Val,
+        "var" => Keyword::Var,
+        "variant" => Keyword::Variant,
         "while" => Keyword::While,
         _ => return None,
     })
@@ -514,14 +525,13 @@ mod tests {
 
     #[test]
     fn lexes_simple_tokens_with_comment() {
-        let input = "-- hi\nlocal x = 1";
+        let input = "-- hi\nuse System;";
         let tokens = Lexer::new(input).lex_all().unwrap();
         let first = &tokens[0];
-        assert!(matches!(first.kind, TokenKind::Keyword(Keyword::Local)));
+        assert!(matches!(first.kind, TokenKind::Keyword(Keyword::Use)));
         assert_eq!(first.leading.len(), 1);
         assert!(matches!(tokens[1].kind, TokenKind::Identifier(_)));
-        assert!(matches!(tokens[2].kind, TokenKind::Symbol(Symbol::Assign)));
-        assert!(matches!(tokens[3].kind, TokenKind::Number(_)));
+        assert!(matches!(tokens[2].kind, TokenKind::Symbol(Symbol::Semi)));
     }
 
     #[test]

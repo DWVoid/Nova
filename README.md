@@ -6,7 +6,14 @@ Nova is an in-progress Lua 5.4-compatible parser. It reads Lua source from stand
 
 - Lexer and tokens implemented.
 - AST definitions and AST emitter added.
-- Parser skeleton exists; statement/expression parsing is next.
+- Parser implemented (statements, expressions, and prefix chains).
+
+## Documentation Structure
+
+- `docs/doc/`: Lua 5.4 HTML reference (source material).
+- `docs/frontend/`: Implementation plans and parser notes.
+- `docs/language/0-Lexical.md`: Implemented lexical structure (English + BNF).
+- `docs/language/1-Grammar.md`: Implemented grammar structure (English + BNF).
 
 ## Try It
 
@@ -14,7 +21,7 @@ Nova is an in-progress Lua 5.4-compatible parser. It reads Lua source from stand
 cargo test
 ```
 
-When parsing is implemented, the CLI will support:
+Parse a Lua file and print the AST:
 
 ```bash
 cargo run < input.lua

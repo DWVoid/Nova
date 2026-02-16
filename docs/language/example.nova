@@ -1,0 +1,110 @@
+-- You are supposed to import your dependencies at the bundle level, use is for name imports --
+
+-- Add all names under namespace System to current resolution scope --
+use System;
+-- Add names State and Canvas from namespace Present to current resolution scope, rename Canvas to C --
+-- Brackets can be nested --
+use Present.{State, Canvas as C};
+-- you can also alias a namespace when importing instead of adding it to the resolution scope --
+use Filesystem as Fs;
+
+-- you will have to declare the namespace the current code is in here. global scope is not allowed --
+namespace Example;
+
+-- definitions can be have different visibilities, controlled by export modifier --
+-- none for only visible to current file --
+-- export for fully public --
+-- export(bundle) for visible to current bundle, private to anything other --
+-- export(namespace) for visible to the same namespace currently in, private to anything other --
+-- export(namespace, bundle) for visible to intersection of both --
+
+-- a struct is a collection of typed fields --
+define a struct
+    x: integer; -- there is boolean, integer, numeric, string and any as basic built-in types --
+end
+
+define b struct
+    x: numeric
+end
+
+-- a enum is a collection of named constant values, they can be of any type --
+define c enum: integer
+    A = 1;
+    B = 2;
+end
+
+-- a proper tagged union, also known as variant, is a collection of named fields, only one of which can be set at a time --
+define v variant
+    A: integer;
+    B: string;
+end
+
+-- a trait is a collection of method signatures, it can be implemented by structs --
+define IExample trait
+    -- similar to function definitions, but without keyword 'function' and function body --
+    exampleMethod(): unit;
+end
+
+implement for a
+    -- can be have different visibilities, controlled by export modifier as defined previously --
+    -- Self can be used in-place of the struct name being implemented --
+    export define new (): Self
+        return Self { x: 0 };
+    end
+
+    -- apart from static members, instance members can be defined by having self as the first parameter --
+    export define increment (self): unit
+        self.x = self.x + 1;
+    end
+end
+
+implement IExample for a
+    -- method implementations are similar to function definitions, but with an additional parameter 'self' --
+    define exampleMethod (): unit
+        -- method body --
+    end
+end
+
+-- standalone functions can also be defined as primary statement
+-- can be have different visibilities, controlled by export modifier as defined previously --
+export define example_function (self): unit
+    -- method body --
+end
+
+-- constants can be defined as primary statement
+-- can be have different visibilities, controlled by export modifier as defined previously --
+export define EXAMPLE_CONSTANT: integer 42
+
+-- finally, there is one type of function that can only be defined as primary statement, namely const functions --
+-- they are similar to normal functions, but they can only call other const functions and use other const items --
+-- and they can be evaluated at compile time --
+-- they can also be used for compile time type manipulation --
+export define example_const_function const(x: integer): integer
+    return x + EXAMPLE_CONSTANT;
+end
+
+-- this one demos ways to manipulate code as data using const functions --
+export define manipulator const(x: Meta.Struct, a1: integer): Meta.Struct
+    -- method body, manipulate here --
+end
+
+--[=[first method.
+this requires the manipulating function to accept data of the manipulated and returns the same type.
+returned definition must be compatible with the original one.
+for functions they must have the same definition.
+for types all originally defined signature parts must be found in the returned one
+they can be applied in chain in the reverse order they appear.
+additional parameter can be passed in the bracket.
+]=]--
+
+@manipulator(2)
+@manipulator(1)
+define manipulated struct
+    x: integer;
+end
+
+--[=[second method.
+you can also just call the methods.
+this has no additional requirements on manipulation, but you cannot re-assign the manipulated name after this.
+]=]--
+define manipulate2 manipulator(manipulate2, 1)

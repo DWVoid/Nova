@@ -1,106 +1,140 @@
-# Nova Grammar (Current Parser)
-
-This document describes the grammar implemented by the current parser. It follows the same style as the lexical document: standardized English plus BNF-style productions. The intent is descriptive, not prescriptive, and it mirrors the behavior in `src/parser/`.
+# Nova Grammar 
 
 Notes:
-- Terminals are quoted (e.g., "if", "+").
-- Non-terminals use angle brackets (e.g., `<exp>`).
+- Terminals are quoted (e.g., "if").
+- Non-terminals use angle brackets (e.g., <stat>).
 - `{ ... }` means repetition (zero or more).
 - `[ ... ]` means optional.
 
-## 1. Entry Point and Blocks
-
-- A compilation unit is a `<chunk>`, which is a `<block>` followed by end-of-file.
-- A `<block>` is a sequence of statements, optionally ending with a return statement.
-- Block termination depends on context:
-  - Top-level blocks end at EOF.
-  - Nested blocks end at one of: "end", "else", "elseif", or "until".
+## 1. Compilation Unit
 
 BNF:
 ```
-<chunk> ::= <block> <eof>
-<block> ::= { <stat> } [ <retstat> [";"] ]
+<compilation_unit> ::= { <use_decl> } <namespace_decl> { <top_item> } <eof>
+
+<top_item> ::= <definition> | <implementation>
 ```
 
-## 2. Statements
-
-### 2.1 Empty Statement
+## 2. Use and Namespace Declarations
 
 BNF:
 ```
+<use_decl> ::= "use" <namespace_path> [ <use_selector> | <use_alias> ] ";"
+
+<use_selector> ::= "." "{" <use_list> "}"
+<use_list> ::= <use_item> { "," <use_item> }
+<use_item> ::= <name> [ "as" <name> ]
+
+<use_alias> ::= "as" <name>
+
+<namespace_decl> ::= "namespace" <namespace_path> ";"
+
+<namespace_path> ::= <name> { "." <name> }
+```
+
+## 3. Visibility Modifiers
+
+BNF:
+```
+<visibility> ::= "export" [ "(" <scope_list> ")" ]
+<scope_list> ::= <name> { "," <name> }
+```
+
+## 4. Definitions and Implementations
+
+BNF:
+```
+<definition> ::= { <decorator> } [ <visibility> ] "define" <name> [ <type_spec> ] <def_expr> [ ";" ]
+
+<def_expr> ::= <struct_def>
+             | <enum_def>
+             | <variant_def>
+             | <trait_def>
+             | <exp>
+
+<implementation> ::= "implement" [ <type> ] "for" <type> <impl_body> "end"
+<impl_body> ::= { <definition> }
+```
+
+### 4.1 Structs
+
+BNF:
+```
+<struct_def> ::= "struct" <struct_body> "end"
+<struct_body> ::= { <field_decl> }
+<field_decl> ::= <name> <type_spec> [ ";" ]
+```
+
+### 4.2 Enums
+
+BNF:
+```
+<enum_def> ::= "enum" <type_spec> <enum_body> "end"
+<enum_body> ::= { <enum_member> }
+<enum_member> ::= <name> "=" <exp> [ ";" ]
+```
+
+### 4.3 Variants
+
+BNF:
+```
+<variant_def> ::= "variant" <variant_body> "end"
+<variant_body> ::= { <variant_member> }
+<variant_member> ::= <name> <type_spec> [ ";" ]
+```
+
+### 4.4 Traits
+
+BNF:
+```
+<trait_def> ::= "trait" <trait_body> "end"
+<trait_body> ::= { <trait_sig> }
+<trait_sig> ::= <name> <param_list> <type_spec> [ ";" ]
+```
+
+## 5. Decorators
+
+BNF:
+```
+<decorator> ::= "@" <name> [ "(" [ <explist> ] ")" ]
+```
+
+## 6. Types
+
+BNF:
+```
+<type> ::= <namespace_path>
+<type_spec> ::= ":" <type>
+```
+
+## 7. Blocks and Statements
+
+BNF:
+```
+<block> ::= { <stat> } [ <retstat> [ ";" ] ]
+
 <stat> ::= ";"
-```
-
-### 2.2 Assignment and Call Statements
-
-- A call statement is a prefix expression that resolves to a function call.
-- An assignment requires a comma-separated variable list and an expression list.
-- A parenthesized expression cannot start a statement.
-- A function call cannot be used as an assignment target.
-
-BNF:
-```
-<stat> ::= <varlist> "=" <explist>
-        | <functioncall>
-
-<varlist> ::= <var> { "," <var> }
-<explist> ::= <exp> { "," <exp> }
-```
-
-### 2.3 Local Declarations
-
-- Local assignment: "local" name list, optional initializer list.
-- Local function: "local function" name funcbody.
-- Local attributes: `<const>` or `<close>` after a local name, using `<` and `>` tokens.
-
-BNF:
-```
-<stat> ::= "local" <localnames> [ "=" <explist> ]
-        | "local" "function" <name> <funcbody>
-
-<localnames> ::= <localname> { "," <localname> }
-<localname> ::= <name> [ "<" ("const" | "close") ">" ]
-```
-
-### 2.4 Function Statements
-
-BNF:
-```
-<stat> ::= "function" <funcname> <funcbody>
-
-<funcname> ::= <name> { "." <name> } [ ":" <name> ]
-```
-
-### 2.5 Control Flow Statements
-
-BNF:
-```
-<stat> ::= "do" <block> "end"
+        | <varlist> "=" <explist>
+        | <invoke>
+        | "do" <block> "end"
         | "while" <exp> "do" <block> "end"
         | "repeat" <block> "until" <exp>
         | "if" <exp> "then" <block> { "elseif" <exp> "then" <block> } [ "else" <block> ] "end"
         | "for" <name> "=" <exp> "," <exp> [ "," <exp> ] "do" <block> "end"
         | "for" <namelist> "in" <explist> "do" <block> "end"
         | "break"
+        | "continue"
         | "goto" <name>
         | "::" <name> "::"
+
+<retstat> ::= "return" [ <explist> ]
 
 <namelist> ::= <name> { "," <name> }
 ```
 
-### 2.6 Return Statement
+## 8. Expressions
 
-- Return is allowed only as the last statement in a block.
-- A return statement may be followed by an optional semicolon.
-
-BNF:
-```
-<retstat> ::= "return" [ <explist> ]
-```
-
-## 3. Expressions
-
-### 3.1 Expression Forms
+### 8.1 Expression Forms
 
 BNF:
 ```
@@ -109,28 +143,34 @@ BNF:
         | "true"
         | <number>
         | <string>
-        | "..."
-        | <functiondef>
-        | <tableconstructor>
+        | <initializer>
         | <prefixexp>
+        | <lambda_expr>
         | <unop> <exp>
         | <exp> <binop> <exp>
 ```
 
-Notes:
-- Vararg ("...") is only valid inside a vararg function body.
+### 8.2 Lambda Expressions
 
-### 3.2 Unary Operators
+BNF:
+```
+<lambda_expr> ::= [ "const" ] <param_list> <type_spec> <block> "end"
+
+<param_list> ::= "(" [ <param_items> ] ")"
+<param_items> ::= <param> { "," <param> }
+<param> ::= <name> [ <type_spec> ]
+```
+
+### 8.3 Unary Operators
 
 BNF:
 ```
 <unop> ::= "not" | "-" | "#" | "~"
 ```
 
-### 3.3 Binary Operators and Precedence
+### 8.4 Binary Operators and Precedence
 
-The parser uses a precedence-climbing algorithm with the following precedence and associativity:
-
+Precedence (lowest to highest), with associativity:
 1. `or` (left)
 2. `and` (left)
 3. Comparisons: `<` `<=` `>` `>=` `==` `~=` (left)
@@ -155,12 +195,7 @@ BNF (operator set):
          | "^"
 ```
 
-## 4. Prefix Expressions, Variables, and Calls
-
-### 4.1 Prefix Expressions
-
-- A prefix expression starts with a name or a parenthesized expression.
-- It can be followed by any number of suffixes (field access, index, or call forms).
+## 9. Prefix Expressions, Variables, and Calls
 
 BNF:
 ```
@@ -171,57 +206,24 @@ BNF:
           | "[" <exp> "]"
           | ":" <name> <args>
           | <args>
-```
 
-### 4.2 Variables
-
-- A variable is a name, or a field/index access on a prefix expression.
-
-BNF:
-```
-<var> ::= <name>
+<var> ::= "var" <name> [ <type_spec> ]
+        | "val" <name> [ <type_spec> ]
+        | <name>
         | <prefixexp> "[" <exp> "]"
         | <prefixexp> "." <name>
+
+<varlist> ::= <var> { "," <var> }
+
+<invoke> ::= <prefixexp> <args>
+           | <prefixexp> ":" <name> <args>
 ```
 
-### 4.3 Function Calls
-
-- A function call is a prefix expression followed by a call suffix.
+## 10. Initializers
 
 BNF:
 ```
-<functioncall> ::= <prefixexp> <args>
-                 | <prefixexp> ":" <name> <args>
-```
-
-## 5. Function Definitions
-
-### 5.1 Function Body
-
-BNF:
-```
-<functiondef> ::= "function" <funcbody>
-<funcbody> ::= "(" [ <parlist> ] ")" <block> "end"
-```
-
-### 5.2 Parameter List
-
-- A parameter list is either just vararg, or a comma-separated name list with optional trailing vararg.
-
-BNF:
-```
-<parlist> ::= "..."
-            | <namelist> [ "," "..." ]
-```
-
-## 6. Table Constructors
-
-- Fields can be explicit key/value pairs or implicit array entries.
-- Field separators can be `,` or `;`.
-
-BNF:
-```
-<tableconstructor> ::= "{" [ <fieldlist> ] "}"
+<initializer> ::= "{" [ <fieldlist> ] "}"
 <fieldlist> ::= <field> { <fieldsep> <field> } [ <fieldsep> ]
 <fieldsep> ::= "," | ";"
 
@@ -230,24 +232,10 @@ BNF:
           | <exp>
 ```
 
-## 7. Call Arguments
+## 11. Call Arguments
 
 BNF:
 ```
 <args> ::= "(" [ <explist> ] ")"
-        | <tableconstructor>
-        | <string>
+        | <initializer>
 ```
-
-## 8. Terminals and Non-terminals
-
-- `<name>` is an identifier token from the lexer.
-- `<number>` and `<string>` are numeric and string literal tokens from the lexer.
-- `<eof>` is the end-of-file token emitted by the lexer.
-
-## 9. Known Deviations or Constraints
-
-- Identifiers are ASCII-only (per lexer).
-- Vararg ("...") is only permitted within function bodies that declare vararg parameters.
-- Parenthesized expressions cannot start a statement.
-- Call expressions cannot be used as assignment targets.

@@ -1,6 +1,6 @@
 use super::{ParseError, Parser};
-use crate::ast::{FunctionCall, PrefixExp, PrefixExpKind, Var, VarDeclKind, VarKind};
-use crate::token::{Keyword, Symbol, TokenKind};
+use crate::syntax::ast::{FunctionCall, PrefixExp, PrefixExpKind, Var, VarDeclKind, VarKind};
+use crate::lexical::token::{Keyword, Symbol, TokenKind};
 
 impl Parser {
     pub(crate) fn parse_prefixexp(&mut self) -> Result<PrefixExp, ParseError> {

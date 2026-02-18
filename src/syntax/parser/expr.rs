@@ -1,6 +1,6 @@
 use super::{Assoc, BlockEnd, ParseError, Parser};
-use crate::ast::{Args, ArgsKind, Exp, ExpKind, Field, FieldKey, Initializer, LambdaExpr};
-use crate::token::{Keyword, Symbol, TokenKind};
+use crate::syntax::ast::{Args, ArgsKind, Exp, ExpKind, Field, FieldKey, Initializer, LambdaExpr};
+use crate::lexical::token::{Keyword, Symbol, TokenKind, Span};
 
 impl Parser {
     pub(super) fn parse_exp_list(&mut self, min_prec: u8) -> Result<Vec<Exp>, ParseError> {
@@ -206,7 +206,7 @@ impl Parser {
         let return_type = self.parse_type_spec()?;
         let block = self.parse_block(BlockEnd::Nested)?;
         let end = self.expect_keyword(Keyword::End)?;
-        let span = crate::token::Span::new(start, end.span.end);
+        let span = Span::new(start, end.span.end);
         Ok(LambdaExpr {
             span,
             is_const,

@@ -1,10 +1,10 @@
 use super::{ParseError, Parser};
-use crate::ast::{
+use crate::syntax::ast::{
     Decorator, DefExpr, Definition, EnumDef, EnumMember, FieldDecl, Implementation, Name, Param,
     StructDef, TraitDef, TraitSig, TypeName, TypeSpec, UseDecl, UseItem, UseTail, VariantDef,
     VariantMember, Visibility,
 };
-use crate::token::{Keyword, Span, Symbol};
+use crate::lexical::token::{Keyword, Span, Symbol};
 
 impl Parser {
     pub(super) fn parse_use_decl(&mut self) -> Result<UseDecl, ParseError> {

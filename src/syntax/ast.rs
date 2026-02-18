@@ -1,4 +1,4 @@
-use crate::token::{Comment, Span};
+use crate::lexical::token::{Comment, Span};
 
 pub type Comments = Vec<Comment>;
 
@@ -344,7 +344,7 @@ pub enum BinOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::token::{CommentKind, Position};
+    use crate::lexical::token::{CommentKind, Position};
 
     fn span() -> Span {
         Span::new(Position::start(), Position::start())

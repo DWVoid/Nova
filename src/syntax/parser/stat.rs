@@ -1,9 +1,9 @@
 use super::{BlockEnd, ParseError, Parser};
-use crate::ast::{IfClause, Name, PrefixExpKind, RetStat, Stat, StatKind};
-use crate::token::{Keyword, Span, Symbol, TokenKind};
+use crate::syntax::ast::{Block, IfClause, Name, PrefixExpKind, RetStat, Stat, StatKind};
+use crate::lexical::token::{Keyword, Span, Symbol, TokenKind};
 
 impl Parser {
-    pub(super) fn parse_block(&mut self, end: BlockEnd) -> Result<crate::ast::Block, ParseError> {
+    pub(super) fn parse_block(&mut self, end: BlockEnd) -> Result<Block, ParseError> {
         let start = self.current().span.start;
         let mut end_pos = start;
         let mut stats = Vec::new();
@@ -26,7 +26,7 @@ impl Parser {
         }
 
         let span = Span::new(start, end_pos);
-        Ok(crate::ast::Block { span, stats, ret })
+        Ok(Block { span, stats, ret })
     }
 
     pub(super) fn parse_stat(&mut self) -> Result<Stat, ParseError> {
@@ -325,7 +325,7 @@ impl Parser {
     }
 
     fn is_label_start(&self) -> bool {
-        matches!(self.current().kind, crate::token::TokenKind::Symbol(Symbol::Colon))
-            && matches!(self.peek(1).kind, crate::token::TokenKind::Symbol(Symbol::Colon))
+        matches!(self.current().kind, TokenKind::Symbol(Symbol::Colon))
+            && matches!(self.peek(1).kind, TokenKind::Symbol(Symbol::Colon))
     }
 }

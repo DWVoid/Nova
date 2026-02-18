@@ -1,5 +1,5 @@
 use super::{Assoc, BlockEnd, ParseError, Parser};
-use crate::token::{Keyword, Symbol, Token, TokenKind};
+use crate::lexical::token::{Keyword, Symbol, Token, TokenKind};
 
 impl Parser {
     pub(crate) fn advance(&mut self) -> Token {
@@ -89,33 +89,33 @@ impl Parser {
         })
     }
 
-    pub(crate) fn peek_unop(&self) -> Option<crate::ast::UnOp> {
+    pub(crate) fn peek_unop(&self) -> Option<crate::syntax::ast::UnOp> {
         match self.current().kind {
-            TokenKind::Keyword(Keyword::Not) => Some(crate::ast::UnOp::Not),
-            TokenKind::Symbol(Symbol::Minus) => Some(crate::ast::UnOp::Neg),
-            TokenKind::Symbol(Symbol::Hash) => Some(crate::ast::UnOp::Len),
-            TokenKind::Symbol(Symbol::Tilde) => Some(crate::ast::UnOp::BitNot),
+            TokenKind::Keyword(Keyword::Not) => Some(crate::syntax::ast::UnOp::Not),
+            TokenKind::Symbol(Symbol::Minus) => Some(crate::syntax::ast::UnOp::Neg),
+            TokenKind::Symbol(Symbol::Hash) => Some(crate::syntax::ast::UnOp::Len),
+            TokenKind::Symbol(Symbol::Tilde) => Some(crate::syntax::ast::UnOp::BitNot),
             _ => None,
         }
     }
 
-    pub(crate) fn peek_binop(&self) -> Option<(crate::ast::BinOp, u8, Assoc)> {
+    pub(crate) fn peek_binop(&self) -> Option<(crate::syntax::ast::BinOp, u8, Assoc)> {
         match self.current().kind {
-            TokenKind::Keyword(Keyword::Or) => Some((crate::ast::BinOp::Or, 1, Assoc::Left)),
-            TokenKind::Keyword(Keyword::And) => Some((crate::ast::BinOp::And, 2, Assoc::Left)),
+            TokenKind::Keyword(Keyword::Or) => Some((crate::syntax::ast::BinOp::Or, 1, Assoc::Left)),
+            TokenKind::Keyword(Keyword::And) => Some((crate::syntax::ast::BinOp::And, 2, Assoc::Left)),
             TokenKind::Symbol(Symbol::Less)
             | TokenKind::Symbol(Symbol::LessEq)
             | TokenKind::Symbol(Symbol::Greater)
             | TokenKind::Symbol(Symbol::GreaterEq)
             | TokenKind::Symbol(Symbol::EqEq)
             | TokenKind::Symbol(Symbol::NotEq) => Some((self.binop_from_symbol()?, 3, Assoc::Left)),
-            TokenKind::Symbol(Symbol::Pipe) => Some((crate::ast::BinOp::BitOr, 4, Assoc::Left)),
-            TokenKind::Symbol(Symbol::Tilde) => Some((crate::ast::BinOp::BitXor, 5, Assoc::Left)),
-            TokenKind::Symbol(Symbol::Amp) => Some((crate::ast::BinOp::BitAnd, 6, Assoc::Left)),
+            TokenKind::Symbol(Symbol::Pipe) => Some((crate::syntax::ast::BinOp::BitOr, 4, Assoc::Left)),
+            TokenKind::Symbol(Symbol::Tilde) => Some((crate::syntax::ast::BinOp::BitXor, 5, Assoc::Left)),
+            TokenKind::Symbol(Symbol::Amp) => Some((crate::syntax::ast::BinOp::BitAnd, 6, Assoc::Left)),
             TokenKind::Symbol(Symbol::ShiftLeft) | TokenKind::Symbol(Symbol::ShiftRight) => {
                 Some((self.binop_from_symbol()?, 7, Assoc::Left))
             }
-            TokenKind::Symbol(Symbol::DotDot) => Some((crate::ast::BinOp::Concat, 8, Assoc::Right)),
+            TokenKind::Symbol(Symbol::DotDot) => Some((crate::syntax::ast::BinOp::Concat, 8, Assoc::Right)),
             TokenKind::Symbol(Symbol::Plus) | TokenKind::Symbol(Symbol::Minus) => {
                 Some((self.binop_from_symbol()?, 9, Assoc::Left))
             }
@@ -123,27 +123,27 @@ impl Parser {
             | TokenKind::Symbol(Symbol::Slash)
             | TokenKind::Symbol(Symbol::FloorDiv)
             | TokenKind::Symbol(Symbol::Percent) => Some((self.binop_from_symbol()?, 10, Assoc::Left)),
-            TokenKind::Symbol(Symbol::Caret) => Some((crate::ast::BinOp::Pow, 12, Assoc::Right)),
+            TokenKind::Symbol(Symbol::Caret) => Some((crate::syntax::ast::BinOp::Pow, 12, Assoc::Right)),
             _ => None,
         }
     }
 
-    pub(crate) fn binop_from_symbol(&self) -> Option<crate::ast::BinOp> {
+    pub(crate) fn binop_from_symbol(&self) -> Option<crate::syntax::ast::BinOp> {
         match self.current().kind {
-            TokenKind::Symbol(Symbol::Less) => Some(crate::ast::BinOp::Less),
-            TokenKind::Symbol(Symbol::LessEq) => Some(crate::ast::BinOp::LessEq),
-            TokenKind::Symbol(Symbol::Greater) => Some(crate::ast::BinOp::Greater),
-            TokenKind::Symbol(Symbol::GreaterEq) => Some(crate::ast::BinOp::GreaterEq),
-            TokenKind::Symbol(Symbol::EqEq) => Some(crate::ast::BinOp::Eq),
-            TokenKind::Symbol(Symbol::NotEq) => Some(crate::ast::BinOp::NotEq),
-            TokenKind::Symbol(Symbol::ShiftLeft) => Some(crate::ast::BinOp::ShiftLeft),
-            TokenKind::Symbol(Symbol::ShiftRight) => Some(crate::ast::BinOp::ShiftRight),
-            TokenKind::Symbol(Symbol::Plus) => Some(crate::ast::BinOp::Add),
-            TokenKind::Symbol(Symbol::Minus) => Some(crate::ast::BinOp::Sub),
-            TokenKind::Symbol(Symbol::Star) => Some(crate::ast::BinOp::Mul),
-            TokenKind::Symbol(Symbol::Slash) => Some(crate::ast::BinOp::Div),
-            TokenKind::Symbol(Symbol::FloorDiv) => Some(crate::ast::BinOp::FloorDiv),
-            TokenKind::Symbol(Symbol::Percent) => Some(crate::ast::BinOp::Mod),
+            TokenKind::Symbol(Symbol::Less) => Some(crate::syntax::ast::BinOp::Less),
+            TokenKind::Symbol(Symbol::LessEq) => Some(crate::syntax::ast::BinOp::LessEq),
+            TokenKind::Symbol(Symbol::Greater) => Some(crate::syntax::ast::BinOp::Greater),
+            TokenKind::Symbol(Symbol::GreaterEq) => Some(crate::syntax::ast::BinOp::GreaterEq),
+            TokenKind::Symbol(Symbol::EqEq) => Some(crate::syntax::ast::BinOp::Eq),
+            TokenKind::Symbol(Symbol::NotEq) => Some(crate::syntax::ast::BinOp::NotEq),
+            TokenKind::Symbol(Symbol::ShiftLeft) => Some(crate::syntax::ast::BinOp::ShiftLeft),
+            TokenKind::Symbol(Symbol::ShiftRight) => Some(crate::syntax::ast::BinOp::ShiftRight),
+            TokenKind::Symbol(Symbol::Plus) => Some(crate::syntax::ast::BinOp::Add),
+            TokenKind::Symbol(Symbol::Minus) => Some(crate::syntax::ast::BinOp::Sub),
+            TokenKind::Symbol(Symbol::Star) => Some(crate::syntax::ast::BinOp::Mul),
+            TokenKind::Symbol(Symbol::Slash) => Some(crate::syntax::ast::BinOp::Div),
+            TokenKind::Symbol(Symbol::FloorDiv) => Some(crate::syntax::ast::BinOp::FloorDiv),
+            TokenKind::Symbol(Symbol::Percent) => Some(crate::syntax::ast::BinOp::Mod),
             _ => None,
         }
     }

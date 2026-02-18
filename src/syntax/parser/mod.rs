@@ -6,8 +6,8 @@ mod decl;
 #[cfg(test)]
 mod tests;
 
-use crate::ast::{Chunk, Comments, NamespaceDecl, TopItem, UseDecl};
-use crate::token::{Comment, Keyword, Position, Symbol, Token, TokenKind};
+use crate::syntax::ast::{Chunk, Comments, NamespaceDecl, TopItem, UseDecl};
+use crate::lexical::token::{Comment, Keyword, Position, Symbol, Token, TokenKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseError {

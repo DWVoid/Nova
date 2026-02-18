@@ -1,13 +1,9 @@
-mod ast;
-mod emit;
-mod lexer;
+mod lexical;
+mod syntax;
 
-mod parser;
-mod token;
-
-use crate::emit::Emitter;
-use crate::lexer::Lexer;
-use crate::parser::Parser;
+use crate::lexical::lexer::Lexer;
+use crate::syntax::emit::Emitter;
+use crate::syntax::parser::Parser;
 use std::io::{self, Read};
 
 fn main() {

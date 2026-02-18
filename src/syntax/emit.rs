@@ -1,10 +1,10 @@
-use crate::ast::{
+use crate::syntax::ast::{
     Args, ArgsKind, BinOp, Block, Chunk, Decorator, DefExpr, Definition, EnumDef, EnumMember, Exp,
     ExpKind, Field, FieldKey, IfClause, Implementation, Initializer, LambdaExpr, Name, NamespaceDecl,
     Param, PrefixExp, PrefixExpKind, RetStat, Stat, StatKind, StructDef, TraitDef, TraitSig, TypeName,
     TypeSpec, UnOp, UseDecl, UseItem, UseTail, Var, VarDeclKind, VarKind, VariantDef,
 };
-use crate::token::{Comment, CommentKind, Span};
+use crate::lexical::token::{Comment, CommentKind, Span};
 
 struct Formatter {
     out: String,
@@ -238,10 +238,10 @@ impl Emitter {
         ftb.next("path", |f| Self::write_name_list(f, &namespace.path));
     }
 
-    fn write_top_item(f: &mut Formatter, item: &crate::ast::TopItem) {
+    fn write_top_item(f: &mut Formatter, item: &crate::syntax::ast::TopItem) {
         match item {
-            crate::ast::TopItem::Definition(def) => Self::write_definition(f, def),
-            crate::ast::TopItem::Implementation(imp) => Self::write_implementation(f, imp),
+            crate::syntax::ast::TopItem::Definition(def) => Self::write_definition(f, def),
+            crate::syntax::ast::TopItem::Implementation(imp) => Self::write_implementation(f, imp),
         }
     }
 
@@ -281,7 +281,7 @@ impl Emitter {
         });
     }
 
-    fn write_field_decl(f: &mut Formatter, field: &crate::ast::FieldDecl) {
+    fn write_field_decl(f: &mut Formatter, field: &crate::syntax::ast::FieldDecl) {
         let mut ftb = TableFormatter::new(f, "FieldDecl");
         ftb.next("name", |f| Self::write_name(f, &field.name));
         ftb.next("type_spec", |f| Self::write_type_spec(f, &field.type_spec));
@@ -316,7 +316,7 @@ impl Emitter {
         });
     }
 
-    fn write_variant_member(f: &mut Formatter, member: &crate::ast::VariantMember) {
+    fn write_variant_member(f: &mut Formatter, member: &crate::syntax::ast::VariantMember) {
         let mut ftb = TableFormatter::new(f, "VariantMember");
         ftb.next("name", |f| Self::write_name(f, &member.name));
         ftb.next("type_spec", |f| Self::write_type_spec(f, &member.type_spec));
@@ -359,7 +359,7 @@ impl Emitter {
         ftb.next("args", |f| Self::write_exp_list_opt(f, &deco.args));
     }
 
-    fn write_visibility(f: &mut Formatter, vis: &Option<crate::ast::Visibility>) {
+    fn write_visibility(f: &mut Formatter, vis: &Option<crate::syntax::ast::Visibility>) {
         if let Some(vis) = vis {
             let mut ftb = TableFormatter::new(f, "Visibility");
             ftb.next("span", |f| f.write(&format_span(vis.span)));
@@ -600,7 +600,7 @@ impl Emitter {
         }
     }
 
-    fn write_function_call(f: &mut Formatter, call: &crate::ast::FunctionCall) {
+    fn write_function_call(f: &mut Formatter, call: &crate::syntax::ast::FunctionCall) {
         let mut ftb = TableFormatter::new(f, "FunctionCall");
         ftb.next("span", |f| f.write(&format_span(call.span)));
         ftb.next("prefix", |f| Self::write_prefix_exp(f, &call.prefix));
@@ -762,12 +762,12 @@ fn format_var_decl_kind(kind: VarDeclKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{
+    use crate::syntax::ast::{
         Block, Chunk, DefExpr, Definition, Exp, ExpKind, LambdaExpr, Name,
         NamespaceDecl, Stat, StatKind, TopItem, TypeName, TypeSpec, UseDecl, Var, VarDeclKind,
         VarKind,
     };
-    use crate::token::{Comment, CommentKind, Position, Span};
+    use crate::lexical::token::{Comment, CommentKind, Position, Span};
 
     fn span() -> Span {
         Span::new(Position::start(), Position::start())

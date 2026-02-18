@@ -1,4 +1,4 @@
-use crate::token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind};
+use crate::lexical::token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LexError {

@@ -101,6 +101,7 @@ impl Parser {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum BlockEnd {
     Chunk,
     Nested,

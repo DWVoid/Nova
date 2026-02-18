@@ -141,6 +141,7 @@ impl BundleManifest {
     }
 
     /// Validate the manifest for consistency
+    #[allow(dead_code)]
     pub fn validate(&self) -> Vec<SemanticDiagnostic> {
         let mut diagnostics = Vec::new();
 
@@ -175,6 +176,7 @@ impl BundleManifest {
     }
 
     /// Check for circular dependencies in feature definitions
+    #[allow(dead_code)]
     fn check_circular_features(
         &self,
         features: &HashMap<String, Vec<String>>,
@@ -196,6 +198,7 @@ impl BundleManifest {
 }
 
 /// Parse a version string into a Version struct
+#[allow(dead_code)]
 pub fn parse_version(version_str: &str) -> Result<Version, SemanticDiagnostic> {
     // First split by dash to separate base version from pre-release
     let (base_version, pre_release) = if let Some(dash_pos) = version_str.find('-') {
@@ -247,6 +250,7 @@ pub fn parse_version(version_str: &str) -> Result<Version, SemanticDiagnostic> {
 }
 
 /// Parse a version constraint string
+#[allow(dead_code)]
 pub fn parse_version_constraint(constraint_str: &str) -> Result<VersionConstraint, SemanticDiagnostic> {
     if constraint_str.starts_with('^') {
         // Compatible version constraint (^1.2.3)

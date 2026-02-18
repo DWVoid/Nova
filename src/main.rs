@@ -76,7 +76,7 @@ fn main() {
         }
     }
 
-    let output = Emitter::emit_chunk(&chunk);
+    let _output = Emitter::emit_chunk(&chunk);
     // print!("{output}");
 }
 #[test]

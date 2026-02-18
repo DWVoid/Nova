@@ -4,7 +4,7 @@
 //! namespaces and bundles, handles symbol conflicts, and provides cross-reference
 //! resolution for the Nova semantic analysis system.
 
-use crate::syntax::ast::{Chunk, TopItem, Definition, DefExpr, ExpKind};
+use crate::syntax::ast::{TopItem, Definition, DefExpr, ExpKind};
 use crate::lexical::token::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName, ExportedSymbol, ImportedSymbol, ResolutionStatus, UnresolvedReason, SymbolConflict, Definition as SemanticDefinition, Visibility};
 use super::bundle::BundleName;

@@ -3,7 +3,9 @@
 //! This module implements namespace hierarchy construction, use declaration processing,
 //! import resolution, and symbol visibility scoping within namespaces.
 
-use crate::syntax::ast::{Chunk, NamespaceDecl, TopItem, UseDecl, UseTail};
+use crate::syntax::ast::{Chunk, TopItem, UseDecl, UseTail};
+#[cfg(test)]
+use crate::syntax::ast::NamespaceDecl;
 use crate::lexical::token::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, bundle::BundleName};
 use std::collections::HashMap;
@@ -35,11 +37,13 @@ impl NamespacePath {
     }
 
     /// Check if this is the root namespace
+    #[allow(dead_code)]
     pub fn is_root(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Get parent namespace path
+    #[allow(dead_code)]
     pub fn parent(&self) -> Option<NamespacePath> {
         if self.0.len() <= 1 {
             None
@@ -49,6 +53,7 @@ impl NamespacePath {
     }
 
     /// Create child namespace path
+    #[allow(dead_code)]
     pub fn child(&self, name: &str) -> NamespacePath {
         let mut parts = self.0.clone();
         parts.push(name.to_string());
@@ -391,6 +396,7 @@ impl NamespaceTree {
     }
 
     /// Resolve symbol in namespace, checking imports and parent scopes
+    #[allow(dead_code)]
     pub fn resolve_symbol(
         &self,
         symbol_name: &str,
@@ -429,6 +435,7 @@ impl NamespaceTree {
     }
 
     /// Get definition kind from top-level item
+    #[allow(dead_code)]
     fn definition_kind_from_item(&self, item: &TopItem) -> DefinitionKind {
         match item {
             TopItem::Definition(def) => {
@@ -450,6 +457,7 @@ impl NamespaceTree {
     }
 
     /// Get all exported definitions from a namespace
+    #[allow(dead_code)]
     pub fn get_exported_definitions(
         &self,
         namespace_path: &NamespacePath,
@@ -466,6 +474,7 @@ impl NamespaceTree {
     }
 
     /// Get all namespaces that have exported definitions
+    #[allow(dead_code)]
     pub fn get_public_namespaces(&self) -> Vec<&NamespacePath> {
         self.namespaces
             .iter()
@@ -477,6 +486,7 @@ impl NamespaceTree {
     }
 
     /// Validate namespace tree for consistency
+    #[allow(dead_code)]
     pub fn validate(&self, diagnostics: &mut Vec<SemanticDiagnostic>) {
         for (path, scope) in &self.namespaces {
             // Check for circular imports
@@ -491,6 +501,7 @@ impl NamespaceTree {
     }
 
     /// Check for circular imports in a namespace
+    #[allow(dead_code)]
     fn check_circular_imports(
         &self,
         _path: &NamespacePath,
@@ -502,6 +513,7 @@ impl NamespaceTree {
     }
 
     /// Check for unresolved imports in a namespace
+    #[allow(dead_code)]
     fn check_unresolved_imports(
         &self,
         _path: &NamespacePath,
@@ -527,6 +539,7 @@ impl NamespaceTree {
     }
 
     /// Validate nested namespace consistency
+    #[allow(dead_code)]
     fn validate_nested_namespaces(
         &self,
         path: &NamespacePath,

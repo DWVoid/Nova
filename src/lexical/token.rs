@@ -86,6 +86,7 @@ impl Span {
         Self { start, end }
     }
 
+    #[allow(dead_code)]
     pub fn len_graphemes(&self) -> usize {
         self.end.grapheme.saturating_sub(self.start.grapheme)
     }

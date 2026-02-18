@@ -4,7 +4,7 @@
 //! type checking, type resolution, and constraint solving. It builds upon the symbol
 //! table system from Step 3 to provide comprehensive type analysis.
 
-use crate::syntax::ast::{Chunk, TopItem, Definition, DefExpr, Exp, ExpKind, TypeName, TypeSpec, Param};
+use crate::syntax::ast::{TopItem, Definition, DefExpr, Exp, ExpKind, TypeName};
 use crate::lexical::token::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::BundleName;
@@ -371,7 +371,7 @@ impl TypeSystem {
     fn extract_type_definition(
         &self,
         def: &Definition,
-        namespace_path: &NamespacePath,
+        _namespace_path: &NamespacePath,
     ) -> Option<TypeDefinition> {
         let visibility = if def.visibility.is_some() {
             super::Visibility::Public

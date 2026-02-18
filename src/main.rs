@@ -46,6 +46,19 @@ fn main() {
             for (qualified_name, _) in &semantic_model.symbol_table.exported_symbols {
                 eprintln!("  Exported: {}::{}", qualified_name.bundle, qualified_name.name);
             }
+            
+            if let Some(type_system) = &semantic_model.type_environment.type_system {
+                let type_count = type_system.get_type_count();
+                eprintln!("Type system contains {} type definitions", type_count);
+                
+                let type_env = type_system.get_type_environment();
+                for (qualified_name, _) in &type_env.bundle_types {
+                    eprintln!("  Type: {}::{}", qualified_name.bundle, qualified_name.name);
+                }
+                
+                let primitive_count = type_system.get_primitive_type_count();
+                eprintln!("Primitive types: {}", primitive_count);
+            }
         }
         Err(diagnostics) => {
             eprintln!("Semantic analysis failed with {} error(s):", diagnostics.len());

@@ -7,6 +7,7 @@
 pub mod bundle;
 pub mod namespace;
 pub mod symbols;
+pub mod types;
 
 use crate::syntax::ast::Chunk;
 use crate::lexical::token::Position;
@@ -44,12 +45,8 @@ pub struct GlobalSymbolTable {
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)]
 pub struct TypeEnvironment {
-    /// Type definitions from all bundles
-    pub bundle_types: HashMap<QualifiedName, TypeDefinition>,
-    /// Imported type references
-    pub imported_types: HashMap<String, TypeReference>,
-    /// Type aliases
-    pub type_aliases: HashMap<String, Type>,
+    /// Type system instance
+    pub type_system: Option<types::TypeSystem>,
 }
 
 /// Fully qualified name for global symbol identification
@@ -347,6 +344,16 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         imported_symbols: HashMap::new(), // Will be populated during cross-bundle linking
         symbol_conflicts: Vec::new(),
     };
+
+    // Step 4: Build type system and perform type checking
+    let mut type_system = types::TypeSystem::new(bundle.name.clone());
+    let symbol_table_builder = symbols::SymbolTableBuilder::new();
+    
+    type_system.build_from_namespace_tree(&namespace_tree, &symbol_table_builder, &mut diagnostics);
+    
+    let type_environment = TypeEnvironment {
+        type_system: Some(type_system),
+    };
     
     // Validate namespace tree (temporarily disabled to debug hanging)
     // namespace_tree.validate(&mut diagnostics);
@@ -355,7 +362,7 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         bundle,
         namespace_tree,
         symbol_table,
-        type_environment: TypeEnvironment::default(),
+        type_environment,
         diagnostics: diagnostics.clone(),
     };
     

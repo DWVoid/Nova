@@ -103,32 +103,6 @@ fn parses_assign_with_var_decl() {
 }
 
 #[test]
-fn parses_initializer_in_expression() {
-    let src = r#"
-        namespace Example;
-        define f (): unit
-            var t = { a = 1, [2] = 3, 4 }
-            return 0
-        end
-    "#;
-    let chunk = parse_chunk(src);
-    let def = match &chunk.items[0] {
-        TopItem::Definition(def) => def,
-        _ => panic!("expected definition"),
-    };
-    let DefExpr::Exp(exp) = &def.expr else { panic!("expected exp"); };
-    let ExpKind::Lambda(lambda) = &exp.kind else { panic!("expected lambda"); };
-    let stat = &lambda.block.stats[0];
-    match &stat.kind {
-        StatKind::Assign { exprs, .. } => match &exprs[0].kind {
-            ExpKind::Initializer(_) => {}
-            _ => panic!("expected initializer"),
-        },
-        _ => panic!("expected assign"),
-    }
-}
-
-#[test]
 fn parses_invoke_and_method_call() {
     let src = r#"
         namespace Example;

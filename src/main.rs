@@ -55,7 +55,7 @@ export define add (x: integer, y: integer): integer
 end
 
 export define demo (): integer
-  var p = { a = 1, b = 2 }
+  var p = Pair { a = 1, b = 2 }
   var sum = add(p.a, p.b)
   if sum > 2 then
     return sum

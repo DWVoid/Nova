@@ -530,7 +530,6 @@ impl Emitter {
             ExpKind::Bool(value) => f.write(&format!("ExpKind::Bool({})", value)),
             ExpKind::Number(text) => f.write(&format!("ExpKind::Number({})", quoted(text))),
             ExpKind::String(text) => f.write(&format!("ExpKind::String({})", quoted(text))),
-            ExpKind::Initializer(init) => Self::write_initializer(f, init),
             ExpKind::Prefix(prefix) => Self::write_prefix_exp(f, prefix),
             ExpKind::Lambda(lambda) => Self::write_lambda_expr(f, lambda),
             ExpKind::Unary { op, exp } => {
@@ -764,7 +763,7 @@ fn format_var_decl_kind(kind: VarDeclKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::ast::{
-        Block, Chunk, DefExpr, Definition, Exp, ExpKind, Initializer, LambdaExpr, Name,
+        Block, Chunk, DefExpr, Definition, Exp, ExpKind, LambdaExpr, Name,
         NamespaceDecl, Stat, StatKind, TopItem, TypeName, TypeSpec, UseDecl, Var, VarDeclKind,
         VarKind,
     };
@@ -870,20 +869,5 @@ mod tests {
         let mut f = Formatter::new();
         Emitter::write_comment(&mut f, &comment);
         assert!(f.out.contains("\\\"hi\\\""));
-    }
-
-    #[test]
-    fn emits_initializer() {
-        let init = Initializer {
-            span: span(),
-            fields: vec![],
-        };
-        let exp = Exp {
-            span: span(),
-            kind: ExpKind::Initializer(init),
-        };
-        let mut f = Formatter::new();
-        Emitter::write_exp(&mut f, &exp);
-        assert!(f.out.contains("Initializer"));
     }
 }

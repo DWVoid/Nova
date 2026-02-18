@@ -143,7 +143,6 @@ BNF:
         | "true"
         | <number>
         | <string>
-        | <initializer>
         | <prefixexp>
         | <lambda_expr>
         | <unop> <exp>

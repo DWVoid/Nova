@@ -58,11 +58,6 @@ fn collect_all_comments(tokens: &[Token]) -> Comments {
         out.extend(token.leading.iter().cloned());
         out.extend(token.trailing.iter().cloned());
     }
-    if let Some(last) = tokens.last() {
-        if let TokenKind::Eof = last.kind {
-            out.extend(last.leading.iter().cloned());
-        }
-    }
     out
 }
 

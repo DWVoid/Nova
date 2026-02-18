@@ -91,13 +91,6 @@ impl Parser {
                     kind: ExpKind::Bool(false),
                 })
             }
-            TokenKind::Symbol(Symbol::LBrace) => {
-                let init = self.parse_initializer()?;
-                Ok(Exp {
-                    span: init.span,
-                    kind: ExpKind::Initializer(init),
-                })
-            }
             TokenKind::Keyword(Keyword::Const) => {
                 if self.can_start_lambda()? {
                     let lambda = self.parse_lambda_expr()?;

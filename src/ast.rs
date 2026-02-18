@@ -274,7 +274,6 @@ pub enum ExpKind {
     Bool(bool),
     Number(String),
     String(String),
-    Initializer(Initializer),
     Prefix(PrefixExp),
     Lambda(LambdaExpr),
     Unary { op: UnOp, exp: Box<Exp> },

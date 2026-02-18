@@ -108,7 +108,7 @@ fn parses_invoke_and_method_call() {
         namespace Example;
         define f (): unit
             a(1, 2)
-            obj:method({})
+            obj:method()
         end
     "#;
     let chunk = parse_chunk(src);

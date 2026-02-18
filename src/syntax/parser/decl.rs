@@ -9,9 +9,19 @@ use crate::lexical::token::{Keyword, Span, Symbol};
 impl Parser {
     pub(super) fn parse_use_decl(&mut self) -> Result<UseDecl, ParseError> {
         let token = self.expect_keyword(Keyword::Use)?;
-        let path = self.parse_namespace_path()?;
-        let tail = if self.is_symbol(Symbol::Dot) && self.peek_is_symbol(1, Symbol::LBrace) {
+        
+        // Parse the base path
+        let mut path = Vec::new();
+        path.push(self.parse_name()?);
+        
+        // Continue parsing path parts until we hit selector syntax or end
+        while self.is_symbol(Symbol::Dot) && !self.peek_is_symbol(1, Symbol::LBrace) {
             self.advance();
+            path.push(self.parse_name()?);
+        }
+        
+        let tail = if self.is_symbol(Symbol::Dot) && self.peek_is_symbol(1, Symbol::LBrace) {
+            self.advance(); // consume the dot
             self.expect_symbol(Symbol::LBrace)?;
             let mut items = Vec::new();
             if !self.is_symbol(Symbol::RBrace) {

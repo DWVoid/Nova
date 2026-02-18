@@ -42,6 +42,10 @@ fn main() {
                     scope.imports.len()
                 );
             }
+            eprintln!("Symbol table contains {} exported symbols", semantic_model.symbol_table.exported_symbols.len());
+            for (qualified_name, _) in &semantic_model.symbol_table.exported_symbols {
+                eprintln!("  Exported: {}::{}", qualified_name.bundle, qualified_name.name);
+            }
         }
         Err(diagnostics) => {
             eprintln!("Semantic analysis failed with {} error(s):", diagnostics.len());
@@ -60,7 +64,7 @@ fn main() {
     }
 
     let output = Emitter::emit_chunk(&chunk);
-    print!("{output}");
+    // print!("{output}");
 }
 #[test]
 fn test_semantic_integration() {

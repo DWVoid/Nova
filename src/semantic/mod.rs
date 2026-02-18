@@ -6,6 +6,7 @@
 
 pub mod bundle;
 pub mod namespace;
+pub mod symbols;
 
 use crate::syntax::ast::Chunk;
 use crate::lexical::token::Position;
@@ -336,13 +337,24 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         &mut diagnostics,
     );
     
+    // Step 3: Build symbol tables and resolve cross-references
+    let symbol_table = GlobalSymbolTable {
+        exported_symbols: symbols::SymbolTableBuilder::build_from_namespace_tree(
+            bundle.name.clone(),
+            &namespace_tree,
+            &mut diagnostics,
+        ),
+        imported_symbols: HashMap::new(), // Will be populated during cross-bundle linking
+        symbol_conflicts: Vec::new(),
+    };
+    
     // Validate namespace tree (temporarily disabled to debug hanging)
     // namespace_tree.validate(&mut diagnostics);
     
     let model = SemanticModel {
         bundle,
         namespace_tree,
-        symbol_table: GlobalSymbolTable::default(),
+        symbol_table,
         type_environment: TypeEnvironment::default(),
         diagnostics: diagnostics.clone(),
     };

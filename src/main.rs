@@ -84,6 +84,24 @@ fn main() {
                 }
             }
 
+            if let Some(decorator_system) = &semantic_model.decorator_environment.decorator_system {
+                let stats = decorator_system.get_statistics();
+                eprintln!("Decorator system has {} decorators available", stats.total_decorators);
+                eprintln!("  Built-in decorators: {}", stats.builtin_decorators);
+                if stats.user_defined_decorators > 0 {
+                    eprintln!("  User-defined decorators: {}", stats.user_defined_decorators);
+                }
+                if stats.resolved_applications > 0 {
+                    eprintln!("  Resolved applications: {}", stats.resolved_applications);
+                }
+                if stats.failed_applications > 0 {
+                    eprintln!("  Failed applications: {}", stats.failed_applications);
+                }
+                if stats.metadata_entries > 0 {
+                    eprintln!("  Metadata entries: {}", stats.metadata_entries);
+                }
+            }
+
             if let Some(linker_system) = &semantic_model.linker_environment.linker_system {
                 let stats = linker_system.get_statistics();
                 eprintln!("Linker system ready for {} bundles", stats.available_bundles);

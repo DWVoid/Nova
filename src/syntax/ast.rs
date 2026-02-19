@@ -341,6 +341,16 @@ pub enum BinOp {
     Pow,
 }
 
+impl TopItem {
+    /// Extract definition if this is a definition item
+    pub fn extract_definition(&self) -> Option<Definition> {
+        match self {
+            TopItem::Definition(def) => Some(def.clone()),
+            TopItem::Implementation(_) => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

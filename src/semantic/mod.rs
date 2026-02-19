@@ -11,6 +11,7 @@ pub mod types;
 pub mod traits;
 pub mod visibility;
 pub mod linker;
+pub mod decorators;
 
 use crate::syntax::ast::Chunk;
 use crate::lexical::token::Position;
@@ -32,6 +33,8 @@ pub struct SemanticModel {
     pub trait_environment: TraitEnvironment,
     /// Visibility environment with all access control rules
     pub visibility_environment: VisibilityEnvironment,
+    /// Decorator environment with all decorator processing results
+    pub decorator_environment: DecoratorEnvironment,
     /// Linker environment with cross-bundle linking results
     pub linker_environment: LinkerEnvironment,
     /// Collected semantic errors and warnings
@@ -72,6 +75,14 @@ pub struct TraitEnvironment {
 pub struct VisibilityEnvironment {
     /// Visibility system instance
     pub visibility_system: Option<visibility::VisibilitySystem>,
+}
+
+/// Decorator environment containing decorator processing results
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct DecoratorEnvironment {
+    /// Decorator system instance
+    pub decorator_system: Option<decorators::DecoratorSystem>,
 }
 
 /// Linker environment containing cross-bundle linking information
@@ -345,7 +356,7 @@ pub enum DiagnosticSeverity {
 }
 
 /// Diagnostic categories
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
 pub enum DiagnosticCategory {
     TypeError,
@@ -353,6 +364,7 @@ pub enum DiagnosticCategory {
     VisibilityViolation,
     DependencyError,
     CoherenceConflict,
+    DecoratorError,
 }
 
 /// Enhanced semantic analysis with cross-bundle linking
@@ -434,6 +446,51 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         visibility_system: Some(visibility_system),
     };
 
+    // Step 8: Process decorators and expand them
+    let mut decorator_system = decorators::DecoratorSystem::new(bundle.name.clone());
+    
+    if let (Some(type_sys), Some(vis_sys)) = (&type_environment.type_system, &visibility_environment.visibility_system) {
+        // Extract all definitions for decorator processing
+        let mut all_definitions = HashMap::new();
+        for (namespace_path, namespace_scope) in &namespace_tree.namespaces {
+            for (symbol_name, local_def) in &namespace_scope.definitions {
+                let qualified_name = QualifiedName {
+                    bundle: bundle.name.clone(),
+                    namespace: namespace_path.0.clone(),
+                    name: symbol_name.clone(),
+                };
+                all_definitions.insert(qualified_name, local_def.item.extract_definition().unwrap_or_else(|| {
+                    // Create a placeholder definition for non-definition items
+                    crate::syntax::ast::Definition {
+                        decorators: Vec::new(),
+                        visibility: None,
+                        name: crate::syntax::ast::Name {
+                            value: symbol_name.clone(),
+                            span: crate::lexical::token::Span::single(crate::lexical::token::Position::start()),
+                        },
+                        type_spec: None,
+                        expr: crate::syntax::ast::DefExpr::Exp(crate::syntax::ast::Exp {
+                            kind: crate::syntax::ast::ExpKind::Nil,
+                            span: crate::lexical::token::Span::single(crate::lexical::token::Position::start()),
+                        }),
+                        span: crate::lexical::token::Span::single(crate::lexical::token::Position::start()),
+                    }
+                }));
+            }
+        }
+        
+        decorator_system.process_decorators(
+            &all_definitions,
+            type_sys,
+            vis_sys,
+            &mut diagnostics
+        );
+    }
+    
+    let decorator_environment = DecoratorEnvironment {
+        decorator_system: Some(decorator_system),
+    };
+
     // Step 7: Cross-bundle linking (optional for single-bundle analysis)
     let linker_environment = LinkerEnvironment {
         linker_system: Some(linker::LinkerSystem::new()),
@@ -450,6 +507,7 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         type_environment,
         trait_environment,
         visibility_environment,
+        decorator_environment,
         linker_environment,
         diagnostics: diagnostics.clone(),
     };

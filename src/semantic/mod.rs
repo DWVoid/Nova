@@ -9,6 +9,7 @@ pub mod namespace;
 pub mod symbols;
 pub mod types;
 pub mod traits;
+pub mod visibility;
 
 use crate::syntax::ast::Chunk;
 use crate::lexical::token::Position;
@@ -28,6 +29,8 @@ pub struct SemanticModel {
     pub type_environment: TypeEnvironment,
     /// Trait environment with all trait definitions and implementations
     pub trait_environment: TraitEnvironment,
+    /// Visibility environment with all access control rules
+    pub visibility_environment: VisibilityEnvironment,
     /// Collected semantic errors and warnings
     pub diagnostics: Vec<SemanticDiagnostic>,
 }
@@ -58,6 +61,14 @@ pub struct TypeEnvironment {
 pub struct TraitEnvironment {
     /// Trait system instance
     pub trait_system: Option<traits::TraitSystem>,
+}
+
+/// Visibility environment containing access control rules
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct VisibilityEnvironment {
+    /// Visibility system instance
+    pub visibility_system: Option<visibility::VisibilitySystem>,
 }
 
 /// Fully qualified name for global symbol identification
@@ -381,6 +392,23 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
     let trait_environment = TraitEnvironment {
         trait_system: Some(trait_system),
     };
+
+    // Step 6: Build visibility system and enforce access control
+    let mut visibility_system = visibility::VisibilitySystem::new(bundle.name.clone());
+    
+    if let (Some(type_sys), Some(trait_sys)) = (&type_environment.type_system, &trait_environment.trait_system) {
+        visibility_system.build_from_semantic_components(
+            &namespace_tree,
+            &symbol_table_builder,
+            type_sys,
+            trait_sys,
+            &mut diagnostics
+        );
+    }
+    
+    let visibility_environment = VisibilityEnvironment {
+        visibility_system: Some(visibility_system),
+    };
     
     // Validate namespace tree (temporarily disabled to debug hanging)
     // namespace_tree.validate(&mut diagnostics);
@@ -391,6 +419,7 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         symbol_table,
         type_environment,
         trait_environment,
+        visibility_environment,
         diagnostics: diagnostics.clone(),
     };
     

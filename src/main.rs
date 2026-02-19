@@ -69,6 +69,20 @@ fn main() {
                     eprintln!("  Coherence violations: {}", stats.coherence_violation_count);
                 }
             }
+
+            if let Some(visibility_system) = &semantic_model.visibility_environment.visibility_system {
+                let stats = visibility_system.get_statistics();
+                eprintln!("Visibility system manages {} definitions", stats.total_definitions);
+                eprintln!("  Public definitions: {}", stats.public_definitions);
+                eprintln!("  Bundle-private definitions: {}", stats.bundle_private_definitions);
+                eprintln!("  Private definitions: {}", stats.private_definitions);
+                if stats.field_visibility_rules > 0 {
+                    eprintln!("  Field visibility rules: {}", stats.field_visibility_rules);
+                }
+                if stats.method_visibility_rules > 0 {
+                    eprintln!("  Method visibility rules: {}", stats.method_visibility_rules);
+                }
+            }
         }
         Err(diagnostics) => {
             eprintln!("Semantic analysis failed with {} error(s):", diagnostics.len());

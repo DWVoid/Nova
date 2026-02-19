@@ -8,6 +8,7 @@ pub mod bundle;
 pub mod namespace;
 pub mod symbols;
 pub mod types;
+pub mod traits;
 
 use crate::syntax::ast::Chunk;
 use crate::lexical::token::Position;
@@ -25,6 +26,8 @@ pub struct SemanticModel {
     pub symbol_table: GlobalSymbolTable,
     /// Type environment with all resolved types
     pub type_environment: TypeEnvironment,
+    /// Trait environment with all trait definitions and implementations
+    pub trait_environment: TraitEnvironment,
     /// Collected semantic errors and warnings
     pub diagnostics: Vec<SemanticDiagnostic>,
 }
@@ -47,6 +50,14 @@ pub struct GlobalSymbolTable {
 pub struct TypeEnvironment {
     /// Type system instance
     pub type_system: Option<types::TypeSystem>,
+}
+
+/// Trait environment containing trait definitions and implementations
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct TraitEnvironment {
+    /// Trait system instance
+    pub trait_system: Option<traits::TraitSystem>,
 }
 
 /// Fully qualified name for global symbol identification
@@ -354,6 +365,22 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
     let type_environment = TypeEnvironment {
         type_system: Some(type_system),
     };
+
+    // Step 5: Build trait system and process implementations
+    let mut trait_system = traits::TraitSystem::new(bundle.name.clone());
+    
+    if let Some(ref type_sys) = type_environment.type_system {
+        trait_system.build_from_namespace_tree(
+            &namespace_tree,
+            type_sys,
+            &symbol_table_builder,
+            &mut diagnostics
+        );
+    }
+    
+    let trait_environment = TraitEnvironment {
+        trait_system: Some(trait_system),
+    };
     
     // Validate namespace tree (temporarily disabled to debug hanging)
     // namespace_tree.validate(&mut diagnostics);
@@ -363,6 +390,7 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         namespace_tree,
         symbol_table,
         type_environment,
+        trait_environment,
         diagnostics: diagnostics.clone(),
     };
     

@@ -59,6 +59,16 @@ fn main() {
                 let primitive_count = type_system.get_primitive_type_count();
                 eprintln!("Primitive types: {}", primitive_count);
             }
+
+            if let Some(trait_system) = &semantic_model.trait_environment.trait_system {
+                let stats = trait_system.get_statistics();
+                eprintln!("Trait system contains {} trait definitions", stats.trait_count);
+                eprintln!("  Trait implementations: {}", stats.trait_implementation_count);
+                eprintln!("  Inherent implementations: {}", stats.inherent_implementation_count);
+                if stats.coherence_violation_count > 0 {
+                    eprintln!("  Coherence violations: {}", stats.coherence_violation_count);
+                }
+            }
         }
         Err(diagnostics) => {
             eprintln!("Semantic analysis failed with {} error(s):", diagnostics.len());

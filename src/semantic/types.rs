@@ -45,7 +45,7 @@ pub struct TypeEnvironment {
 }
 
 /// A type in the Nova type system
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum NovaType {
     /// Primitive types (integer, boolean, etc.)

@@ -1,0 +1,32 @@
+namespace SampleProject;
+
+use SampleProject.MathUtils;
+use SampleProject.DataStructures;
+
+@doc("Main entry point for the sample project")
+export define main(): unit
+    println("🚀 Sample Nova Project Starting...")
+    
+    // Test math utilities
+    val result = MathUtils.calculate_fibonacci(10)
+    println("Fibonacci(10) = " + result.to_string())
+    
+    // Test data structures
+    val list = DataStructures.create_list()
+    DataStructures.add_item(list, "Hello")
+    DataStructures.add_item(list, "Nova")
+    DataStructures.print_list(list)
+    
+    println("✅ Sample project completed successfully!")
+end
+
+@test("Main function integration test")
+define test_main_functionality(): unit
+    // Test that main components work together
+    val fib_result = MathUtils.calculate_fibonacci(5)
+    assert(fib_result == 5)
+    
+    val test_list = DataStructures.create_list()
+    DataStructures.add_item(test_list, "test")
+    assert(DataStructures.get_size(test_list) == 1)
+end

@@ -1,0 +1,90 @@
+namespace SampleProject.MathUtils;
+
+@doc("Mathematical utility functions for the sample project")
+export struct MathConstants
+    pi: float,
+    e: float
+end
+
+@doc("Calculate factorial of a number")
+export define factorial(n: integer): integer
+    if n <= 1 then
+        return 1
+    else
+        return n * factorial(n - 1)
+    end
+end
+
+@doc("Calculate fibonacci number at position n")
+@profile  // Enable profiling for performance testing
+export define calculate_fibonacci(n: integer): integer
+    if n <= 1 then
+        return n
+    end
+    
+    var a: integer = 0
+    var b: integer = 1
+    
+    for i = 2 to n do
+        val temp = a + b
+        a = b
+        b = temp
+    end
+    
+    return b
+end
+
+@doc("Calculate the greatest common divisor of two numbers")
+export define gcd(a: integer, b: integer): integer
+    if b == 0 then
+        return a
+    else
+        return gcd(b, a % b)
+    end
+end
+
+@doc("Check if a number is prime")
+export define is_prime(n: integer): boolean
+    if n <= 1 then return false end
+    if n <= 3 then return true end
+    if n % 2 == 0 or n % 3 == 0 then return false end
+    
+    var i = 5
+    while i * i <= n do
+        if n % i == 0 or n % (i + 2) == 0 then
+            return false
+        end
+        i = i + 6
+    end
+    
+    return true
+end
+
+@test("Factorial calculation")
+define test_factorial(): unit
+    assert(factorial(0) == 1)
+    assert(factorial(1) == 1)
+    assert(factorial(5) == 120)
+end
+
+@test("Fibonacci calculation") 
+define test_fibonacci(): unit
+    assert(calculate_fibonacci(0) == 0)
+    assert(calculate_fibonacci(1) == 1)
+    assert(calculate_fibonacci(7) == 13)
+end
+
+@test("GCD calculation")
+define test_gcd(): unit
+    assert(gcd(48, 18) == 6)
+    assert(gcd(100, 25) == 25)
+    assert(gcd(17, 13) == 1)
+end
+
+@test("Prime number detection")
+define test_is_prime(): unit
+    assert(!is_prime(1))
+    assert(is_prime(2))
+    assert(is_prime(17))
+    assert(!is_prime(25))
+end

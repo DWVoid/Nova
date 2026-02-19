@@ -1,0 +1,23 @@
+[package]
+name = "sample-project"
+version = "0.1.0"
+description = "A sample Nova project demonstrating semantic analysis"
+authors = ["Nova Team"]
+
+# Source files to include in this bundle
+source_files = [
+    "src/main.nova",
+    "src/math_utils.nova",
+    "src/data_structures.nova"
+]
+
+# Dependencies on other bundles
+[[dependencies]]
+name = "std"
+version = "1.0.0"
+path = "../stdlib"  # Local dependency
+
+[[dependencies]]
+name = "graphics"
+version = "2.1.0"
+optional = true  # Optional dependency

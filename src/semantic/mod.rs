@@ -13,6 +13,7 @@ pub mod visibility;
 pub mod linker;
 pub mod decorators;
 pub mod diagnostics;
+pub mod api;
 
 use crate::syntax::ast::Chunk;
 use crate::lexical::token::Position;

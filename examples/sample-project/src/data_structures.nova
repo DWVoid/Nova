@@ -1,0 +1,99 @@
+namespace SampleProject.DataStructures;
+
+@doc("A simple list data structure")
+export struct List
+    items: array<string>,
+    private size: integer
+end
+
+@doc("Trait for displayable data structures")
+export trait Displayable
+    method display(self): unit;
+end
+
+impl List for Displayable
+    method display(self): unit
+        println("List contents:")
+        for item in self.items do
+            println("  - " + item)
+        end
+        println("Total items: " + self.size.to_string())
+    end
+end
+
+@doc("Create a new empty list")
+export define create_list(): List
+    return List {
+        items: array<string>(),
+        size: 0
+    }
+end
+
+@doc("Add an item to the list") 
+export define add_item(list: List, item: string): unit
+    list.items.append(item)
+    list.size = list.size + 1
+end
+
+@doc("Get the current size of the list")
+export define get_size(list: List): integer
+    return list.size
+end
+
+@doc("Print the contents of a list")
+export define print_list(list: List): unit
+    list.display()
+end
+
+@doc("Check if the list is empty")
+export define is_empty(list: List): boolean
+    return list.size == 0
+end
+
+@doc("Clear all items from the list")
+export define clear_list(list: List): unit
+    list.items.clear()
+    list.size = 0
+end
+
+@deprecated("Use get_item_at instead", since: "0.2.0")
+export define get_item(list: List, index: integer): string
+    return get_item_at(list, index)
+end
+
+@doc("Get item at specific index")
+export define get_item_at(list: List, index: integer): string
+    if index < 0 or index >= list.size then
+        throw "Index out of bounds"
+    end
+    return list.items[index]
+end
+
+@test("List creation and basic operations")
+define test_list_operations(): unit
+    val list = create_list()
+    assert(is_empty(list))
+    assert(get_size(list) == 0)
+    
+    add_item(list, "first")
+    assert(!is_empty(list))
+    assert(get_size(list) == 1)
+    
+    add_item(list, "second")
+    assert(get_size(list) == 2)
+    assert(get_item_at(list, 0) == "first")
+    assert(get_item_at(list, 1) == "second")
+end
+
+@test("List clearing")
+define test_list_clear(): unit
+    val list = create_list()
+    add_item(list, "test1")
+    add_item(list, "test2")
+    
+    assert(get_size(list) == 2)
+    
+    clear_list(list)
+    assert(is_empty(list))
+    assert(get_size(list) == 0)
+end

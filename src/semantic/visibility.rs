@@ -5,7 +5,7 @@
 //! and export scope restrictions. It integrates with the type system, trait system,
 //! and symbol resolution to provide comprehensive access control.
 
-use crate::syntax::ast::{TopItem, Definition, DefExpr, Visibility};
+use crate::syntax::ast::{TopItem, Definition, DefExpr};
 use crate::lexical::token::Span;
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::BundleName;

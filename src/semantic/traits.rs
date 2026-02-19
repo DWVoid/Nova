@@ -1114,7 +1114,7 @@ mod tests {
         let method_name = "add";
         
         // First resolution
-        let resolution1 = trait_system.resolve_method(&target_type, method_name, &[]);
+        let _resolution1 = trait_system.resolve_method(&target_type, method_name, &[]);
         
         // Second resolution should be cached
         let _resolution2 = trait_system.resolve_method(&target_type, method_name, &[]);

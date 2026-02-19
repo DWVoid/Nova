@@ -83,6 +83,22 @@ fn main() {
                     eprintln!("  Method visibility rules: {}", stats.method_visibility_rules);
                 }
             }
+
+            if let Some(linker_system) = &semantic_model.linker_environment.linker_system {
+                let stats = linker_system.get_statistics();
+                eprintln!("Linker system ready for {} bundles", stats.available_bundles);
+                if stats.dependency_edges > 0 {
+                    eprintln!("  Dependency edges: {}", stats.dependency_edges);
+                    eprintln!("  Exported symbols: {}", stats.exported_symbols);
+                    eprintln!("  Imported symbols: {}", stats.imported_symbols);
+                }
+                if stats.circular_dependencies > 0 {
+                    eprintln!("  Circular dependencies: {}", stats.circular_dependencies);
+                }
+                if stats.symbol_conflicts > 0 {
+                    eprintln!("  Symbol conflicts: {}", stats.symbol_conflicts);
+                }
+            }
         }
         Err(diagnostics) => {
             eprintln!("Semantic analysis failed with {} error(s):", diagnostics.len());

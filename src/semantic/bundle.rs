@@ -37,7 +37,7 @@ impl From<&str> for BundleName {
     }
 }
 /// Semantic version
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[allow(dead_code)]
 pub struct Version {
     pub major: u32,
@@ -56,7 +56,7 @@ impl std::fmt::Display for Version {
 }
 
 /// Version constraint for dependencies
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum VersionConstraint {
     /// Exact version match
@@ -67,8 +67,8 @@ pub enum VersionConstraint {
     Compatible(Version),
 }
 
-/// Dependency visibility
-#[derive(Clone, Debug, PartialEq)]
+/// Visibility of dependency
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum DependencyVisibility {
     /// Dependency is re-exported to users of this bundle
@@ -78,7 +78,7 @@ pub enum DependencyVisibility {
 }
 
 /// Bundle dependency
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub struct BundleDependency {
     pub name: BundleName,

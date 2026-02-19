@@ -10,6 +10,7 @@ pub mod symbols;
 pub mod types;
 pub mod traits;
 pub mod visibility;
+pub mod linker;
 
 use crate::syntax::ast::Chunk;
 use crate::lexical::token::Position;
@@ -31,6 +32,8 @@ pub struct SemanticModel {
     pub trait_environment: TraitEnvironment,
     /// Visibility environment with all access control rules
     pub visibility_environment: VisibilityEnvironment,
+    /// Linker environment with cross-bundle linking results
+    pub linker_environment: LinkerEnvironment,
     /// Collected semantic errors and warnings
     pub diagnostics: Vec<SemanticDiagnostic>,
 }
@@ -69,6 +72,16 @@ pub struct TraitEnvironment {
 pub struct VisibilityEnvironment {
     /// Visibility system instance
     pub visibility_system: Option<visibility::VisibilitySystem>,
+}
+
+/// Linker environment containing cross-bundle linking information
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct LinkerEnvironment {
+    /// Linker system instance
+    pub linker_system: Option<linker::LinkerSystem>,
+    /// Linked bundle result
+    pub linked_bundle: Option<linker::LinkedBundle>,
 }
 
 /// Fully qualified name for global symbol identification
@@ -342,6 +355,17 @@ pub enum DiagnosticCategory {
     CoherenceConflict,
 }
 
+/// Enhanced semantic analysis with cross-bundle linking
+pub fn analyze_bundle_with_linking(
+    chunks: Vec<Chunk>,
+    available_bundles: Vec<bundle::Bundle>,
+) -> Result<SemanticModel, Vec<SemanticDiagnostic>> {
+    let mut diagnostics = Vec::new();
+    
+    // Use the linker's enhanced analysis function
+    linker::analyze_with_linking(chunks, available_bundles, &mut diagnostics)
+}
+
 /// Main entry point for semantic analysis
 pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticDiagnostic>> {
     let mut diagnostics = Vec::new();
@@ -409,6 +433,12 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
     let visibility_environment = VisibilityEnvironment {
         visibility_system: Some(visibility_system),
     };
+
+    // Step 7: Cross-bundle linking (optional for single-bundle analysis)
+    let linker_environment = LinkerEnvironment {
+        linker_system: Some(linker::LinkerSystem::new()),
+        linked_bundle: None, // Only populated for multi-bundle linking
+    };
     
     // Validate namespace tree (temporarily disabled to debug hanging)
     // namespace_tree.validate(&mut diagnostics);
@@ -420,6 +450,7 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         type_environment,
         trait_environment,
         visibility_environment,
+        linker_environment,
         diagnostics: diagnostics.clone(),
     };
     

@@ -1,7 +1,7 @@
 use std::fmt;
 use unicode_segmentation::UnicodeSegmentation;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Position {
     pub byte: usize,
     pub grapheme: usize,

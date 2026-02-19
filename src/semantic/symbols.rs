@@ -522,6 +522,12 @@ impl SymbolTableBuilder {
         
         dependencies
     }
+
+    /// Get all symbol names for diagnostic suggestions
+    #[allow(dead_code)]
+    pub fn get_all_symbol_names(&self) -> Vec<String> {
+        self.exported_symbols.keys().map(|qualified| qualified.name.clone()).collect()
+    }
 }
 
 #[cfg(test)]

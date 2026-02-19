@@ -12,6 +12,7 @@ pub mod traits;
 pub mod visibility;
 pub mod linker;
 pub mod decorators;
+pub mod diagnostics;
 
 use crate::syntax::ast::Chunk;
 use crate::lexical::token::Position;
@@ -35,6 +36,8 @@ pub struct SemanticModel {
     pub visibility_environment: VisibilityEnvironment,
     /// Decorator environment with all decorator processing results
     pub decorator_environment: DecoratorEnvironment,
+    /// Diagnostic environment with enhanced error reporting
+    pub diagnostic_environment: DiagnosticEnvironment,
     /// Linker environment with cross-bundle linking results
     pub linker_environment: LinkerEnvironment,
     /// Collected semantic errors and warnings
@@ -83,6 +86,14 @@ pub struct VisibilityEnvironment {
 pub struct DecoratorEnvironment {
     /// Decorator system instance
     pub decorator_system: Option<decorators::DecoratorSystem>,
+}
+
+/// Diagnostic environment containing enhanced error reporting and recovery
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct DiagnosticEnvironment {
+    /// Diagnostic system instance
+    pub diagnostic_system: Option<diagnostics::DiagnosticSystem>,
 }
 
 /// Linker environment containing cross-bundle linking information
@@ -346,8 +357,8 @@ pub struct SemanticDiagnostic {
     pub category: DiagnosticCategory,
 }
 
-/// Diagnostic severity levels
-#[derive(Clone, Debug, PartialEq)]
+/// Severity levels for semantic diagnostics
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum DiagnosticSeverity {
     Error,
@@ -355,8 +366,8 @@ pub enum DiagnosticSeverity {
     Info,
 }
 
-/// Diagnostic categories
-#[derive(Clone, Debug, PartialEq)]
+/// Diagnostic categories for semantic analysis errors
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum DiagnosticCategory {
     TypeError,
@@ -491,6 +502,26 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         decorator_system: Some(decorator_system),
     };
 
+    // Step 9: Enhanced diagnostic processing and error recovery
+    let mut diagnostic_system = diagnostics::DiagnosticSystem::new(bundle.name.clone());
+    
+    // Build semantic analysis context for diagnostic enhancement
+    let semantic_context = diagnostics::SemanticAnalysisContext {
+        source_code: None, // TODO: Pass actual source code
+        semantic_stack: Vec::new(), // TODO: Build from analysis context
+        available_symbols: symbol_table_builder.get_all_symbol_names(),
+        search_path: Vec::new(), // TODO: Build from namespace context
+        bundle_context: Some(bundle.name.clone()),
+        namespace_context: None,
+    };
+    
+    // Process and enhance all collected diagnostics
+    let _enhanced_diagnostics = diagnostic_system.process_diagnostics(&diagnostics, &semantic_context);
+    
+    let diagnostic_environment = DiagnosticEnvironment {
+        diagnostic_system: Some(diagnostic_system),
+    };
+
     // Step 7: Cross-bundle linking (optional for single-bundle analysis)
     let linker_environment = LinkerEnvironment {
         linker_system: Some(linker::LinkerSystem::new()),
@@ -508,6 +539,7 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
         trait_environment,
         visibility_environment,
         decorator_environment,
+        diagnostic_environment,
         linker_environment,
         diagnostics: diagnostics.clone(),
     };

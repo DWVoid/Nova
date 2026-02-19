@@ -102,6 +102,27 @@ fn main() {
                 }
             }
 
+            if let Some(diagnostic_system) = &semantic_model.diagnostic_environment.diagnostic_system {
+                let stats = diagnostic_system.get_statistics();
+                eprintln!("Diagnostic system processed {} diagnostics", stats.total_diagnostics);
+                if stats.errors > 0 {
+                    eprintln!("  Errors: {}", stats.errors);
+                }
+                if stats.warnings > 0 {
+                    eprintln!("  Warnings: {}", stats.warnings);
+                }
+                if stats.info_messages > 0 {
+                    eprintln!("  Info messages: {}", stats.info_messages);
+                }
+                if stats.suggestions_generated > 0 {
+                    eprintln!("  Suggestions generated: {}", stats.suggestions_generated);
+                }
+                if stats.recovery_attempts > 0 {
+                    eprintln!("  Recovery attempts: {} (success: {})", 
+                        stats.recovery_attempts, stats.successful_recoveries);
+                }
+            }
+
             if let Some(linker_system) = &semantic_model.linker_environment.linker_system {
                 let stats = linker_system.get_statistics();
                 eprintln!("Linker system ready for {} bundles", stats.available_bundles);

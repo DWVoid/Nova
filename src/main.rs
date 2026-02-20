@@ -2,6 +2,8 @@ mod lexical;
 mod syntax;
 mod semantic;
 mod bundle_manifest;
+mod formats;
+
 use crate::lexical::lexer::Lexer;
 use crate::syntax::emit::Emitter;
 use crate::syntax::parser::Parser;

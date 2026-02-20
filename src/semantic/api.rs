@@ -65,7 +65,7 @@ impl NovaAnalyzer {
                     parse_errors.push(SemanticDiagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!("Lexer error in {:?}: {}", path, e.message),
-                        location: e.location,
+                        location: Position::start(), // TODO: fix this
                         category: crate::semantic::DiagnosticCategory::SymbolResolution,
                     });
                     continue;
@@ -78,7 +78,7 @@ impl NovaAnalyzer {
                     parse_errors.push(SemanticDiagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!("Parser error in {:?}: {}", path, e.message),
-                        location: e.location,
+                        location: Position::start(), // TODO: fix this
                         category: crate::semantic::DiagnosticCategory::SymbolResolution,
                     });
                     continue;
@@ -153,7 +153,7 @@ impl NovaAnalyzer {
             .map_err(|e| vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Lex error: {}", e.message),
-                location: e.location,
+                location: Position::start(), // TODO: fix this
                 category: crate::semantic::DiagnosticCategory::SymbolResolution,
             }])?;
 
@@ -162,7 +162,7 @@ impl NovaAnalyzer {
             .map_err(|e| vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Parse error: {}", e.message),
-                location: e.location,
+                location: Position::start(), // TODO: fix this
                 category: crate::semantic::DiagnosticCategory::SymbolResolution,
             }])?;
 

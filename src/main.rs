@@ -5,9 +5,9 @@ mod bundle_manifest;
 mod formats;
 
 use crate::lexical::lexer::Lexer;
-use crate::syntax::emit::Emitter;
 use crate::syntax::parser::Parser;
 use std::io::{self, Read};
+
 fn main() {
     let mut input = String::new();
     if let Err(err) = io::stdin().read_to_string(&mut input) {
@@ -156,10 +156,8 @@ fn main() {
             std::process::exit(1);
         }
     }
-
-    let _output = Emitter::emit_chunk(&chunk);
-    // print!("{output}");
 }
+
 #[test]
 fn test_semantic_integration() {
     let code = r#"
@@ -171,6 +169,7 @@ end
     "#;
     let tokens = Lexer::new(code).lex_all().unwrap();
     let chunk = Parser::new(tokens).parse_chunk().unwrap();
+    print!("{}", formats::textual::encode(&chunk).unwrap());
     match crate::semantic::analyze_bundle(vec![chunk]) {
         Ok(semantic_model) => {
             assert_eq!(semantic_model.bundle.name.to_string(), "default");

@@ -1,8 +1,9 @@
+use serde::Serialize;
 use crate::lexical::token::{Comment, Span};
 
 pub type Comments = Vec<Comment>;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Chunk {
     pub span: Span,
     pub comments: Comments,
@@ -11,44 +12,44 @@ pub struct Chunk {
     pub items: Vec<TopItem>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum TopItem {
     Definition(Definition),
     Implementation(Implementation),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UseDecl {
     pub span: Span,
     pub path: Vec<Name>,
     pub tail: Option<UseTail>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum UseTail {
     Selector(Vec<UseItem>),
     Alias(Name),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UseItem {
     pub name: Name,
     pub alias: Option<Name>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NamespaceDecl {
     pub span: Span,
     pub path: Vec<Name>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Visibility {
     pub span: Span,
     pub scopes: Option<Vec<Name>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Definition {
     pub span: Span,
     pub decorators: Vec<Decorator>,
@@ -58,7 +59,7 @@ pub struct Definition {
     pub expr: DefExpr,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum DefExpr {
     Struct(StructDef),
     Enum(EnumDef),
@@ -67,72 +68,72 @@ pub enum DefExpr {
     Exp(Exp),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Decorator {
     pub span: Span,
     pub name: Name,
     pub args: Option<Vec<Exp>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TypeName {
     pub span: Span,
     pub parts: Vec<Name>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TypeSpec {
     pub span: Span,
     pub ty: TypeName,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StructDef {
     pub span: Span,
     pub fields: Vec<FieldDecl>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FieldDecl {
     pub span: Span,
     pub name: Name,
     pub type_spec: TypeSpec,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EnumDef {
     pub span: Span,
     pub type_spec: TypeSpec,
     pub members: Vec<EnumMember>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EnumMember {
     pub span: Span,
     pub name: Name,
     pub value: Exp,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VariantDef {
     pub span: Span,
     pub members: Vec<VariantMember>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VariantMember {
     pub span: Span,
     pub name: Name,
     pub type_spec: TypeSpec,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TraitDef {
     pub span: Span,
     pub sigs: Vec<TraitSig>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TraitSig {
     pub span: Span,
     pub name: Name,
@@ -140,7 +141,7 @@ pub struct TraitSig {
     pub return_type: TypeSpec,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Implementation {
     pub span: Span,
     pub trait_type: Option<TypeName>,
@@ -148,20 +149,20 @@ pub struct Implementation {
     pub items: Vec<Definition>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Block {
     pub span: Span,
     pub stats: Vec<Stat>,
     pub ret: Option<RetStat>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Stat {
     pub span: Span,
     pub kind: StatKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum StatKind {
     Empty,
     Assign { vars: Vec<Var>, exprs: Vec<Exp> },
@@ -184,38 +185,38 @@ pub enum StatKind {
     Call { call: FunctionCall },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RetStat {
     pub span: Span,
     pub exprs: Vec<Exp>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct IfClause {
     pub span: Span,
     pub cond: Exp,
     pub block: Block,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Name {
     pub value: String,
     pub span: Span,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Param {
     pub name: Name,
     pub type_spec: Option<TypeSpec>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Var {
     pub span: Span,
     pub kind: VarKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum VarKind {
     Name(Name),
     Index { prefix: Box<PrefixExp>, index: Box<Exp> },
@@ -223,26 +224,26 @@ pub enum VarKind {
     Decl { kind: VarDeclKind, name: Name, type_spec: Option<TypeSpec> },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum VarDeclKind {
     Var,
     Val,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PrefixExp {
     pub span: Span,
     pub kind: PrefixExpKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum PrefixExpKind {
     Var(Var),
     Call(FunctionCall),
     Paren(Box<Exp>),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FunctionCall {
     pub span: Span,
     pub prefix: Box<PrefixExp>,
@@ -250,25 +251,25 @@ pub struct FunctionCall {
     pub args: Args,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Args {
     pub span: Span,
     pub kind: ArgsKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum ArgsKind {
     ExpList(Vec<Exp>),
     Initializer(Initializer),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Exp {
     pub span: Span,
     pub kind: ExpKind,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum ExpKind {
     Nil,
     Bool(bool),
@@ -280,7 +281,7 @@ pub enum ExpKind {
     Binary { op: BinOp, left: Box<Exp>, right: Box<Exp> },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct LambdaExpr {
     pub span: Span,
     pub is_const: bool,
@@ -289,26 +290,26 @@ pub struct LambdaExpr {
     pub block: Block,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Initializer {
     pub span: Span,
     pub fields: Vec<Field>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Field {
     pub span: Span,
     pub key: Option<FieldKey>,
     pub value: Exp,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum FieldKey {
     Exp(Exp),
     Name(Name),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum UnOp {
     Neg,
     Not,
@@ -316,7 +317,7 @@ pub enum UnOp {
     BitNot,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum BinOp {
     Or,
     And,

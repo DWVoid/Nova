@@ -1,3 +1,4 @@
+use serde::{Serialize, Serializer};
 use std::fmt;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -46,9 +47,7 @@ impl Position {
                 continue;
             }
 
-            let grapheme = UnicodeSegmentation::graphemes(slice, true)
-                .next()
-                .unwrap();
+            let grapheme = UnicodeSegmentation::graphemes(slice, true).next().unwrap();
             self.grapheme += 1;
             self.column += 1;
             idx += grapheme.len();
@@ -63,13 +62,25 @@ pub struct Span {
     pub end: Position,
 }
 
+impl Serialize for Span {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format!("{}..{}", self.start.grapheme, self.end.grapheme))
+    }
+}
+
 impl Span {
     pub fn new(start: Position, end: Position) -> Self {
         Self { start, end }
     }
 
     pub fn single(pos: Position) -> Self {
-        Self { start: pos, end: pos }
+        Self {
+            start: pos,
+            end: pos,
+        }
     }
 
     pub fn merge(self, other: Span) -> Self {
@@ -98,13 +109,13 @@ impl fmt::Display for Span {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum CommentKind {
     Line,
     Block,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Comment {
     pub kind: CommentKind,
     pub text: String,
@@ -238,8 +249,34 @@ mod tests {
 
     #[test]
     fn span_merge_keeps_outer_bounds() {
-        let a = Span::new(Position { byte: 0, grapheme: 0, line: 1, column: 0 }, Position { byte: 2, grapheme: 2, line: 1, column: 2 });
-        let b = Span::new(Position { byte: 2, grapheme: 2, line: 1, column: 2 }, Position { byte: 5, grapheme: 5, line: 1, column: 5 });
+        let a = Span::new(
+            Position {
+                byte: 0,
+                grapheme: 0,
+                line: 1,
+                column: 0,
+            },
+            Position {
+                byte: 2,
+                grapheme: 2,
+                line: 1,
+                column: 2,
+            },
+        );
+        let b = Span::new(
+            Position {
+                byte: 2,
+                grapheme: 2,
+                line: 1,
+                column: 2,
+            },
+            Position {
+                byte: 5,
+                grapheme: 5,
+                line: 1,
+                column: 5,
+            },
+        );
         let merged = a.merge(b);
         assert_eq!(merged.start.grapheme, 0);
         assert_eq!(merged.end.grapheme, 5);

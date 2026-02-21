@@ -1,9 +1,9 @@
 use super::Parser;
 use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, StatKind, TopItem, VarKind};
-use crate::lexical::lexer::Lexer;
+use crate::lexical::lexer::lex;
 
 fn parse_chunk(input: &str) -> Chunk {
-    let lex_result = Lexer::new(input).lex_all().unwrap();
+    let lex_result = lex(input).unwrap();
     Parser::new(lex_result.tokens, lex_result.comments).parse_chunk().unwrap()
 }
 

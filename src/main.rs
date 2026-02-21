@@ -4,7 +4,7 @@ mod semantic;
 mod bundle_manifest;
 mod formats;
 
-use crate::lexical::lexer::Lexer;
+use crate::lexical::lexer::lex;
 use crate::syntax::parser::Parser;
 use std::io::{self, Read};
 
@@ -15,7 +15,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let lex_result = match Lexer::new(&input).lex_all() {
+    let lex_result = match lex(&input) {
         Ok(r) => r,
         Err(err) => {
             eprintln!("Lex error at line {} column {}: {}", err.position.line, err.position.column, err.message);
@@ -167,7 +167,7 @@ export define add (x: integer, y: integer): integer
   return x + y
 end
     "#;
-    let lex_result = Lexer::new(code).lex_all().unwrap();
+    let lex_result = lex(code).unwrap();
     let chunk = Parser::new(lex_result.tokens, lex_result.comments).parse_chunk().unwrap();
     print!("{}", formats::textual::encode(&chunk).unwrap());
     match crate::semantic::analyze_bundle(vec![chunk]) {

@@ -1,6 +1,5 @@
 use serde::{Serialize, Serializer};
 use std::fmt;
-use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Position {
@@ -18,41 +17,6 @@ impl Position {
             line: 1,
             column: 0,
         }
-    }
-
-    pub fn advance(mut self, text: &str) -> Self {
-        self.byte += text.len();
-        let mut idx = 0;
-        while idx < text.len() {
-            let slice = &text[idx..];
-            if slice.starts_with("\r\n") {
-                self.grapheme += 1;
-                self.line += 1;
-                self.column = 0;
-                idx += 2;
-                continue;
-            }
-            if slice.starts_with('\n') {
-                self.grapheme += 1;
-                self.line += 1;
-                self.column = 0;
-                idx += 1;
-                continue;
-            }
-            if slice.starts_with('\r') {
-                self.grapheme += 1;
-                self.line += 1;
-                self.column = 0;
-                idx += 1;
-                continue;
-            }
-
-            let grapheme = UnicodeSegmentation::graphemes(slice, true).next().unwrap();
-            self.grapheme += 1;
-            self.column += 1;
-            idx += grapheme.len();
-        }
-        self
     }
 }
 
@@ -221,24 +185,6 @@ impl Token {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn position_advances_by_graphemes() {
-        let start = Position::start();
-        let next = start.advance("a\u{0301}");
-        assert_eq!(next.grapheme, 1);
-        assert_eq!(next.line, 1);
-        assert_eq!(next.column, 1);
-
-        let next = next.advance("\n");
-        assert_eq!(next.line, 2);
-        assert_eq!(next.column, 0);
-
-        let next = next.advance("\u{03B2}");
-        assert_eq!(next.grapheme, 3);
-        assert_eq!(next.line, 2);
-        assert_eq!(next.column, 1);
-    }
 
     #[test]
     fn span_merge_keeps_outer_bounds() {

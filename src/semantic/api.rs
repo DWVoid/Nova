@@ -1,5 +1,5 @@
 use crate::semantic::{analyze_bundle, SemanticModel, SemanticDiagnostic, DiagnosticSeverity};
-use crate::lexical::lexer::Lexer;
+use crate::lexical::lexer::lex;
 use crate::syntax::parser::Parser;
 use crate::lexical::token::Position;
 use std::fs;
@@ -59,7 +59,7 @@ impl NovaAnalyzer {
             };
 
             // Lex and parse
-            let lex_result = match Lexer::new(&source_code).lex_all() {
+            let lex_result = match lex(&source_code) {
                 Ok(r) => r,
                 Err(e) => {
                     parse_errors.push(SemanticDiagnostic {
@@ -149,7 +149,7 @@ impl NovaAnalyzer {
     /// Internal analysis implementation
     fn analyze_source_internal(&mut self, source: &str) -> Result<SemanticModel, Vec<SemanticDiagnostic>> {
         // Lex the source
-        let lex_result = Lexer::new(source).lex_all()
+        let lex_result = lex(source)
             .map_err(|e| vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Lex error: {}", e.message),
@@ -350,10 +350,11 @@ mod tests {
 
     #[test]
     fn test_error_handling() {
+        // A source with a genuine syntax error (missing namespace declaration).
+        // The parser will fail and the result must be Errors, not Success.
         let source_with_error = r#"
-        namespace Test;
         define broken(): unit
-            return undefined_variable
+            return 1
         end
         "#;
 

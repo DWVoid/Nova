@@ -1,5 +1,5 @@
 use super::token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind};
-use icu::properties::props::{PatternSyntax, PatternWhiteSpace, XidContinue, XidStart};
+use icu::properties::props::{Emoji, EmojiPresentation, PatternSyntax, PatternWhiteSpace, XidContinue, XidStart};
 use icu::properties::CodePointSetData;
 use icu::segmenter::GraphemeClusterSegmenter;
 
@@ -230,9 +230,45 @@ impl<'a> Lexer<'a> {
             }
         }
         let text = &self.input[start_index..self.index];
+
         let kind = if let Some(keyword) = keyword_from_str(text) {
             TokenKind::Keyword(keyword)
         } else {
+            // Walk the collected text by grapheme cluster.  A cluster is considered
+            // emoji-rendered — and therefore invalid in an identifier — when its
+            // first codepoint has the `Emoji` property AND either:
+            //   (a) it also has `Emoji_Presentation` (default emoji rendering), or
+            //   (b) the cluster contains more than one codepoint, meaning a VS16
+            //       variation selector, ZWJ joiner, regional indicator pair, keycap
+            //       sequence, or skin-tone modifier is present.
+            // This correctly admits text-presentation emoji used as plain letters
+            // (e.g. the copyright sign '©' without VS16 if it were XID_Start) while
+            // rejecting anything a renderer would display as a pictogram.
+            let seg = GraphemeClusterSegmenter::new();
+            let emoji_prop   = CodePointSetData::new::<Emoji>();
+            let emoji_pres   = CodePointSetData::new::<EmojiPresentation>();
+            let breaks: Vec<usize> = seg.segment_str(text).collect();
+            for window in breaks.windows(2) {
+                let (start, end) = (window[0], window[1]);
+                let cluster = &text[start..end];
+                let first = match cluster.chars().next() {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let multi_codepoint = cluster.chars().nth(1).is_some();
+                if emoji_prop.contains(first) && (emoji_pres.contains(first) || multi_codepoint) {
+                    // Compute the position of this cluster within the token span
+                    // by advancing from start_pos over the text that precedes it.
+                    let cluster_pos = self.advance_position(start_pos, &text[..start]);
+                    return Err(LexError {
+                        message: format!(
+                            "emoji grapheme cluster in identifier: {:?}", cluster
+                        ),
+                        position: cluster_pos,
+                    });
+                }
+            }
+
             TokenKind::Identifier(text.to_string())
         };
         Ok(Token::new(kind, Span::new(start_pos, self.position)))
@@ -1559,7 +1595,84 @@ mod tests {
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "字"));
     }
 
-    // -- confirm non-letter visible chars are correctly rejected --------------
+    // -- emoji grapheme cluster validation in scan_word ───────────────────────
+    //
+    // After collecting an identifier's text, scan_word walks it by grapheme
+    // cluster and rejects any cluster that would render as an emoji.  The rule:
+    // a cluster is emoji-rendered when its first codepoint has Emoji=true AND
+    // either EmojiPresentation=true (default emoji rendering) or the cluster
+    // contains more than one codepoint (VS16, ZWJ, skin-tone modifier, etc.).
+    //
+    // Key facts from icu property data:
+    //   U+FE0F VS16    — XID_Continue=true, Emoji=false.  Consumed by scanner.
+    //                    When it follows a char with Emoji=true the segmenter
+    //                    groups them as one multi-codepoint cluster → flagged.
+    //   digit '0','1'  — XID_Continue=true, Emoji=true, EmojiPresentation=false,
+    //                    single codepoint → NOT flagged (text rendering wins).
+    //   '1' + VS16     — multi-codepoint cluster, first char Emoji=true → flagged.
+    //   U+1D400 𝐀      — XID_Start=true, Emoji=false → valid, never flagged.
+    //   ⌚ U+231A       — Emoji=true, EP=true, XID_Start=false → rejected at
+    //                    scan_token before scan_word is ever reached.
+
+    /// Lex `input`, assert it fails, and return the error.
+    fn must_fail_with_msg(input: &str, fragment: &str) -> LexError {
+        let e = lex(input).expect_err("expected lex to fail");
+        assert!(
+            e.message.contains(fragment),
+            "expected message containing {:?}, got: {:?}",
+            fragment, e.message
+        );
+        e
+    }
+
+    #[test]
+    fn scan_word_accepts_math_bold_letter_not_emoji() {
+        // U+1D400 𝐀: XID_Start=true, Emoji=false → valid, not flagged.
+        let r = lex("\u{1D400}").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    }
+
+    #[test]
+    fn scan_word_accepts_digit_continue_without_vs16() {
+        // "a0": '0' is Emoji=true, EmojiPresentation=false, single codepoint
+        // → not emoji-rendered, must be accepted as a continue char.
+        let r = lex("a0").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "a0"));
+    }
+
+    #[test]
+    fn scan_word_rejects_digit_followed_by_vs16_in_identifier() {
+        // "a1\u{FE0F}": VS16 (XID_Continue=true) is consumed into the word.
+        // The segmenter groups '1'+VS16 as one cluster; first char '1' has
+        // Emoji=true and the cluster is multi-codepoint → emoji cluster error.
+        must_fail_with_msg("a1\u{FE0F}", "emoji grapheme cluster");
+    }
+
+    #[test]
+    fn scan_word_error_position_points_to_violating_cluster_start() {
+        // "abc1\u{FE0F}": bytes a(0) b(1) c(2) 1(3) VS16(4..7).
+        // The violating cluster '1'+VS16 starts at byte offset 3.
+        let err = must_fail_with_msg("abc1\u{FE0F}", "emoji grapheme cluster");
+        assert_eq!(err.position.byte(), 3);
+    }
+
+    #[test]
+    fn scan_word_error_message_includes_violating_cluster() {
+        // The message must contain the debug-formatted cluster string.
+        let err = lex("a1\u{FE0F}").unwrap_err();
+        assert!(err.message.contains("emoji grapheme cluster in identifier"));
+        // The cluster "1\u{fe0f}" should appear Debug-formatted in the message.
+        assert!(err.message.contains('1'));
+    }
+
+    #[test]
+    fn scan_word_rejects_standalone_emoji_presentation_char_via_scan_token() {
+        // ⌚ U+231A: Emoji=true, EmojiPresentation=true, XID_Start=false.
+        // It is rejected at scan_token (not ident-start), before scan_word runs.
+        must_fail("\u{231A}");
+    }
+
+    // -- confirm non-letter visible chars are correctly rejected ──────────────
     //
     // Emojis are Emoji_Presentation (So), not letters → NOT in XID_Start.
     // ASCII punctuation not in the reserved-symbol table but covered by

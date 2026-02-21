@@ -556,7 +556,7 @@ impl NamespaceTree {
                         child_name,
                         path
                     ),
-                    location: scope.span.unwrap_or(Span::single(Position::start())).start,
+                    location: scope.span.unwrap_or(Span::single(Position::new_start())).start,
                     category: DiagnosticCategory::SymbolResolution,
                 });
             }
@@ -572,7 +572,7 @@ impl NamespaceTree {
                             parent_path,
                             path
                         ),
-                        location: scope.span.unwrap_or(Span::single(Position::start())).start,
+                        location: scope.span.unwrap_or(Span::single(Position::new_start())).start,
                         category: DiagnosticCategory::SymbolResolution,
                     });
                 }
@@ -597,7 +597,7 @@ mod tests {
     }
 
     fn create_test_chunk(namespace_path: &[&str]) -> Chunk {
-        let span = Span::single(Position::start());
+        let span = Span::single(Position::new_start());
         Chunk {
             span,
             comments: Vec::new(),
@@ -637,7 +637,7 @@ mod tests {
         let mut tree = NamespaceTree::new(bundle_name);
 
         let path = NamespacePath::new(vec!["System".to_string(), "Collections".to_string()]);
-        let span = Span::single(Position::start());
+        let span = Span::single(Position::new_start());
         
         tree.ensure_namespace_exists(&path, span);
 

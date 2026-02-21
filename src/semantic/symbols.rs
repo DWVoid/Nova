@@ -336,7 +336,7 @@ impl SymbolTableBuilder {
             diagnostics.push(SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Invalid export: symbol '{}' has no mangled name", invalid_export.name),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::SymbolResolution,
             });
         }
@@ -537,11 +537,11 @@ mod tests {
 
     fn create_test_definition(name: &str, is_exported: bool) -> TopItem {
         TopItem::Definition(Definition {
-            span: Span::single(Position::start()),
+            span: Span::single(Position::new_start()),
             decorators: Vec::new(),
             visibility: if is_exported {
                 Some(crate::syntax::ast::Visibility {
-                    span: Span::single(Position::start()),
+                    span: Span::single(Position::new_start()),
                     scopes: None,
                 })
             } else {
@@ -549,27 +549,27 @@ mod tests {
             },
             name: Name {
                 value: name.to_string(),
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
             },
             type_spec: None,
             expr: DefExpr::Exp(Exp {
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
                 kind: ExpKind::Lambda(crate::syntax::ast::LambdaExpr {
-                    span: Span::single(Position::start()),
+                    span: Span::single(Position::new_start()),
                     is_const: false,
                     params: Vec::new(),
                     return_type: crate::syntax::ast::TypeSpec {
-                        span: Span::single(Position::start()),
+                        span: Span::single(Position::new_start()),
                         ty: crate::syntax::ast::TypeName {
-                            span: Span::single(Position::start()),
+                            span: Span::single(Position::new_start()),
                             parts: vec![Name {
                                 value: "unit".to_string(),
-                                span: Span::single(Position::start()),
+                                span: Span::single(Position::new_start()),
                             }],
                         },
                     },
                     block: crate::syntax::ast::Block {
-                        span: Span::single(Position::start()),
+                        span: Span::single(Position::new_start()),
                         stats: Vec::new(),
                         ret: None,
                     },

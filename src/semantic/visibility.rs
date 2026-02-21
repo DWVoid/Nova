@@ -854,14 +854,14 @@ mod tests {
             visibility: None,
             name: Name {
                 value: "symbol".to_string(),
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
             },
             type_spec: None,
             expr: DefExpr::Exp(crate::syntax::ast::Exp {
                 kind: crate::syntax::ast::ExpKind::Nil,
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
             }),
-            span: Span::single(Position::start()),
+            span: Span::single(Position::new_start()),
         };
 
         // Test valid public rule

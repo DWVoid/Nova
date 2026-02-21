@@ -18,7 +18,7 @@ fn main() {
     let lex_result = match lex(&input) {
         Ok(r) => r,
         Err(err) => {
-            eprintln!("Lex error at line {} column {}: {}", err.position.line, err.position.column, err.message);
+            eprintln!("Lex error at line {} column {}: {}", err.position.line(), err.position.column(), err.message);
             std::process::exit(1);
         }
     };
@@ -26,7 +26,7 @@ fn main() {
     let chunk = match Parser::new(lex_result.tokens, lex_result.comments).parse_chunk() {
         Ok(chunk) => chunk,
         Err(err) => {
-            eprintln!("Parse error at line {} column {}: {}", err.position.line, err.position.column, err.message);
+            eprintln!("Parse error at line {} column {}: {}", err.position.line(), err.position.column(), err.message);
             std::process::exit(1);
         }
     };

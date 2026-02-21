@@ -3,21 +3,22 @@ use std::fmt;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Position {
-    pub byte: usize,
-    pub grapheme: usize,
-    pub line: usize,
-    pub column: usize,
+    byte: usize,
+    grapheme: usize,
+    line: usize,
+    column: usize,
 }
 
 impl Position {
-    pub fn start() -> Self {
-        Self {
-            byte: 0,
-            grapheme: 0,
-            line: 1,
-            column: 0,
-        }
+    pub fn new(byte: usize, grapheme: usize, line: usize, column: usize) -> Self {
+        Self { byte, grapheme, line, column }
     }
+
+    pub fn new_start() -> Self { Self::new(0,0,1,0)}
+    pub fn byte(&self) -> usize { self.byte }
+    pub fn grapheme(&self) -> usize { self.grapheme }
+    pub fn line(&self) -> usize { self.line }
+    pub fn column(&self) -> usize { self.column }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,7 +32,7 @@ impl Serialize for Span {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("{}..{}", self.start.grapheme, self.end.grapheme))
+        serializer.serialize_str(&format!("{}..{}", self.start.grapheme(), self.end.grapheme()))
     }
 }
 
@@ -48,12 +49,12 @@ impl Span {
     }
 
     pub fn merge(self, other: Span) -> Self {
-        let start = if self.start.grapheme <= other.start.grapheme {
+        let start = if self.start.grapheme() <= other.start.grapheme() {
             self.start
         } else {
             other.start
         };
-        let end = if self.end.grapheme >= other.end.grapheme {
+        let end = if self.end.grapheme() >= other.end.grapheme() {
             self.end
         } else {
             other.end
@@ -63,13 +64,13 @@ impl Span {
 
     #[allow(dead_code)]
     pub fn len_graphemes(&self) -> usize {
-        self.end.grapheme.saturating_sub(self.start.grapheme)
+        self.end.grapheme().saturating_sub(self.start.grapheme())
     }
 }
 
 impl fmt::Display for Span {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}..{}", self.start.grapheme, self.end.grapheme)
+        write!(f, "{}..{}", self.start.grapheme(), self.end.grapheme())
     }
 }
 
@@ -189,35 +190,15 @@ mod tests {
     #[test]
     fn span_merge_keeps_outer_bounds() {
         let a = Span::new(
-            Position {
-                byte: 0,
-                grapheme: 0,
-                line: 1,
-                column: 0,
-            },
-            Position {
-                byte: 2,
-                grapheme: 2,
-                line: 1,
-                column: 2,
-            },
+            Position::new(0, 0, 1, 0),
+            Position::new(2, 2, 1, 2),
         );
         let b = Span::new(
-            Position {
-                byte: 2,
-                grapheme: 2,
-                line: 1,
-                column: 2,
-            },
-            Position {
-                byte: 5,
-                grapheme: 5,
-                line: 1,
-                column: 5,
-            },
+            Position::new(2, 2, 1, 2),
+            Position::new(5, 5, 1, 5),
         );
         let merged = a.merge(b);
-        assert_eq!(merged.start.grapheme, 0);
-        assert_eq!(merged.end.grapheme, 5);
+        assert_eq!(merged.start.grapheme(), 0);
+        assert_eq!(merged.end.grapheme(), 5);
     }
 }

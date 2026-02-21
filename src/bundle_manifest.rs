@@ -84,7 +84,7 @@ impl BundleManifest {
             vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Failed to read manifest file: {}", e),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::DependencyError,
             }]
         })?;
@@ -150,7 +150,7 @@ impl BundleManifest {
             diagnostics.push(SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: "Bundle name cannot be empty".to_string(),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::DependencyError,
             });
         }
@@ -162,7 +162,7 @@ impl BundleManifest {
             diagnostics.push(SemanticDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message: "Version 0.0.0 is not recommended for published bundles".to_string(),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::DependencyError,
             });
         }
@@ -189,7 +189,7 @@ impl BundleManifest {
                 diagnostics.push(SemanticDiagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: format!("Feature '{}' cannot depend on itself", feature_name),
-                    location: Position::start(),
+                    location: Position::new_start(),
                     category: DiagnosticCategory::DependencyError,
                 });
             }
@@ -215,7 +215,7 @@ pub fn parse_version(version_str: &str) -> Result<Version, SemanticDiagnostic> {
         return Err(SemanticDiagnostic {
             severity: DiagnosticSeverity::Error,
             message: format!("Invalid version format: '{}'. Expected major.minor.patch", version_str),
-            location: Position::start(),
+            location: Position::new_start(),
             category: DiagnosticCategory::DependencyError,
         });
     }
@@ -223,21 +223,21 @@ pub fn parse_version(version_str: &str) -> Result<Version, SemanticDiagnostic> {
     let major = parts[0].parse().map_err(|_| SemanticDiagnostic {
         severity: DiagnosticSeverity::Error,
         message: format!("Invalid major version: '{}'", parts[0]),
-        location: Position::start(),
+        location: Position::new_start(),
         category: DiagnosticCategory::DependencyError,
     })?;
 
     let minor = parts[1].parse().map_err(|_| SemanticDiagnostic {
         severity: DiagnosticSeverity::Error,
         message: format!("Invalid minor version: '{}'", parts[1]),
-        location: Position::start(),
+        location: Position::new_start(),
         category: DiagnosticCategory::DependencyError,
     })?;
 
     let patch = parts[2].parse().map_err(|_| SemanticDiagnostic {
         severity: DiagnosticSeverity::Error,
         message: format!("Invalid patch version: '{}'", parts[2]),
-        location: Position::start(),
+        location: Position::new_start(),
         category: DiagnosticCategory::DependencyError,
     })?;
 

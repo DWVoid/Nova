@@ -519,7 +519,7 @@ impl TypeSystem {
             diagnostics.push(SemanticDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message: format!("Struct '{}' has no fields", qualified_name.name),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::TypeError,
             });
         }
@@ -531,7 +531,7 @@ impl TypeSystem {
                 diagnostics.push(SemanticDiagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: format!("Duplicate field '{}' in struct '{}'", field_name, qualified_name.name),
-                    location: Position::start(),
+                    location: Position::new_start(),
                     category: DiagnosticCategory::TypeError,
                 });
             }
@@ -554,7 +554,7 @@ impl TypeSystem {
             diagnostics.push(SemanticDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message: format!("Enum '{}' has no variants", qualified_name.name),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::TypeError,
             });
         }
@@ -568,7 +568,7 @@ impl TypeSystem {
                 diagnostics.push(SemanticDiagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: format!("Enum '{}' base type must be integer", qualified_name.name),
-                    location: Position::start(),
+                    location: Position::new_start(),
                     category: DiagnosticCategory::TypeError,
                 });
             }
@@ -582,7 +582,7 @@ impl TypeSystem {
                     severity: DiagnosticSeverity::Warning,
                     message: format!("Enum '{}' has duplicate value {} for variant '{}'", 
                         qualified_name.name, value, variant_name),
-                    location: Position::start(),
+                    location: Position::new_start(),
                     category: DiagnosticCategory::TypeError,
                 });
             }
@@ -601,7 +601,7 @@ impl TypeSystem {
             diagnostics.push(SemanticDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message: format!("Variant '{}' has no cases", qualified_name.name),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::TypeError,
             });
         }
@@ -1033,10 +1033,10 @@ mod tests {
         let type_system = TypeSystem::new(bundle_name);
         
         let ast_type = TypeName {
-            span: Span::single(Position::start()),
+            span: Span::single(Position::new_start()),
             parts: vec![Name {
                 value: "integer".to_string(),
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
             }],
         };
         
@@ -1065,7 +1065,7 @@ mod tests {
         
         let int_type = NovaType::Primitive(PrimitiveType::Integer);
         let bool_type = NovaType::Primitive(PrimitiveType::Boolean);
-        let span = Span::single(Position::start());
+        let span = Span::single(Position::new_start());
         
         // Test arithmetic operation
         let result = type_system.type_check_binary_operation(&int_type, &int_type, &BinOp::Add, span);
@@ -1102,7 +1102,7 @@ mod tests {
         
         let int_type = NovaType::Primitive(PrimitiveType::Integer);
         let bool_type = NovaType::Primitive(PrimitiveType::Boolean);
-        let span = Span::single(Position::start());
+        let span = Span::single(Position::new_start());
         
         // Test logical NOT operation
         let result = type_system.type_check_unary_operation(&bool_type, &UnOp::Not, span);

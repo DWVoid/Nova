@@ -1076,10 +1076,10 @@ mod tests {
 
     fn create_test_type_name(name: &str) -> TypeName {
         TypeName {
-            span: Span::single(Position::start()),
+            span: Span::single(Position::new_start()),
             parts: vec![Name {
                 value: name.to_string(),
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
             }],
         }
     }

@@ -35,7 +35,7 @@ impl<'a> Lexer<'a> {
         Self {
             input,
             index: 0,
-            position: Position::start(),
+            position: Position::new_start(),
             comments: Vec::new(),
             tokens: Vec::new(),
         }
@@ -83,31 +83,34 @@ impl<'a> Lexer<'a> {
     /// Recomputes a `Position` after consuming `text`, tracking bytes, grapheme
     /// clusters, lines, and columns.  Lives here rather than on `Position` itself
     /// because it is the only place position arithmetic is needed.
-    fn advance_position(&self, mut pos: Position, text: &str) -> Position {
-        pos.byte += text.len();
+    fn advance_position(&self, pos: Position, text: &str) -> Position {
+        let byte = pos.byte() + text.len();
+        let mut grapheme = pos.grapheme();
+        let mut line = pos.line();
+        let mut column = pos.column();
         let mut idx = 0;
         while idx < text.len() {
             let slice = &text[idx..];
             if slice.starts_with("\r\n") {
-                pos.grapheme += 1;
-                pos.line += 1;
-                pos.column = 0;
+                grapheme += 1;
+                line += 1;
+                column = 0;
                 idx += 2;
                 continue;
             }
             if slice.starts_with('\n') || slice.starts_with('\r') {
-                pos.grapheme += 1;
-                pos.line += 1;
-                pos.column = 0;
+                grapheme += 1;
+                line += 1;
+                column = 0;
                 idx += 1;
                 continue;
             }
-            let grapheme = UnicodeSegmentation::graphemes(slice, true).next().unwrap();
-            pos.grapheme += 1;
-            pos.column += 1;
-            idx += grapheme.len();
+            let g = UnicodeSegmentation::graphemes(slice, true).next().unwrap();
+            grapheme += 1;
+            column += 1;
+            idx += g.len();
         }
-        pos
+        Position::new(byte, grapheme, line, column)
     }
 
     fn advance_char(&mut self) -> Option<char> {
@@ -533,21 +536,21 @@ mod tests {
     #[test]
     fn advance_position_tracks_graphemes_and_lines() {
         let lexer = Lexer::new("");
-        let pos = Position::start();
+        let pos = Position::new_start();
 
         let pos = lexer.advance_position(pos, "a\u{0301}"); // combining accent = 1 grapheme
-        assert_eq!(pos.grapheme, 1);
-        assert_eq!(pos.line, 1);
-        assert_eq!(pos.column, 1);
+        assert_eq!(pos.grapheme(), 1);
+        assert_eq!(pos.line(), 1);
+        assert_eq!(pos.column(), 1);
 
         let pos = lexer.advance_position(pos, "\n");
-        assert_eq!(pos.line, 2);
-        assert_eq!(pos.column, 0);
+        assert_eq!(pos.line(), 2);
+        assert_eq!(pos.column(), 0);
 
         let pos = lexer.advance_position(pos, "\u{03B2}");
-        assert_eq!(pos.grapheme, 3);
-        assert_eq!(pos.line, 2);
-        assert_eq!(pos.column, 1);
+        assert_eq!(pos.grapheme(), 3);
+        assert_eq!(pos.line(), 2);
+        assert_eq!(pos.column(), 1);
     }
 
     #[test]

@@ -668,11 +668,11 @@ impl DiagnosticSystem {
         // In a full implementation, this would extract actual source code
         context.source_code.as_ref().map(|_source| SourceSnippet {
             lines: vec![SourceLine {
-                line_number: diagnostic.location.line,
+                line_number: diagnostic.location.line(),
                 content: "// Source line would be extracted here".to_string(),
                 highlights: vec![ColumnHighlight {
-                    start_column: diagnostic.location.column,
-                    end_column: diagnostic.location.column + 10,
+                    start_column: diagnostic.location.column(),
+                    end_column: diagnostic.location.column() + 10,
                     style: match diagnostic.severity {
                         DiagnosticSeverity::Error => HighlightStyle::Error,
                         DiagnosticSeverity::Warning => HighlightStyle::Warning,
@@ -683,7 +683,7 @@ impl DiagnosticSystem {
             }],
             primary_span: Span::single(diagnostic.location),
             secondary_spans: Vec::new(),
-            line_offset: diagnostic.location.line.saturating_sub(1),
+            line_offset: diagnostic.location.line().saturating_sub(1),
         })
     }
 
@@ -789,7 +789,7 @@ impl DiagnosticSystem {
                     description: format!("Add import for '{}'", symbol_context.symbol_name),
                     suggestion_type: SuggestionType::Import,
                     changes: vec![CodeChange {
-                        location: Span::single(Position::start()),
+                        location: Span::single(Position::new_start()),
                         change_type: ChangeType::Insert,
                         new_content: format!("use {};\n", symbol_context.symbol_name),
                         description: "Add import statement".to_string(),
@@ -865,8 +865,8 @@ impl DiagnosticSystem {
         for (location, diagnostics) in &self.diagnostics.by_location {
             if diagnostics.len() > 1 {
                 let group = DiagnosticGroup {
-                    id: format!("location_{}_{}_{}", location.line, location.column, location.byte),
-                    title: format!("Issues at line {} column {}", location.line, location.column),
+                    id: format!("location_{}_{}_{}", location.line(), location.column(), location.byte()),
+                    title: format!("Issues at line {} column {}", location.line(), location.column()),
                     diagnostics: diagnostics.iter().map(|d| d.id.clone()).collect(),
                     group_suggestions: Vec::new(),
                 };
@@ -1040,7 +1040,7 @@ mod tests {
         let diagnostic = SemanticDiagnostic {
             severity: DiagnosticSeverity::Error,
             message: "Test error".to_string(),
-            location: Position::start(),
+            location: Position::new_start(),
             category: DiagnosticCategory::TypeError,
         };
         
@@ -1099,7 +1099,7 @@ mod tests {
             base: SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: "Test error".to_string(),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::TypeError,
             },
             id: DiagnosticId {

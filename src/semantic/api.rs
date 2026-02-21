@@ -51,7 +51,7 @@ impl NovaAnalyzer {
                     parse_errors.push(SemanticDiagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!("Failed to read file {:?}: {}", path, e),
-                        location: Position::start(),
+                        location: Position::new_start(),
                         category: crate::semantic::DiagnosticCategory::SymbolResolution,
                     });
                     continue;
@@ -65,7 +65,7 @@ impl NovaAnalyzer {
                     parse_errors.push(SemanticDiagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!("Lexer error in {:?}: {}", path, e.message),
-                        location: Position::start(), // TODO: fix this
+                        location: Position::new_start(), // TODO: fix this
                         category: crate::semantic::DiagnosticCategory::SymbolResolution,
                     });
                     continue;
@@ -78,7 +78,7 @@ impl NovaAnalyzer {
                     parse_errors.push(SemanticDiagnostic {
                         severity: DiagnosticSeverity::Error,
                         message: format!("Parser error in {:?}: {}", path, e.message),
-                        location: Position::start(), // TODO: fix this
+                        location: Position::new_start(), // TODO: fix this
                         category: crate::semantic::DiagnosticCategory::SymbolResolution,
                     });
                     continue;
@@ -98,7 +98,7 @@ impl NovaAnalyzer {
             return AnalysisResult::Errors(vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: "No source files could be parsed".to_string(),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: crate::semantic::DiagnosticCategory::SymbolResolution,
             }]);
         }
@@ -121,7 +121,7 @@ impl NovaAnalyzer {
                 return AnalysisResult::Errors(vec![SemanticDiagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: format!("Failed to scan directory {:?}: {}", dir_path, e),
-                    location: Position::start(),
+                    location: Position::new_start(),
                     category: crate::semantic::DiagnosticCategory::SymbolResolution,
                 }]);
             }
@@ -131,7 +131,7 @@ impl NovaAnalyzer {
             return AnalysisResult::Errors(vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 message: format!("No .nova files found in directory {:?}", dir_path),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: crate::semantic::DiagnosticCategory::SymbolResolution,
             }]);
         }
@@ -153,7 +153,7 @@ impl NovaAnalyzer {
             .map_err(|e| vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Lex error: {}", e.message),
-                location: Position::start(), // TODO: fix this
+                location: Position::new_start(), // TODO: fix this
                 category: crate::semantic::DiagnosticCategory::SymbolResolution,
             }])?;
 
@@ -162,7 +162,7 @@ impl NovaAnalyzer {
             .map_err(|e| vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Parse error: {}", e.message),
-                location: Position::start(), // TODO: fix this
+                location: Position::new_start(), // TODO: fix this
                 category: crate::semantic::DiagnosticCategory::SymbolResolution,
             }])?;
 

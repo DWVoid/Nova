@@ -505,7 +505,7 @@ impl DecoratorSystem {
                 signature: self.create_builtin_signature(&builtin),
                 valid_targets: targets.into_iter().collect(),
                 implementation: DecoratorImplementation::BuiltIn(builtin),
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
             };
 
             self.decorator_definitions.insert(qualified_name, decorator_def);
@@ -638,7 +638,7 @@ impl DecoratorSystem {
         Err(SemanticDiagnostic {
             severity: DiagnosticSeverity::Error,
             message: format!("User-defined decorators not yet implemented: {}", qualified_name.name),
-            location: Position::start(),
+            location: Position::new_start(),
             category: DiagnosticCategory::DecoratorError,
         })
     }
@@ -812,7 +812,7 @@ impl DecoratorSystem {
                         parameter_name: param.name.clone(),
                         value: default_value.clone(),
                         value_type: param.param_type.clone(),
-                        source_span: Span::single(Position::start()),
+                        source_span: Span::single(Position::new_start()),
                     };
                     resolved_args.push(resolved_arg);
                 }
@@ -820,7 +820,7 @@ impl DecoratorSystem {
                 return Err(SemanticDiagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: format!("Missing required argument: {}", param.name),
-                    location: Position::start(),
+                    location: Position::new_start(),
                     category: DiagnosticCategory::DecoratorError,
                 });
             }
@@ -883,7 +883,7 @@ impl DecoratorSystem {
                 return Err(SemanticDiagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: "User-defined decorators not yet implemented".to_string(),
-                    location: Position::start(),
+                    location: Position::new_start(),
                     category: DiagnosticCategory::DecoratorError,
                 });
             }
@@ -891,7 +891,7 @@ impl DecoratorSystem {
                 return Err(SemanticDiagnostic {
                     severity: DiagnosticSeverity::Error,
                     message: "External decorators not yet implemented".to_string(),
-                    location: Position::start(),
+                    location: Position::new_start(),
                     category: DiagnosticCategory::DecoratorError,
                 });
             }
@@ -1098,7 +1098,7 @@ mod tests {
         
         let string_exp = Exp {
             kind: ExpKind::String("test".to_string()),
-            span: Span::single(Position::start()),
+            span: Span::single(Position::new_start()),
         };
         
         let value = decorator_system.convert_ast_to_decorator_value(&string_exp);
@@ -1117,14 +1117,14 @@ mod tests {
             visibility: None,
             name: Name {
                 value: "test_func".to_string(),
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
             },
             type_spec: None,
             expr: crate::syntax::ast::DefExpr::Exp(Exp {
                 kind: ExpKind::Nil,
-                span: Span::single(Position::start()),
+                span: Span::single(Position::new_start()),
             }),
-            span: Span::single(Position::start()),
+            span: Span::single(Position::new_start()),
         };
         
         let target_kind = decorator_system.get_target_kind(&function_def);

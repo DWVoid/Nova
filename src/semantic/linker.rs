@@ -476,7 +476,7 @@ impl LinkerSystem {
                         .collect::<Vec<_>>()
                         .join(" -> ")
                 ),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::DependencyError,
             });
 
@@ -741,14 +741,14 @@ impl LinkerSystem {
             local_name: "println".to_string(),
             source_bundle: BundleName::from("System"),
             resolution_status: self.resolve_import(&placeholder_import),
-            import_location: Span::single(Position::start()),
+            import_location: Span::single(Position::new_start()),
         };
 
         if matches!(imported_symbol.resolution_status, ResolutionStatus::Unresolved(_)) {
             diagnostics.push(SemanticDiagnostic {
                 severity: DiagnosticSeverity::Warning, // Make it a warning for now
                 message: format!("Cannot resolve import: {} (placeholder)", placeholder_import.name),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::SymbolResolution,
             });
         }
@@ -864,7 +864,7 @@ pub fn analyze_with_linking(
             diagnostics.push(SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Link failure: {:?}", link_failure.reason),
-                location: Position::start(),
+                location: Position::new_start(),
                 category: DiagnosticCategory::DependencyError,
             });
             Err(diagnostics.clone())

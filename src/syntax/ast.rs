@@ -358,7 +358,7 @@ mod tests {
     use crate::lexical::token::{CommentKind, Position};
 
     fn span() -> Span {
-        Span::new(Position::start(), Position::start())
+        Span::new(Position::new_start(), Position::new_start())
     }
 
     #[test]

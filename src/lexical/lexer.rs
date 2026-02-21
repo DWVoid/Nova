@@ -1,5 +1,7 @@
 use super::token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind};
-use unicode_segmentation::UnicodeSegmentation;
+use icu::properties::props::{PatternSyntax, PatternWhiteSpace, XidContinue, XidStart};
+use icu::properties::CodePointSetData;
+use icu::segmenter::GraphemeClusterSegmenter;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LexError {
@@ -103,10 +105,15 @@ impl<'a> Lexer<'a> {
                 idx += 1;
                 continue;
             }
-            let g = UnicodeSegmentation::graphemes(slice, true).next().unwrap();
+            let g_len = {
+                let seg = GraphemeClusterSegmenter::new();
+                let mut breaks = seg.segment_str(slice);
+                breaks.next(); // skip the mandatory break at offset 0
+                breaks.next().unwrap_or(slice.len())
+            };
             grapheme += 1;
             column += 1;
-            idx += g.len();
+            idx += g_len;
         }
         Position::new(byte, grapheme, line, column)
     }
@@ -479,25 +486,60 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// A character may *start* an identifier if it is a visible, non-whitespace
-/// Unicode scalar that is not an ASCII digit and not one of the punctuation
-/// symbols the lexer handles as distinct tokens.
+/// Returns true if `ch` may **start** an identifier.
+///
+/// Follows UAX#31 / C++26: a character is a valid start if it has the
+/// `XID_Start` Unicode property, or is U+005F LOW LINE (`_`).
+/// Characters with `Pattern_Syntax` or `Pattern_White_Space` are explicitly
+/// excluded, which covers all reserved symbols, ASCII punctuation the lexer
+/// owns, and all whitespace — so no separate reserved-symbol guard is needed
+/// at this layer.
 fn is_ident_start(ch: char) -> bool {
-    !ch.is_whitespace()
-        && !ch.is_control()
-        && !ch.is_ascii_digit()
-        && !is_reserved_symbol(ch)
+    if ch == '_' {
+        return true;
+    }
+    // Pattern_Syntax and Pattern_White_Space are supersets of every ASCII
+    // symbol and whitespace character; reject them first so that the lexer's
+    // own tokens ('+', '(', '.', etc.) never bleed into identifiers.
+    if is_pattern_syntax(ch) || is_pattern_whitespace(ch) {
+        return false;
+    }
+    CodePointSetData::new::<XidStart>().contains(ch)
 }
 
-/// A character may *continue* an identifier if it is any visible,
-/// non-whitespace Unicode scalar that is not a reserved symbol.
-/// ASCII digits are allowed after the first character.
+/// Returns true if `ch` may **continue** an identifier (after the first char).
+///
+/// Follows UAX#31 / C++26: `XID_Continue`, which is a superset of
+/// `XID_Start` extended with Mn (non-spacing marks), Mc (spacing combining
+/// marks), Nd (decimal digits), and Pc (connector punctuation including `_`).
+/// `Pattern_Syntax` and `Pattern_White_Space` are excluded as above.
 fn is_ident_continue(ch: char) -> bool {
-    !ch.is_whitespace() && !ch.is_control() && !is_reserved_symbol(ch)
+    if is_pattern_syntax(ch) || is_pattern_whitespace(ch) {
+        return false;
+    }
+    CodePointSetData::new::<XidContinue>().contains(ch)
 }
 
-/// Characters that are always lexed as their own symbol tokens and therefore
-/// cannot appear inside an identifier.
+/// Returns true for characters in the Unicode `Pattern_Syntax` property.
+/// These are characters reserved for use as syntactic operators in programming
+/// languages and are therefore never valid inside an identifier.  The set
+/// includes all ASCII punctuation the lexer uses as tokens.
+#[inline]
+fn is_pattern_syntax(ch: char) -> bool {
+    CodePointSetData::new::<PatternSyntax>().contains(ch)
+}
+
+/// Returns true for characters in the Unicode `Pattern_White_Space` property.
+/// Covers ASCII whitespace (\t, \n, \r, space) plus Unicode line/paragraph
+/// separators and a handful of other format whitespace characters.
+#[inline]
+fn is_pattern_whitespace(ch: char) -> bool {
+    CodePointSetData::new::<PatternWhiteSpace>().contains(ch)
+}
+
+/// Characters that are always lexed as their own symbol tokens.
+/// Kept for use in `scan_symbol`; identifier admission is now handled entirely
+/// by `is_pattern_syntax` / `is_pattern_whitespace` above.
 #[inline]
 fn is_reserved_symbol(ch: char) -> bool {
     matches!(
@@ -762,8 +804,12 @@ mod tests {
 
     #[test]
     fn identifier_emoji_is_lexed() {
-        let kinds = tokens("🎯");
-        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "🎯"));
+        // 🎯 is So (other symbol), NOT in XID_Start → rejected under UAX#31.
+        // Use a Unicode mathematical letter instead, which IS XID_Start.
+        // U+1D400 MATHEMATICAL BOLD CAPITAL A is in the Lo/Lm/Lu range and
+        // has XID_Start=true.
+        let kinds = tokens("\u{1D400}");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "\u{1D400}"));
     }
 
     #[test]
@@ -1398,79 +1444,72 @@ mod tests {
 
     // -- Unicode format / bidi / invisible characters -------------------------
     //
-    // Rust's is_control() does NOT cover Unicode format characters such as
-    // U+200C..200F, U+FFF9, U+FEFF, U+00AD.  They are therefore visible
-    // non-control, non-whitespace scalars → they pass is_ident_start and
-    // are accepted as identifier characters.
-    //
-    // U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are marked
-    // is_whitespace()=true by Rust, but advance_trivia only handles ASCII
-    // whitespace (\n \r \t space VT FF) and does not consume them.  They
-    // therefore reach scan_token where !is_whitespace() fails is_ident_start,
-    // landing in scan_symbol → not in the table → error.
+    // Under UAX#31 / C++26:
+    //   - XID_Start / XID_Continue are derived from Unicode General Category,
+    //     excluding Pattern_Syntax and Pattern_White_Space.
+    //   - Format characters (Cf) such as U+200C..200F, U+FFF9, U+FEFF are NOT
+    //     in XID_Start or XID_Continue and are therefore rejected.
+    //   - U+00AD SOFT HYPHEN is a Cf character, also rejected.
+    //   - U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR have
+    //     Pattern_White_Space=true, so they fail is_ident_start and reach
+    //     scan_symbol, which also rejects them.
 
     #[test]
-    fn unicode_zero_width_non_joiner_u200c_is_identifier() {
-        // U+200C: is_control()=false, is_whitespace()=false → ident char
-        let r = lex("\u{200C}").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    fn reject_zero_width_non_joiner_u200c() {
+        // U+200C Cf — not XID_Start → rejected
+        must_fail("\u{200C}");
     }
 
     #[test]
-    fn unicode_zero_width_joiner_u200d_is_identifier() {
-        let r = lex("\u{200D}").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    fn reject_zero_width_joiner_u200d() {
+        // U+200D Cf — not XID_Start → rejected
+        must_fail("\u{200D}");
     }
 
     #[test]
-    fn unicode_left_to_right_mark_u200e_is_identifier() {
-        let r = lex("\u{200E}").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    fn reject_left_to_right_mark_u200e() {
+        // U+200E Cf — not XID_Start → rejected
+        must_fail("\u{200E}");
     }
 
     #[test]
-    fn unicode_right_to_left_mark_u200f_is_identifier() {
-        let r = lex("\u{200F}").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    fn reject_right_to_left_mark_u200f() {
+        // U+200F Cf — not XID_Start → rejected
+        must_fail("\u{200F}");
     }
 
     #[test]
-    fn unicode_interlinear_annotation_ufff9_is_identifier() {
-        // U+FFF9: is_control()=false → ident char
-        let r = lex("\u{FFF9}").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    fn reject_interlinear_annotation_anchor_ufff9() {
+        // U+FFF9 Cf — not XID_Start → rejected
+        must_fail("\u{FFF9}");
     }
 
     #[test]
-    fn unicode_soft_hyphen_u00ad_is_identifier() {
-        // U+00AD SOFT HYPHEN: is_control()=false, not reserved → ident char
-        let r = lex("\u{00AD}").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    fn reject_soft_hyphen_u00ad() {
+        // U+00AD Cf — not XID_Start → rejected
+        must_fail("\u{00AD}");
     }
 
     #[test]
-    fn unicode_bom_ufeff_is_identifier() {
-        // U+FEFF BOM: is_control()=false → ident char
-        let r = lex("\u{FEFF}").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    fn reject_bom_ufeff() {
+        // U+FEFF Cf — not XID_Start → rejected
+        must_fail("\u{FEFF}");
     }
 
     #[test]
     fn reject_line_separator_u2028() {
-        // U+2028: is_whitespace()=true so it fails is_ident_start,
-        // but advance_trivia does not consume it → scan_symbol → error.
+        // U+2028 Pattern_White_Space=true → fails is_ident_start → scan_symbol
+        // → not in symbol table → error.
         must_fail("\u{2028}");
     }
 
     #[test]
     fn reject_paragraph_separator_u2029() {
-        // U+2029: same path as U+2028 → error.
         must_fail("\u{2029}");
     }
 
     #[test]
     fn reject_line_separator_after_valid_token() {
-        // "ab" (2 bytes) then U+2028 (3 bytes) at byte 2
         must_fail_at("ab\u{2028}", 2);
     }
 
@@ -1480,70 +1519,79 @@ mod tests {
     }
 
     #[test]
-    fn unicode_format_control_mixed_into_identifier() {
-        // U+200C appended to a normal identifier is part of that identifier
-        // (it is a valid ident-continue char)
-        let r = lex("abc\u{200C}def").unwrap();
+    fn reject_format_char_after_valid_identifier() {
+        // U+200E LEFT-TO-RIGHT MARK is Cf and NOT in XID_Continue →
+        // it terminates "ab" and then fails scan_symbol → error at byte 2.
+        must_fail_at("ab\u{200E}", 2);
+    }
+
+    #[test]
+    fn zwnj_is_valid_identifier_continue_char() {
+        // U+200C ZWNJ is in Other_ID_Continue per UAX#31 →
+        // it is a valid XID_Continue character, so "ab\u{200C}" is one identifier.
+        let r = lex("ab\u{200C}").unwrap();
         assert!(matches!(&r.tokens[0].kind,
-            TokenKind::Identifier(s) if s == "abc\u{200C}def"));
+            TokenKind::Identifier(s) if s == "ab\u{200C}"));
     }
 
     #[test]
-    fn unicode_format_controls_surrounding_valid_tokens() {
-        // valid "x" then U+200E then valid "y" — U+200E joins into "y"'s
-        // identifier; the result is two identifiers: "x" and "\u{200E}y"
-        let kinds = tokens("x \u{200E}y");
-        assert_eq!(kinds.len(), 2);
-        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "x"));
-        assert!(matches!(&kinds[1], TokenKind::Identifier(s) if s == "\u{200E}y"));
+    fn zwj_is_valid_identifier_continue_char() {
+        // U+200D ZWJ is in Other_ID_Continue per UAX#31 → valid XID_Continue.
+        let r = lex("ab\u{200D}").unwrap();
+        assert!(matches!(&r.tokens[0].kind,
+            TokenKind::Identifier(s) if s == "ab\u{200D}"));
     }
 
-    // -- confirm visible non-ASCII chars are NOT rejected ---------------------
+    // -- confirm visible non-ASCII letters ARE accepted -----------------------
     //
-    // These tests verify that the reject list has no false positives: visible,
-    // non-control Unicode characters outside the reserved-symbol set are valid
-    // identifier material and must NOT cause a lex error.
+    // Under UAX#31, characters with XID_Start are accepted.  This covers all
+    // Unicode letters (Lu, Ll, Lt, Lm, Lo) and letterlike numbers (Nl).
 
     #[test]
-    fn visible_non_ascii_letter_is_not_rejected() {
+    fn visible_non_ascii_letter_is_accepted() {
         let r = lex("é").unwrap();
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "é"));
     }
 
     #[test]
-    fn visible_non_ascii_cjk_is_not_rejected() {
+    fn visible_non_ascii_cjk_is_accepted() {
         let r = lex("字").unwrap();
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "字"));
     }
 
+    // -- confirm non-letter visible chars are correctly rejected --------------
+    //
+    // Emojis are Emoji_Presentation (So), not letters → NOT in XID_Start.
+    // ASCII punctuation not in the reserved-symbol table but covered by
+    // Pattern_Syntax (!, ?, $, `) are also excluded by UAX#31.
+
     #[test]
-    fn visible_non_ascii_emoji_is_not_rejected() {
-        let r = lex("🚀").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "🚀"));
+    fn reject_emoji_as_identifier_start() {
+        // 🚀 is So (other symbol), not XID_Start → rejected
+        must_fail("🚀");
     }
 
     #[test]
-    fn visible_ascii_backtick_is_not_rejected() {
-        // '`' is visible, not control, not reserved → valid identifier char
-        let r = lex("`foo`").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "`foo`"));
+    fn reject_ascii_backtick_as_identifier_start() {
+        // U+0060 GRAVE ACCENT is Pattern_Syntax → rejected
+        must_fail("`foo`");
     }
 
     #[test]
-    fn visible_ascii_question_mark_is_not_rejected() {
-        let r = lex("what?").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "what?"));
+    fn reject_ascii_exclamation_as_identifier_start() {
+        // U+0021 is Pattern_Syntax → rejected
+        must_fail("ok!");
     }
 
     #[test]
-    fn visible_ascii_dollar_is_not_rejected() {
-        let r = lex("$price").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "$price"));
+    fn reject_ascii_question_mark_as_identifier_start() {
+        // U+003F is Pattern_Syntax → rejected
+        must_fail("what?");
     }
 
     #[test]
-    fn visible_ascii_exclamation_is_not_rejected() {
-        let r = lex("ok!").unwrap();
-        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "ok!"));
+    fn reject_ascii_dollar_as_identifier_start() {
+        // U+0024 is Pattern_Syntax → rejected
+        must_fail("$price");
     }
 }

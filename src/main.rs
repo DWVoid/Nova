@@ -193,3 +193,10 @@ end
         }
     }
 }
+// _PROBE_
+fn _probe_icu() {
+    use icu::segmenter::GraphemeClusterSegmenter;
+    let seg = GraphemeClusterSegmenter::new();
+    let breaks: Vec<usize> = seg.segment_str("a\u{0301}b").collect();
+    let _ = breaks;
+}

@@ -5,7 +5,7 @@
 //! table system from Step 3 to provide comprehensive type analysis.
 
 use crate::syntax::ast::{TopItem, Definition, DefExpr, Exp, ExpKind, TypeName};
-use crate::lexical::token::{Position, Span};
+use crate::lexical::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::BundleName;
 use super::namespace::{NamespaceTree, NamespacePath};
@@ -972,7 +972,7 @@ impl std::fmt::Display for NovaType {
 mod tests {
     use super::*;
     use crate::syntax::ast::{Name, BinOp, UnOp};
-    use crate::lexical::token::Position;
+    use crate::lexical::Position;
 
     #[test]
     fn test_type_system_creation() {

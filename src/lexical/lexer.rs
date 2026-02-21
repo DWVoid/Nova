@@ -1,6 +1,4 @@
-use crate::lexical::token::{
-    Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind,
-};
+use super::token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

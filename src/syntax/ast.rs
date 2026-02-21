@@ -1,5 +1,5 @@
 use serde::Serialize;
-use crate::lexical::token::{Comment, Span};
+use crate::lexical::{Comment, Span};
 
 pub type Comments = Vec<Comment>;
 
@@ -355,7 +355,7 @@ impl TopItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::token::{CommentKind, Position};
+    use crate::lexical::{CommentKind, Position};
 
     fn span() -> Span {
         Span::new(Position::new_start(), Position::new_start())

@@ -6,7 +6,7 @@
 use crate::syntax::ast::{Chunk, TopItem, UseDecl, UseTail};
 #[cfg(test)]
 use crate::syntax::ast::NamespaceDecl;
-use crate::lexical::token::{Position, Span};
+use crate::lexical::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, bundle::BundleName};
 use std::collections::HashMap;
 

@@ -1,7 +1,6 @@
 use crate::semantic::{analyze_bundle, SemanticModel, SemanticDiagnostic, DiagnosticSeverity};
-use crate::lexical::lexer::lex;
+use crate::lexical::{lex, Position};
 use crate::syntax::parser::Parser;
-use crate::lexical::token::Position;
 use std::fs;
 use std::path::Path;
 use std::collections::HashMap;

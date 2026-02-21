@@ -5,7 +5,7 @@
 //! the foundation for Nova's advanced type system features and polymorphism.
 
 use crate::syntax::ast::{TopItem, Definition, DefExpr, TraitDef, Implementation, TraitSig};
-use crate::lexical::token::Span;
+use crate::lexical::Span;
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::BundleName;
 use super::namespace::{NamespaceTree, NamespacePath};
@@ -1062,7 +1062,7 @@ pub struct TraitSystemStatistics {
 mod tests {
     use super::*;
     use crate::syntax::ast::{Name, TypeName};
-    use crate::lexical::token::Position;
+    use crate::lexical::Position;
     use crate::semantic::types::PrimitiveType;
 
     #[allow(dead_code)]

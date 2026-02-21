@@ -1,5 +1,5 @@
 use super::{Assoc, BlockEnd, ParseError, Parser};
-use crate::lexical::token::{Keyword, Symbol, Token, TokenKind};
+use crate::lexical::{Keyword, Symbol, Token, TokenKind};
 
 impl Parser {
     pub(crate) fn advance(&mut self) -> Token {

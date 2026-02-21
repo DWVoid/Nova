@@ -16,7 +16,7 @@ pub mod diagnostics;
 pub mod api;
 
 use crate::syntax::ast::Chunk;
-use crate::lexical::token::Position;
+use crate::lexical::Position;
 use std::collections::HashMap;
 
 /// Primary semantic analysis result containing all resolved semantic information
@@ -478,14 +478,14 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
                         visibility: None,
                         name: crate::syntax::ast::Name {
                             value: symbol_name.clone(),
-                            span: crate::lexical::token::Span::single(crate::lexical::token::Position::new_start()),
+                            span: crate::lexical::Span::single(crate::lexical::Position::new_start()),
                         },
                         type_spec: None,
                         expr: crate::syntax::ast::DefExpr::Exp(crate::syntax::ast::Exp {
                             kind: crate::syntax::ast::ExpKind::Nil,
-                            span: crate::lexical::token::Span::single(crate::lexical::token::Position::new_start()),
+                            span: crate::lexical::Span::single(crate::lexical::Position::new_start()),
                         }),
-                        span: crate::lexical::token::Span::single(crate::lexical::token::Position::new_start()),
+                        span: crate::lexical::Span::single(crate::lexical::Position::new_start()),
                     }
                 }));
             }

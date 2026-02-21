@@ -1,6 +1,6 @@
 use super::{BlockEnd, ParseError, Parser};
 use crate::syntax::ast::{Block, IfClause, Name, PrefixExpKind, RetStat, Stat, StatKind};
-use crate::lexical::token::{Keyword, Span, Symbol, TokenKind};
+use crate::lexical::{Keyword, Span, Symbol, TokenKind};
 
 impl Parser {
     pub(super) fn parse_block(&mut self, end: BlockEnd) -> Result<Block, ParseError> {

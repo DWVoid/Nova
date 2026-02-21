@@ -5,7 +5,7 @@
 //! information for improved developer experience during compilation.
 
 use crate::syntax::ast::{Chunk, TopItem, Definition, Exp};
-use crate::lexical::token::{Span, Position};
+use crate::lexical::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::BundleName;
 use super::namespace::NamespacePath;

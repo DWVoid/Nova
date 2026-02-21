@@ -4,7 +4,7 @@ use crate::syntax::ast::{
     StructDef, TraitDef, TraitSig, TypeName, TypeSpec, UseDecl, UseItem, UseTail, VariantDef,
     VariantMember, Visibility,
 };
-use crate::lexical::token::{Keyword, Span, Symbol};
+use crate::lexical::{Keyword, Span, Symbol};
 
 impl Parser {
     pub(super) fn parse_use_decl(&mut self) -> Result<UseDecl, ParseError> {

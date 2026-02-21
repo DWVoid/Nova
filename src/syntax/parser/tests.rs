@@ -1,6 +1,6 @@
 use super::Parser;
 use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, StatKind, TopItem, VarKind};
-use crate::lexical::lexer::lex;
+use crate::lexical::lex;
 
 fn parse_chunk(input: &str) -> Chunk {
     let lex_result = lex(input).unwrap();

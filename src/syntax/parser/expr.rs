@@ -1,6 +1,6 @@
 use super::{Assoc, BlockEnd, ParseError, Parser};
 use crate::syntax::ast::{Args, ArgsKind, Exp, ExpKind, Field, FieldKey, Initializer, LambdaExpr};
-use crate::lexical::token::{Keyword, Symbol, TokenKind, Span};
+use crate::lexical::{Keyword, Span, Symbol, TokenKind};
 
 impl Parser {
     pub(super) fn parse_exp_list(&mut self, min_prec: u8) -> Result<Vec<Exp>, ParseError> {

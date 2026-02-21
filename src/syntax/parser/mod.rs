@@ -7,7 +7,7 @@ mod decl;
 mod tests;
 
 use crate::syntax::ast::{Chunk, Comments, NamespaceDecl, TopItem, UseDecl};
-use crate::lexical::token::{Comment, Keyword, Position, Symbol, Token, TokenKind};
+use crate::lexical::{Comment, Keyword, Position, Symbol, Token, TokenKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseError {

@@ -6,7 +6,7 @@
 //! and symbol resolution to provide comprehensive access control.
 
 use crate::syntax::ast::{TopItem, Definition, DefExpr};
-use crate::lexical::token::Span;
+use crate::lexical::Span;
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::BundleName;
 use super::namespace::{NamespaceTree, NamespacePath};
@@ -816,7 +816,7 @@ pub struct VisibilityStatistics {
 mod tests {
     use super::*;
     use crate::syntax::ast::Name;
-    use crate::lexical::token::Position;
+    use crate::lexical::Position;
 
     fn create_test_qualified_name(bundle: &str, namespace: Vec<&str>, name: &str) -> QualifiedName {
         QualifiedName {

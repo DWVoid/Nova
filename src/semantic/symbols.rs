@@ -5,7 +5,7 @@
 //! resolution for the Nova semantic analysis system.
 
 use crate::syntax::ast::{TopItem, Definition, DefExpr, ExpKind};
-use crate::lexical::token::{Position, Span};
+use crate::lexical::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName, ExportedSymbol, ImportedSymbol, ResolutionStatus, UnresolvedReason, SymbolConflict, Definition as SemanticDefinition, Visibility};
 use super::bundle::BundleName;
 use super::namespace::{NamespaceTree, NamespacePath, DefinitionReference, DefinitionKind};

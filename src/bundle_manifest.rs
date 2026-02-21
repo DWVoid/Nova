@@ -5,7 +5,7 @@
 
 use crate::semantic::bundle::{BundleName, Version, VersionConstraint, DependencyVisibility, BundleMetadata};
 use crate::semantic::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory};
-use crate::lexical::token::Position;
+use crate::lexical::Position;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;

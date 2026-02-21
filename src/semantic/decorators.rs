@@ -6,7 +6,7 @@
 //! compile-time code transformation and validation.
 
 use crate::syntax::ast::{Decorator, Exp, Definition, TopItem};
-use crate::lexical::token::{Span, Position};
+use crate::lexical::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::BundleName;
 use super::namespace::NamespacePath;

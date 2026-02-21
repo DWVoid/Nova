@@ -6,7 +6,7 @@
 //! analysis phases to produce fully linked bundles ready for code generation.
 
 use crate::syntax::ast::Chunk;
-use crate::lexical::token::{Span, Position};
+use crate::lexical::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::{Bundle, BundleName, Version, BundleDependency};
 use std::collections::{HashMap, HashSet};

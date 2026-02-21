@@ -4,7 +4,7 @@ mod semantic;
 mod bundle_manifest;
 mod formats;
 
-use crate::lexical::lexer::lex;
+use crate::lexical::lex;
 use crate::syntax::parser::Parser;
 use std::io::{self, Read};
 

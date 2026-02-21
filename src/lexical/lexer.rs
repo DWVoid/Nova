@@ -552,86 +552,998 @@ fn keyword_from_str(text: &str) -> Option<Keyword> {
 mod tests {
     use super::*;
 
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    /// Lex, assert success, return the token kinds (without the trailing Eof).
+    fn tokens(input: &str) -> Vec<TokenKind> {
+        let r = lex(input).unwrap_or_else(|e| panic!("lex failed: {}", e.message));
+        r.tokens
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Eof))
+            .map(|t| t.kind)
+            .collect()
+    }
+
+    /// Lex, assert success, return all token kinds including Eof.
+    fn tokens_with_eof(input: &str) -> Vec<TokenKind> {
+        lex(input)
+            .unwrap_or_else(|e| panic!("lex failed: {}", e.message))
+            .tokens
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
+    }
+
+    /// Lex, assert failure, return the error.
+    fn must_fail(input: &str) -> LexError {
+        lex(input).expect_err("expected lex to fail but it succeeded")
+    }
+
+    // ── position tracking ─────────────────────────────────────────────────────
+
     #[test]
-    fn advance_position_tracks_graphemes_and_lines() {
-        let lexer = Lexer::new("");
+    fn position_starts_at_line_1_column_0() {
         let pos = Position::new_start();
-
-        let pos = lexer.advance_position(pos, "a\u{0301}"); // combining accent = 1 grapheme
-        assert_eq!(pos.grapheme(), 1);
+        assert_eq!(pos.byte(), 0);
+        assert_eq!(pos.grapheme(), 0);
         assert_eq!(pos.line(), 1);
-        assert_eq!(pos.column(), 1);
-
-        let pos = lexer.advance_position(pos, "\n");
-        assert_eq!(pos.line(), 2);
         assert_eq!(pos.column(), 0);
+    }
 
-        let pos = lexer.advance_position(pos, "\u{03B2}");
+    #[test]
+    fn position_advances_ascii_chars() {
+        let lexer = Lexer::new("");
+        let pos = lexer.advance_position(Position::new_start(), "abc");
+        assert_eq!(pos.byte(), 3);
         assert_eq!(pos.grapheme(), 3);
+        assert_eq!(pos.line(), 1);
+        assert_eq!(pos.column(), 3);
+    }
+
+    #[test]
+    fn position_advances_lf_newline() {
+        let lexer = Lexer::new("");
+        let pos = lexer.advance_position(Position::new_start(), "a\nb");
+        assert_eq!(pos.line(), 2);
+        assert_eq!(pos.column(), 1);
+        assert_eq!(pos.grapheme(), 3);
+    }
+
+    #[test]
+    fn position_advances_cr_newline() {
+        let lexer = Lexer::new("");
+        let pos = lexer.advance_position(Position::new_start(), "a\rb");
         assert_eq!(pos.line(), 2);
         assert_eq!(pos.column(), 1);
     }
 
     #[test]
-    fn unicode_identifiers_are_lexed() {
-        // Token layout: namespace(0) name(1) ;(2) define(3) name(4) ((5) )(6) :(7) unit(8) end(9) eof(10)
-
-        // Greek identifier
-        let r = lex("namespace α; define δ(): unit end").unwrap();
-        assert!(matches!(&r.tokens[1].kind, TokenKind::Identifier(s) if s == "α"));
-        assert!(matches!(&r.tokens[4].kind, TokenKind::Identifier(s) if s == "δ"));
-
-        // CJK identifier
-        let r = lex("namespace 中文; define 函数(): unit end").unwrap();
-        assert!(matches!(&r.tokens[1].kind, TokenKind::Identifier(s) if s == "中文"));
-        assert!(matches!(&r.tokens[4].kind, TokenKind::Identifier(s) if s == "函数"));
-
-        // Emoji — visible non-whitespace, not a reserved symbol
-        let r = lex("namespace 🚀; define 🎯(): unit end").unwrap();
-        assert!(matches!(&r.tokens[1].kind, TokenKind::Identifier(s) if s == "🚀"));
-        assert!(matches!(&r.tokens[4].kind, TokenKind::Identifier(s) if s == "🎯"));
+    fn position_advances_crlf_newline_as_one_grapheme() {
+        let lexer = Lexer::new("");
+        let pos = lexer.advance_position(Position::new_start(), "a\r\nb");
+        assert_eq!(pos.line(), 2);
+        assert_eq!(pos.column(), 1);
+        // \r\n counts as one grapheme cluster
+        assert_eq!(pos.grapheme(), 3);
     }
 
     #[test]
-    fn reserved_symbols_are_not_part_of_identifiers() {
-        // Token layout: namespace(0) α(1) ;(2) define(3) a(4) +(5) b(6) ...
-        let r = lex("namespace α; define a+b(): unit end").unwrap();
-        assert!(matches!(&r.tokens[4].kind, TokenKind::Identifier(s) if s == "a"));
-        assert!(matches!(&r.tokens[5].kind, TokenKind::Symbol(Symbol::Plus)));
-        assert!(matches!(&r.tokens[6].kind, TokenKind::Identifier(s) if s == "b"));
+    fn position_advances_unicode_combining_sequence_as_one_grapheme() {
+        let lexer = Lexer::new("");
+        // 'a' + combining acute = one grapheme cluster
+        let pos = lexer.advance_position(Position::new_start(), "a\u{0301}");
+        assert_eq!(pos.grapheme(), 1);
+        assert_eq!(pos.column(), 1);
+        assert_eq!(pos.byte(), "a\u{0301}".len()); // 3 bytes
     }
 
     #[test]
-    fn lexes_simple_tokens_with_comment() {
-        let input = "-- hi\nuse System;";
-        let result = lex(input).unwrap();
-        assert_eq!(result.comments.len(), 1);
-        let first = &result.tokens[0];
-        assert!(matches!(first.kind, TokenKind::Keyword(Keyword::Use)));
-        assert!(matches!(result.tokens[1].kind, TokenKind::Identifier(_)));
-        assert!(matches!(
-            result.tokens[2].kind,
-            TokenKind::Symbol(Symbol::Semi)
-        ));
+    fn position_advances_multibyte_cjk_char() {
+        let lexer = Lexer::new("");
+        let pos = lexer.advance_position(Position::new_start(), "文");
+        assert_eq!(pos.grapheme(), 1);
+        assert_eq!(pos.column(), 1);
+        assert_eq!(pos.byte(), "文".len()); // 3 bytes
     }
 
     #[test]
-    fn lexes_long_string() {
-        let input = "[[a\nb]]";
-        let result = lex(input).unwrap();
-        let first = &result.tokens[0];
-        match &first.kind {
-            TokenKind::StringLiteral(text) => assert_eq!(text, "a\nb"),
-            _ => panic!("expected long string"),
-        }
+    fn position_byte_offset_is_utf8_byte_count() {
+        let lexer = Lexer::new("");
+        // emoji is 4 bytes
+        let pos = lexer.advance_position(Position::new_start(), "🚀");
+        assert_eq!(pos.byte(), 4);
+        assert_eq!(pos.grapheme(), 1);
+    }
+
+    // ── token spans ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn token_span_covers_correct_byte_range() {
+        let r = lex("hi").unwrap();
+        let tok = &r.tokens[0];
+        assert_eq!(tok.span.start.byte(), 0);
+        assert_eq!(tok.span.end.byte(), 2);
     }
 
     #[test]
-    fn lexes_numbers() {
-        let input = "12 0x1.2p3 3.14";
-        let result = lex(input).unwrap();
-        assert!(matches!(result.tokens[0].kind, TokenKind::Number(_)));
-        assert!(matches!(result.tokens[1].kind, TokenKind::Number(_)));
-        assert!(matches!(result.tokens[2].kind, TokenKind::Number(_)));
+    fn token_span_reflects_column_position() {
+        // "  x" — x starts at column 2
+        let r = lex("  x").unwrap();
+        assert_eq!(r.tokens[0].span.start.column(), 2);
+    }
+
+    #[test]
+    fn token_span_on_second_line_has_correct_line() {
+        let r = lex("a\nb").unwrap();
+        assert_eq!(r.tokens[1].span.start.line(), 2);
+        assert_eq!(r.tokens[1].span.start.column(), 0);
+    }
+
+    #[test]
+    fn eof_token_is_always_last() {
+        let kinds = tokens_with_eof("x");
+        assert!(matches!(kinds.last(), Some(TokenKind::Eof)));
+    }
+
+    #[test]
+    fn empty_input_produces_only_eof() {
+        let kinds = tokens_with_eof("");
+        assert_eq!(kinds.len(), 1);
+        assert!(matches!(kinds[0], TokenKind::Eof));
+    }
+
+    // ── whitespace and trivia ─────────────────────────────────────────────────
+
+    #[test]
+    fn whitespace_between_tokens_is_skipped() {
+        let kinds = tokens("a   b");
+        assert_eq!(kinds.len(), 2);
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "a"));
+        assert!(matches!(&kinds[1], TokenKind::Identifier(s) if s == "b"));
+    }
+
+    #[test]
+    fn tabs_are_treated_as_whitespace() {
+        let kinds = tokens("a\tb");
+        assert_eq!(kinds.len(), 2);
+    }
+
+    #[test]
+    fn newlines_are_treated_as_whitespace() {
+        let kinds = tokens("a\nb\rc\r\nd");
+        assert_eq!(kinds.len(), 4);
+    }
+
+    #[test]
+    fn vertical_tab_and_form_feed_are_whitespace() {
+        let kinds = tokens("a\u{000B}b\u{000C}c");
+        assert_eq!(kinds.len(), 3);
+    }
+
+    // ── identifiers ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn identifier_ascii_is_lexed() {
+        let kinds = tokens("hello");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "hello"));
+    }
+
+    #[test]
+    fn identifier_with_underscore_is_lexed() {
+        let kinds = tokens("_foo_bar_");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "_foo_bar_"));
+    }
+
+    #[test]
+    fn identifier_with_digits_after_start_is_lexed() {
+        let kinds = tokens("a1b2c3");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "a1b2c3"));
+    }
+
+    #[test]
+    fn identifier_cannot_start_with_digit() {
+        // '1' starts a number, not an identifier; 'a' is a separate identifier
+        let kinds = tokens("1a");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "1"));
+        assert!(matches!(&kinds[1], TokenKind::Identifier(s) if s == "a"));
+    }
+
+    #[test]
+    fn identifier_greek_is_lexed() {
+        let kinds = tokens("αβγ");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "αβγ"));
+    }
+
+    #[test]
+    fn identifier_cjk_is_lexed() {
+        let kinds = tokens("中文");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "中文"));
+    }
+
+    #[test]
+    fn identifier_emoji_is_lexed() {
+        let kinds = tokens("🎯");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "🎯"));
+    }
+
+    #[test]
+    fn identifier_is_split_at_reserved_symbol() {
+        // '+' is reserved so "a+b" becomes three tokens
+        let kinds = tokens("a+b");
+        assert_eq!(kinds.len(), 3);
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "a"));
+        assert!(matches!(&kinds[1], TokenKind::Symbol(Symbol::Plus)));
+        assert!(matches!(&kinds[2], TokenKind::Identifier(s) if s == "b"));
+    }
+
+    #[test]
+    fn identifier_is_split_at_dot() {
+        let kinds = tokens("a.b");
+        assert_eq!(kinds.len(), 3);
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "a"));
+        assert!(matches!(&kinds[1], TokenKind::Symbol(Symbol::Dot)));
+        assert!(matches!(&kinds[2], TokenKind::Identifier(s) if s == "b"));
+    }
+
+    // ── keywords ──────────────────────────────────────────────────────────────
+
+    // Each keyword must be recognised as its own variant, not as an Identifier.
+    macro_rules! keyword_test {
+        ($name:ident, $text:literal, $variant:ident) => {
+            #[test]
+            fn $name() {
+                let kinds = tokens($text);
+                assert_eq!(kinds.len(), 1);
+                assert!(matches!(kinds[0], TokenKind::Keyword(Keyword::$variant)));
+            }
+        };
+    }
+
+    keyword_test!(keyword_and_is_lexed, "and", And);
+    keyword_test!(keyword_as_is_lexed, "as", As);
+    keyword_test!(keyword_break_is_lexed, "break", Break);
+    keyword_test!(keyword_const_is_lexed, "const", Const);
+    keyword_test!(keyword_continue_is_lexed, "continue", Continue);
+    keyword_test!(keyword_define_is_lexed, "define", Define);
+    keyword_test!(keyword_do_is_lexed, "do", Do);
+    keyword_test!(keyword_else_is_lexed, "else", Else);
+    keyword_test!(keyword_elseif_is_lexed, "elseif", ElseIf);
+    keyword_test!(keyword_end_is_lexed, "end", End);
+    keyword_test!(keyword_enum_is_lexed, "enum", Enum);
+    keyword_test!(keyword_export_is_lexed, "export", Export);
+    keyword_test!(keyword_false_is_lexed, "false", False);
+    keyword_test!(keyword_for_is_lexed, "for", For);
+    keyword_test!(keyword_goto_is_lexed, "goto", Goto);
+    keyword_test!(keyword_if_is_lexed, "if", If);
+    keyword_test!(keyword_implement_is_lexed, "implement", Implement);
+    keyword_test!(keyword_in_is_lexed, "in", In);
+    keyword_test!(keyword_namespace_is_lexed, "namespace", Namespace);
+    keyword_test!(keyword_nil_is_lexed, "nil", Nil);
+    keyword_test!(keyword_not_is_lexed, "not", Not);
+    keyword_test!(keyword_or_is_lexed, "or", Or);
+    keyword_test!(keyword_repeat_is_lexed, "repeat", Repeat);
+    keyword_test!(keyword_return_is_lexed, "return", Return);
+    keyword_test!(keyword_struct_is_lexed, "struct", Struct);
+    keyword_test!(keyword_then_is_lexed, "then", Then);
+    keyword_test!(keyword_trait_is_lexed, "trait", Trait);
+    keyword_test!(keyword_true_is_lexed, "true", True);
+    keyword_test!(keyword_until_is_lexed, "until", Until);
+    keyword_test!(keyword_use_is_lexed, "use", Use);
+    keyword_test!(keyword_val_is_lexed, "val", Val);
+    keyword_test!(keyword_var_is_lexed, "var", Var);
+    keyword_test!(keyword_variant_is_lexed, "variant", Variant);
+    keyword_test!(keyword_while_is_lexed, "while", While);
+
+    #[test]
+    fn keyword_prefix_is_not_a_keyword() {
+        // "android" starts with "and" but is an identifier
+        let kinds = tokens("android");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "android"));
+    }
+
+    #[test]
+    fn keyword_with_trailing_chars_is_not_a_keyword() {
+        let kinds = tokens("returns");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "returns"));
+    }
+
+    // ── symbols ───────────────────────────────────────────────────────────────
+
+    macro_rules! symbol_test {
+        ($name:ident, $text:literal, $variant:ident) => {
+            #[test]
+            fn $name() {
+                let kinds = tokens($text);
+                assert_eq!(kinds.len(), 1, "expected exactly one token for {:?}", $text);
+                assert!(
+                    matches!(kinds[0], TokenKind::Symbol(Symbol::$variant)),
+                    "expected Symbol::{} for {:?}, got {:?}",
+                    stringify!($variant),
+                    $text,
+                    kinds[0]
+                );
+            }
+        };
+    }
+
+    symbol_test!(symbol_plus_is_lexed, "+", Plus);
+    symbol_test!(symbol_minus_is_lexed, "-", Minus);
+    symbol_test!(symbol_star_is_lexed, "*", Star);
+    symbol_test!(symbol_slash_is_lexed, "/", Slash);
+    symbol_test!(symbol_percent_is_lexed, "%", Percent);
+    symbol_test!(symbol_caret_is_lexed, "^", Caret);
+    symbol_test!(symbol_hash_is_lexed, "#", Hash);
+    symbol_test!(symbol_amp_is_lexed, "&", Amp);
+    symbol_test!(symbol_tilde_is_lexed, "~", Tilde);
+    symbol_test!(symbol_pipe_is_lexed, "|", Pipe);
+    symbol_test!(symbol_less_is_lexed, "<", Less);
+    symbol_test!(symbol_greater_is_lexed, ">", Greater);
+    symbol_test!(symbol_assign_is_lexed, "=", Assign);
+    symbol_test!(symbol_lparen_is_lexed, "(", LParen);
+    symbol_test!(symbol_rparen_is_lexed, ")", RParen);
+    symbol_test!(symbol_lbrace_is_lexed, "{", LBrace);
+    symbol_test!(symbol_rbrace_is_lexed, "}", RBrace);
+    symbol_test!(symbol_lbracket_is_lexed, "[", LBracket);
+    symbol_test!(symbol_rbracket_is_lexed, "]", RBracket);
+    symbol_test!(symbol_semi_is_lexed, ";", Semi);
+    symbol_test!(symbol_colon_is_lexed, ":", Colon);
+    symbol_test!(symbol_comma_is_lexed, ",", Comma);
+    symbol_test!(symbol_dot_is_lexed, ".", Dot);
+    symbol_test!(symbol_at_is_lexed, "@", At);
+    symbol_test!(symbol_dotdot_is_lexed, "..", DotDot);
+    symbol_test!(symbol_eqeq_is_lexed, "==", EqEq);
+    symbol_test!(symbol_noteq_is_lexed, "~=", NotEq);
+    symbol_test!(symbol_lesseq_is_lexed, "<=", LessEq);
+    symbol_test!(symbol_greatereq_is_lexed, ">=", GreaterEq);
+    symbol_test!(symbol_shiftleft_is_lexed, "<<", ShiftLeft);
+    symbol_test!(symbol_shiftright_is_lexed, ">>", ShiftRight);
+    symbol_test!(symbol_floordiv_is_lexed, "//", FloorDiv);
+
+    #[test]
+    fn symbol_dotdot_is_preferred_over_two_dots() {
+        // ".." must produce DotDot, not two Dot tokens
+        let kinds = tokens("..");
+        assert_eq!(kinds.len(), 1);
+        assert!(matches!(kinds[0], TokenKind::Symbol(Symbol::DotDot)));
+    }
+
+    #[test]
+    fn symbol_eqeq_is_preferred_over_two_assigns() {
+        let kinds = tokens("==");
+        assert_eq!(kinds.len(), 1);
+        assert!(matches!(kinds[0], TokenKind::Symbol(Symbol::EqEq)));
+    }
+
+    #[test]
+    fn symbol_floordiv_is_preferred_over_two_slashes() {
+        let kinds = tokens("//");
+        assert_eq!(kinds.len(), 1);
+        assert!(matches!(kinds[0], TokenKind::Symbol(Symbol::FloorDiv)));
+    }
+
+    #[test]
+    fn symbol_single_dot_before_letter_is_dot() {
+        // ".x" — dot then identifier, not DotDot
+        let kinds = tokens(".x");
+        assert!(matches!(kinds[0], TokenKind::Symbol(Symbol::Dot)));
+        assert!(matches!(&kinds[1], TokenKind::Identifier(s) if s == "x"));
+    }
+
+    // ── integer literals ──────────────────────────────────────────────────────
+
+    #[test]
+    fn integer_decimal_is_lexed() {
+        let kinds = tokens("42");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "42"));
+    }
+
+    #[test]
+    fn integer_zero_is_lexed() {
+        let kinds = tokens("0");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "0"));
+    }
+
+    #[test]
+    fn integer_hex_lowercase_is_lexed() {
+        let kinds = tokens("0xff");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "0xff"));
+    }
+
+    #[test]
+    fn integer_hex_uppercase_prefix_is_lexed() {
+        let kinds = tokens("0XFF");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "0XFF"));
+    }
+
+    #[test]
+    fn integer_hex_mixed_digits_is_lexed() {
+        let kinds = tokens("0xDeAdBeEf");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "0xDeAdBeEf"));
+    }
+
+    // ── float literals ────────────────────────────────────────────────────────
+
+    #[test]
+    fn float_simple_is_lexed() {
+        let kinds = tokens("3.14");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "3.14"));
+    }
+
+    #[test]
+    fn float_leading_dot_is_lexed() {
+        let kinds = tokens(".5");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == ".5"));
+    }
+
+    #[test]
+    fn float_with_exponent_is_lexed() {
+        let kinds = tokens("1e10");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "1e10"));
+    }
+
+    #[test]
+    fn float_with_signed_exponent_is_lexed() {
+        let kinds = tokens("1.5e-3");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "1.5e-3"));
+    }
+
+    #[test]
+    fn float_with_uppercase_exponent_is_lexed() {
+        let kinds = tokens("2E4");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "2E4"));
+    }
+
+    #[test]
+    fn float_hex_with_exponent_is_lexed() {
+        let kinds = tokens("0x1.8p+1");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "0x1.8p+1"));
+    }
+
+    #[test]
+    fn float_hex_without_fraction_and_exponent_is_lexed() {
+        let kinds = tokens("0x1p10");
+        assert!(matches!(&kinds[0], TokenKind::Number(s) if s == "0x1p10"));
+    }
+
+    // ── short string literals ─────────────────────────────────────────────────
+
+    #[test]
+    fn string_double_quoted_is_lexed() {
+        let kinds = tokens("\"hello\"");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "hello"));
+    }
+
+    #[test]
+    fn string_single_quoted_is_lexed() {
+        let kinds = tokens("'world'");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "world"));
+    }
+
+    #[test]
+    fn string_empty_is_lexed() {
+        let kinds = tokens("\"\"");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn string_with_escape_sequence_is_lexed() {
+        let kinds = tokens(r#""a\nb""#);
+        // The raw escape is preserved verbatim by the lexer
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == r"a\nb"));
+    }
+
+    #[test]
+    fn string_with_backslash_quote_escape_is_lexed() {
+        let kinds = tokens(r#""a\"b""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == r#"a\"b"#));
+    }
+
+    #[test]
+    fn string_unicode_content_is_lexed() {
+        let kinds = tokens("\"αβγ\"");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "αβγ"));
+    }
+
+    #[test]
+    fn string_newline_in_body_is_rejected() {
+        must_fail("\"line1\nline2\"");
+    }
+
+    #[test]
+    fn string_unterminated_is_rejected() {
+        must_fail("\"hello");
+    }
+
+    #[test]
+    fn string_unterminated_single_quote_is_rejected() {
+        must_fail("'hello");
+    }
+
+    // ── long strings ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn long_string_level_0_is_lexed() {
+        let kinds = tokens("[[hello]]");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "hello"));
+    }
+
+    #[test]
+    fn long_string_level_1_is_lexed() {
+        let kinds = tokens("[=[hello]=]");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "hello"));
+    }
+
+    #[test]
+    fn long_string_level_2_is_lexed() {
+        let kinds = tokens("[==[hello]==]");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "hello"));
+    }
+
+    #[test]
+    fn long_string_preserves_internal_newlines() {
+        let kinds = tokens("[[a\nb\nc]]");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "a\nb\nc"));
+    }
+
+    #[test]
+    fn long_string_skips_first_newline() {
+        // A newline immediately after the opening bracket is discarded
+        let kinds = tokens("[[\nhello]]");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "hello"));
+    }
+
+    #[test]
+    fn long_string_does_not_close_on_mismatched_level() {
+        // [[ ... ]=] does not close a level-0 string
+        let kinds = tokens("[[a]=]b]]");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "a]=]b"));
+    }
+
+    #[test]
+    fn long_string_unterminated_is_rejected() {
+        must_fail("[[hello");
+    }
+
+    #[test]
+    fn long_string_can_contain_double_quotes() {
+        let kinds = tokens(r#"[["hello"]]"#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\"hello\""));
+    }
+
+    // ── line comments ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn line_comment_is_collected() {
+        let r = lex("-- hello").unwrap();
+        assert_eq!(r.comments.len(), 1);
+        assert!(matches!(r.comments[0].kind, CommentKind::Line));
+        assert!(r.comments[0].text.contains("hello"));
+    }
+
+    #[test]
+    fn line_comment_does_not_produce_a_token() {
+        let kinds = tokens("-- comment\nx");
+        assert_eq!(kinds.len(), 1);
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "x"));
+    }
+
+    #[test]
+    fn line_comment_ends_at_lf() {
+        let r = lex("-- a\n-- b").unwrap();
+        assert_eq!(r.comments.len(), 2);
+    }
+
+    #[test]
+    fn line_comment_ends_at_cr() {
+        let r = lex("-- a\r-- b").unwrap();
+        assert_eq!(r.comments.len(), 2);
+    }
+
+    #[test]
+    fn line_comment_ends_at_crlf() {
+        let r = lex("-- a\r\n-- b").unwrap();
+        assert_eq!(r.comments.len(), 2);
+    }
+
+    #[test]
+    fn line_comment_text_includes_dashes() {
+        let r = lex("-- note").unwrap();
+        assert!(r.comments[0].text.starts_with("--"));
+    }
+
+    #[test]
+    fn multiple_line_comments_preserve_order() {
+        let r = lex("-- first\n-- second\n-- third").unwrap();
+        assert_eq!(r.comments.len(), 3);
+        assert!(r.comments[0].text.contains("first"));
+        assert!(r.comments[1].text.contains("second"));
+        assert!(r.comments[2].text.contains("third"));
+    }
+
+    // ── block comments ────────────────────────────────────────────────────────
+
+    #[test]
+    fn block_comment_level_0_is_collected() {
+        let r = lex("--[[block]]").unwrap();
+        assert_eq!(r.comments.len(), 1);
+        assert!(matches!(r.comments[0].kind, CommentKind::Block));
+    }
+
+    #[test]
+    fn block_comment_level_1_is_collected() {
+        let r = lex("--[=[block]=]").unwrap();
+        assert_eq!(r.comments.len(), 1);
+        assert!(matches!(r.comments[0].kind, CommentKind::Block));
+    }
+
+    #[test]
+    fn block_comment_does_not_produce_a_token() {
+        let kinds = tokens("--[[ignored]] x");
+        assert_eq!(kinds.len(), 1);
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "x"));
+    }
+
+    #[test]
+    fn block_comment_can_span_multiple_lines() {
+        let r = lex("--[[\nline1\nline2\n]]").unwrap();
+        assert_eq!(r.comments.len(), 1);
+        assert!(r.comments[0].text.contains("line1"));
+    }
+
+    #[test]
+    fn block_comment_does_not_close_on_mismatched_level() {
+        // --[[ ... ]=] should not close a level-0 block comment
+        let r = lex("--[[a]=]b]]").unwrap();
+        assert_eq!(r.comments.len(), 1);
+        assert!(r.comments[0].text.contains("a]=]b"));
+    }
+
+    #[test]
+    fn block_comment_text_includes_opening_dashes_and_brackets() {
+        let r = lex("--[[text]]").unwrap();
+        assert!(r.comments[0].text.starts_with("--[["));
+    }
+
+    #[test]
+    fn block_comment_unterminated_is_rejected() {
+        must_fail("--[[not closed");
+    }
+
+    #[test]
+    fn mixed_line_and_block_comments_preserve_order() {
+        let r = lex("-- line\n--[[block]]\n-- line2").unwrap();
+        assert_eq!(r.comments.len(), 3);
+        assert!(matches!(r.comments[0].kind, CommentKind::Line));
+        assert!(matches!(r.comments[1].kind, CommentKind::Block));
+        assert!(matches!(r.comments[2].kind, CommentKind::Line));
+    }
+
+    // ── comment vs token interaction ──────────────────────────────────────────
+
+    #[test]
+    fn comment_between_tokens_does_not_affect_token_stream() {
+        let kinds = tokens("a -- comment\nb");
+        assert_eq!(kinds.len(), 2);
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "a"));
+        assert!(matches!(&kinds[1], TokenKind::Identifier(s) if s == "b"));
+    }
+
+    #[test]
+    fn tokens_after_block_comment_are_lexed() {
+        let kinds = tokens("--[[skip]] hello");
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "hello"));
+    }
+
+    // ── rejection: control characters ────────────────────────────────────────
+    //
+    // Characters that are rejected reach scan_symbol (they are not whitespace,
+    // not ident-start, not a digit, not a quote, not '[') and are not in the
+    // 32-entry reserved-symbol table, so scan_symbol returns an error.
+    //
+    // Rejected classes:
+    //   - ASCII C0 controls that are not whitespace (\x00-\x08, \x0E-\x1F, \x7F)
+    //   - C1 Unicode controls (\u{0080}-\u{009F})
+    //   - Unicode format/zero-width chars that Rust considers is_control()
+    //     e.g. \u{00AD} soft-hyphen, \u{200B} zero-width space (is_whitespace)
+    //
+    // Note: visible non-ASCII chars that are NOT control and NOT reserved are
+    // accepted as identifier characters.  The tests below also verify that
+    // valid tokens surrounding a bad char are still parsed correctly up to the
+    // bad char (i.e. the error position is meaningful).
+
+    /// Assert that `input` fails and that the error byte-offset equals `byte`.
+    fn must_fail_at(input: &str, byte: usize) {
+        let e = lex(input).expect_err("expected lex to fail");
+        assert_eq!(
+            e.position.byte(),
+            byte,
+            "wrong error position for input {:?}: expected byte {}, got {}",
+            input,
+            byte,
+            e.position.byte()
+        );
+    }
+
+    // -- ASCII C0 control characters (non-whitespace) -------------------------
+
+    #[test]
+    fn reject_null_byte() {
+        must_fail("\x00");
+    }
+
+    #[test]
+    fn reject_soh_control() {
+        must_fail("\x01");
+    }
+
+    #[test]
+    fn reject_bel_control() {
+        must_fail("\x07");
+    }
+
+    #[test]
+    fn reject_bs_control() {
+        must_fail("\x08");
+    }
+
+    #[test]
+    fn reject_so_control() {
+        must_fail("\x0E");
+    }
+
+    #[test]
+    fn reject_us_control() {
+        must_fail("\x1F");
+    }
+
+    #[test]
+    fn reject_del_control() {
+        must_fail("\x7F");
+    }
+
+    // -- ASCII C0 controls mixed with valid tokens ----------------------------
+
+    #[test]
+    fn reject_null_byte_after_valid_identifier() {
+        // "abc" lexes fine; \x00 at byte 3 is where the error should fire
+        must_fail_at("abc\x00def", 3);
+    }
+
+    #[test]
+    fn reject_control_between_two_identifiers() {
+        // valid "x", then \x01, then valid "y" — error at byte 1
+        must_fail_at("x\x01y", 1);
+    }
+
+    #[test]
+    fn reject_del_at_start() {
+        must_fail_at("\x7Fabc", 0);
+    }
+
+    #[test]
+    fn reject_control_after_number() {
+        // "42" is a valid number token; \x0E follows at byte 2
+        must_fail_at("42\x0E", 2);
+    }
+
+    #[test]
+    fn reject_control_after_string_literal() {
+        // `"hi"` is 4 bytes; \x08 at byte 4
+        must_fail_at("\"hi\"\x08", 4);
+    }
+
+    #[test]
+    fn reject_control_after_symbol() {
+        // '+' is 1 byte; \x00 at byte 1
+        must_fail_at("+\x00", 1);
+    }
+
+    // -- spans: valid tokens before the bad char are correctly produced --------
+
+    #[test]
+    fn valid_tokens_before_control_are_correct() {
+        // We can't use the `tokens` helper (it panics on failure), so we call
+        // lex directly and inspect the partial result.  The lexer is not
+        // streaming — it fails on the first bad character — so we verify the
+        // error is at the right place and that lexing the prefix succeeds.
+        let prefix = "hello ";
+        let full = format!("{}\x00tail", prefix);
+        let err = lex(&full).unwrap_err();
+        // error position is right after the 6-byte prefix
+        assert_eq!(err.position.byte(), prefix.len());
+        // the prefix alone lexes cleanly
+        let r = lex(prefix.trim()).unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "hello"));
+    }
+
+    // -- C1 Unicode control block (\u{0080}–\u{009F}) -------------------------
+
+    #[test]
+    fn reject_c1_control_pad() {
+        // U+0080 PAD — first C1 control
+        must_fail("\u{0080}");
+    }
+
+    #[test]
+    fn reject_c1_control_nel() {
+        // U+0085 NEL — is_control()=true in Rust.
+        // advance_trivia does not recognise it as a newline, so it reaches
+        // scan_token → scan_symbol → not in symbol table → error.
+        must_fail("\u{0085}");
+    }
+
+    #[test]
+    fn reject_c1_control_nel_after_valid_token() {
+        // "ok" then U+0085 at byte 2
+        must_fail_at("ok\u{0085}", 2);
+    }
+
+    #[test]
+    fn reject_c1_control_sos() {
+        // U+0098 SOS — is_control()=true, not whitespace → scan_symbol error
+        must_fail("\u{0098}");
+    }
+
+    #[test]
+    fn reject_c1_control_apc() {
+        // U+009F APC — is_control()=true → error
+        must_fail("\u{009F}");
+    }
+
+    #[test]
+    fn reject_c1_control_mixed_with_valid_ascii() {
+        // "ok" then U+0081 at byte 2
+        must_fail_at("ok\u{0081}", 2);
+    }
+
+    // -- Unicode format / bidi / invisible characters -------------------------
+    //
+    // Rust's is_control() does NOT cover Unicode format characters such as
+    // U+200C..200F, U+FFF9, U+FEFF, U+00AD.  They are therefore visible
+    // non-control, non-whitespace scalars → they pass is_ident_start and
+    // are accepted as identifier characters.
+    //
+    // U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are marked
+    // is_whitespace()=true by Rust, but advance_trivia only handles ASCII
+    // whitespace (\n \r \t space VT FF) and does not consume them.  They
+    // therefore reach scan_token where !is_whitespace() fails is_ident_start,
+    // landing in scan_symbol → not in the table → error.
+
+    #[test]
+    fn unicode_zero_width_non_joiner_u200c_is_identifier() {
+        // U+200C: is_control()=false, is_whitespace()=false → ident char
+        let r = lex("\u{200C}").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    }
+
+    #[test]
+    fn unicode_zero_width_joiner_u200d_is_identifier() {
+        let r = lex("\u{200D}").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    }
+
+    #[test]
+    fn unicode_left_to_right_mark_u200e_is_identifier() {
+        let r = lex("\u{200E}").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    }
+
+    #[test]
+    fn unicode_right_to_left_mark_u200f_is_identifier() {
+        let r = lex("\u{200F}").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    }
+
+    #[test]
+    fn unicode_interlinear_annotation_ufff9_is_identifier() {
+        // U+FFF9: is_control()=false → ident char
+        let r = lex("\u{FFF9}").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    }
+
+    #[test]
+    fn unicode_soft_hyphen_u00ad_is_identifier() {
+        // U+00AD SOFT HYPHEN: is_control()=false, not reserved → ident char
+        let r = lex("\u{00AD}").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    }
+
+    #[test]
+    fn unicode_bom_ufeff_is_identifier() {
+        // U+FEFF BOM: is_control()=false → ident char
+        let r = lex("\u{FEFF}").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
+    }
+
+    #[test]
+    fn reject_line_separator_u2028() {
+        // U+2028: is_whitespace()=true so it fails is_ident_start,
+        // but advance_trivia does not consume it → scan_symbol → error.
+        must_fail("\u{2028}");
+    }
+
+    #[test]
+    fn reject_paragraph_separator_u2029() {
+        // U+2029: same path as U+2028 → error.
+        must_fail("\u{2029}");
+    }
+
+    #[test]
+    fn reject_line_separator_after_valid_token() {
+        // "ab" (2 bytes) then U+2028 (3 bytes) at byte 2
+        must_fail_at("ab\u{2028}", 2);
+    }
+
+    #[test]
+    fn reject_paragraph_separator_after_valid_token() {
+        must_fail_at("ab\u{2029}", 2);
+    }
+
+    #[test]
+    fn unicode_format_control_mixed_into_identifier() {
+        // U+200C appended to a normal identifier is part of that identifier
+        // (it is a valid ident-continue char)
+        let r = lex("abc\u{200C}def").unwrap();
+        assert!(matches!(&r.tokens[0].kind,
+            TokenKind::Identifier(s) if s == "abc\u{200C}def"));
+    }
+
+    #[test]
+    fn unicode_format_controls_surrounding_valid_tokens() {
+        // valid "x" then U+200E then valid "y" — U+200E joins into "y"'s
+        // identifier; the result is two identifiers: "x" and "\u{200E}y"
+        let kinds = tokens("x \u{200E}y");
+        assert_eq!(kinds.len(), 2);
+        assert!(matches!(&kinds[0], TokenKind::Identifier(s) if s == "x"));
+        assert!(matches!(&kinds[1], TokenKind::Identifier(s) if s == "\u{200E}y"));
+    }
+
+    // -- confirm visible non-ASCII chars are NOT rejected ---------------------
+    //
+    // These tests verify that the reject list has no false positives: visible,
+    // non-control Unicode characters outside the reserved-symbol set are valid
+    // identifier material and must NOT cause a lex error.
+
+    #[test]
+    fn visible_non_ascii_letter_is_not_rejected() {
+        let r = lex("é").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "é"));
+    }
+
+    #[test]
+    fn visible_non_ascii_cjk_is_not_rejected() {
+        let r = lex("字").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "字"));
+    }
+
+    #[test]
+    fn visible_non_ascii_emoji_is_not_rejected() {
+        let r = lex("🚀").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "🚀"));
+    }
+
+    #[test]
+    fn visible_ascii_backtick_is_not_rejected() {
+        // '`' is visible, not control, not reserved → valid identifier char
+        let r = lex("`foo`").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "`foo`"));
+    }
+
+    #[test]
+    fn visible_ascii_question_mark_is_not_rejected() {
+        let r = lex("what?").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "what?"));
+    }
+
+    #[test]
+    fn visible_ascii_dollar_is_not_rejected() {
+        let r = lex("$price").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "$price"));
+    }
+
+    #[test]
+    fn visible_ascii_exclamation_is_not_rejected() {
+        let r = lex("ok!").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "ok!"));
     }
 }

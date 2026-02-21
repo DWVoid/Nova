@@ -3,8 +3,8 @@ use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, StatKind, TopItem, V
 use crate::lexical::lexer::Lexer;
 
 fn parse_chunk(input: &str) -> Chunk {
-    let tokens = Lexer::new(input).lex_all().unwrap();
-    Parser::new(tokens).parse_chunk().unwrap()
+    let lex_result = Lexer::new(input).lex_all().unwrap();
+    Parser::new(lex_result.tokens, lex_result.comments).parse_chunk().unwrap()
 }
 
 #[test]

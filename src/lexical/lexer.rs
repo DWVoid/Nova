@@ -6,12 +6,19 @@ pub struct LexError {
     pub position: Position,
 }
 
+/// The result of lexing a source file: a clean token stream and a separate,
+/// ordered list of every comment found in the source.
+#[derive(Clone, Debug)]
+pub struct LexResult {
+    pub tokens: Vec<Token>,
+    pub comments: Vec<Comment>,
+}
+
 pub struct Lexer<'a> {
     input: &'a str,
     index: usize,
     position: Position,
-    pending_leading: Vec<Comment>,
-    newline_since_token: bool,
+    comments: Vec<Comment>,
     tokens: Vec<Token>,
 }
 
@@ -21,13 +28,12 @@ impl<'a> Lexer<'a> {
             input,
             index: 0,
             position: Position::start(),
-            pending_leading: Vec::new(),
-            newline_since_token: true,
+            comments: Vec::new(),
             tokens: Vec::new(),
         }
     }
 
-    pub fn lex_all(mut self) -> Result<Vec<Token>, LexError> {
+    pub fn lex_all(mut self) -> Result<LexResult, LexError> {
         while !self.is_eof() {
             self.skip_whitespace_and_comments()?;
             if self.is_eof() {
@@ -35,14 +41,14 @@ impl<'a> Lexer<'a> {
             }
             let token = self.lex_token()?;
             self.tokens.push(token);
-            self.newline_since_token = false;
         }
 
         let eof_span = Span::single(self.position);
-        let mut eof = Token::new(TokenKind::Eof, eof_span);
-        eof.leading.append(&mut self.pending_leading);
-        self.tokens.push(eof);
-        Ok(self.tokens)
+        self.tokens.push(Token::new(TokenKind::Eof, eof_span));
+        Ok(LexResult {
+            tokens: self.tokens,
+            comments: self.comments,
+        })
     }
 
     fn is_eof(&self) -> bool {
@@ -92,7 +98,6 @@ impl<'a> Lexer<'a> {
     fn skip_whitespace_and_comments(&mut self) -> Result<(), LexError> {
         loop {
             if self.consume_newline() {
-                self.newline_since_token = true;
                 continue;
             }
 
@@ -129,23 +134,12 @@ impl<'a> Lexer<'a> {
         let end_index = self.index;
         let text = self.input[start_index..end_index].to_string();
         let span = Span::new(start_pos, self.position);
-        let comment = Comment {
+        self.comments.push(Comment {
             kind: CommentKind::Line,
             text,
             span,
-        };
-        self.attach_comment(comment);
+        });
         Ok(())
-    }
-
-    fn attach_comment(&mut self, comment: Comment) {
-        if !self.newline_since_token {
-            if let Some(last) = self.tokens.last_mut() {
-                last.trailing.push(comment);
-                return;
-            }
-        }
-        self.pending_leading.push(comment);
     }
 
     fn lex_token(&mut self) -> Result<Token, LexError> {
@@ -173,8 +167,6 @@ impl<'a> Lexer<'a> {
             }
         };
 
-        let mut token = token;
-        token.leading.append(&mut self.pending_leading);
         Ok(token)
     }
 
@@ -345,8 +337,7 @@ impl<'a> Lexer<'a> {
                     let end_index = self.index;
                     let text = self.input[start_index..end_index].to_string();
                     let span = Span::new(start_pos, self.position);
-                    let comment = Comment { kind, text, span };
-                    self.attach_comment(comment);
+                    self.comments.push(Comment { kind, text, span });
                     return Ok(());
                 }
             }
@@ -526,19 +517,19 @@ mod tests {
     #[test]
     fn lexes_simple_tokens_with_comment() {
         let input = "-- hi\nuse System;";
-        let tokens = Lexer::new(input).lex_all().unwrap();
-        let first = &tokens[0];
+        let result = Lexer::new(input).lex_all().unwrap();
+        assert_eq!(result.comments.len(), 1);
+        let first = &result.tokens[0];
         assert!(matches!(first.kind, TokenKind::Keyword(Keyword::Use)));
-        assert_eq!(first.leading.len(), 1);
-        assert!(matches!(tokens[1].kind, TokenKind::Identifier(_)));
-        assert!(matches!(tokens[2].kind, TokenKind::Symbol(Symbol::Semi)));
+        assert!(matches!(result.tokens[1].kind, TokenKind::Identifier(_)));
+        assert!(matches!(result.tokens[2].kind, TokenKind::Symbol(Symbol::Semi)));
     }
 
     #[test]
     fn lexes_long_string() {
         let input = "[[a\nb]]";
-        let tokens = Lexer::new(input).lex_all().unwrap();
-        let first = &tokens[0];
+        let result = Lexer::new(input).lex_all().unwrap();
+        let first = &result.tokens[0];
         match &first.kind {
             TokenKind::StringLiteral(text) => assert_eq!(text, "a\nb"),
             _ => panic!("expected long string"),
@@ -548,9 +539,9 @@ mod tests {
     #[test]
     fn lexes_numbers() {
         let input = "12 0x1.2p3 3.14";
-        let tokens = Lexer::new(input).lex_all().unwrap();
-        assert!(matches!(tokens[0].kind, TokenKind::Number(_)));
-        assert!(matches!(tokens[1].kind, TokenKind::Number(_)));
-        assert!(matches!(tokens[2].kind, TokenKind::Number(_)));
+        let result = Lexer::new(input).lex_all().unwrap();
+        assert!(matches!(result.tokens[0].kind, TokenKind::Number(_)));
+        assert!(matches!(result.tokens[1].kind, TokenKind::Number(_)));
+        assert!(matches!(result.tokens[2].kind, TokenKind::Number(_)));
     }
 }

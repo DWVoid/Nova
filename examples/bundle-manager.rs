@@ -218,10 +218,10 @@ impl BundleManager {
             let source_code = fs::read_to_string(&file_path)
                 .map_err(|e| format!("Failed to read {:?}: {}", file_path, e))?;
 
-            let tokens = Lexer::new(&source_code).lex_all()
+            let lex_result = Lexer::new(&source_code).lex_all()
                 .map_err(|e| format!("Lexer error in {:?}: {}", file_path, e.message))?;
 
-            let chunk = Parser::new(tokens).parse_chunk()
+            let chunk = Parser::new(lex_result.tokens, lex_result.comments).parse_chunk()
                 .map_err(|e| format!("Parser error in {:?}: {}", file_path, e.message))?;
 
             compilation_units.push(chunk);

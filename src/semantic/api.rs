@@ -59,8 +59,8 @@ impl NovaAnalyzer {
             };
 
             // Lex and parse
-            let tokens = match Lexer::new(&source_code).lex_all() {
-                Ok(tokens) => tokens,
+            let lex_result = match Lexer::new(&source_code).lex_all() {
+                Ok(r) => r,
                 Err(e) => {
                     parse_errors.push(SemanticDiagnostic {
                         severity: DiagnosticSeverity::Error,
@@ -72,7 +72,7 @@ impl NovaAnalyzer {
                 }
             };
 
-            let chunk = match Parser::new(tokens).parse_chunk() {
+            let chunk = match Parser::new(lex_result.tokens, lex_result.comments).parse_chunk() {
                 Ok(chunk) => chunk,
                 Err(e) => {
                     parse_errors.push(SemanticDiagnostic {
@@ -149,7 +149,7 @@ impl NovaAnalyzer {
     /// Internal analysis implementation
     fn analyze_source_internal(&mut self, source: &str) -> Result<SemanticModel, Vec<SemanticDiagnostic>> {
         // Lex the source
-        let tokens = Lexer::new(source).lex_all()
+        let lex_result = Lexer::new(source).lex_all()
             .map_err(|e| vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Lex error: {}", e.message),
@@ -158,7 +158,7 @@ impl NovaAnalyzer {
             }])?;
 
         // Parse into AST
-        let chunk = Parser::new(tokens).parse_chunk()
+        let chunk = Parser::new(lex_result.tokens, lex_result.comments).parse_chunk()
             .map_err(|e| vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Parse error: {}", e.message),

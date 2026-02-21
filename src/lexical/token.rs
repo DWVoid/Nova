@@ -210,18 +210,11 @@ pub enum TokenKind {
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
-    pub leading: Vec<Comment>,
-    pub trailing: Vec<Comment>,
 }
 
 impl Token {
     pub fn new(kind: TokenKind, span: Span) -> Self {
-        Self {
-            kind,
-            span,
-            leading: Vec::new(),
-            trailing: Vec::new(),
-        }
+        Self { kind, span }
     }
 }
 

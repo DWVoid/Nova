@@ -15,15 +15,15 @@ fn main() {
         std::process::exit(1);
     }
 
-    let tokens = match Lexer::new(&input).lex_all() {
-        Ok(tokens) => tokens,
+    let lex_result = match Lexer::new(&input).lex_all() {
+        Ok(r) => r,
         Err(err) => {
             eprintln!("Lex error at line {} column {}: {}", err.position.line, err.position.column, err.message);
             std::process::exit(1);
         }
     };
 
-    let chunk = match Parser::new(tokens).parse_chunk() {
+    let chunk = match Parser::new(lex_result.tokens, lex_result.comments).parse_chunk() {
         Ok(chunk) => chunk,
         Err(err) => {
             eprintln!("Parse error at line {} column {}: {}", err.position.line, err.position.column, err.message);
@@ -167,8 +167,8 @@ export define add (x: integer, y: integer): integer
   return x + y
 end
     "#;
-    let tokens = Lexer::new(code).lex_all().unwrap();
-    let chunk = Parser::new(tokens).parse_chunk().unwrap();
+    let lex_result = Lexer::new(code).lex_all().unwrap();
+    let chunk = Parser::new(lex_result.tokens, lex_result.comments).parse_chunk().unwrap();
     print!("{}", formats::textual::encode(&chunk).unwrap());
     match crate::semantic::analyze_bundle(vec![chunk]) {
         Ok(semantic_model) => {

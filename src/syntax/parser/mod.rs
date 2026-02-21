@@ -18,15 +18,16 @@ pub struct ParseError {
 pub struct Parser {
     tokens: Vec<Token>,
     index: usize,
+    comments: Comments,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, index: 0 }
+    pub fn new(tokens: Vec<Token>, comments: Vec<Comment>) -> Self {
+        Self { tokens, index: 0, comments }
     }
 
     pub fn parse_chunk(mut self) -> Result<Chunk, ParseError> {
-        let comments = collect_all_comments(&self.tokens);
+        let comments = std::mem::take(&mut self.comments);
         let uses = self.parse_use_decls()?;
         let namespace = self.parse_namespace_decl()?;
         let items = self.parse_top_items()?;
@@ -50,15 +51,6 @@ impl Parser {
             items,
         })
     }
-}
-
-fn collect_all_comments(tokens: &[Token]) -> Comments {
-    let mut out: Vec<Comment> = Vec::new();
-    for token in tokens {
-        out.extend(token.leading.iter().cloned());
-        out.extend(token.trailing.iter().cloned());
-    }
-    out
 }
 
 impl Parser {

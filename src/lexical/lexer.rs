@@ -479,12 +479,33 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// A character may *start* an identifier if it is a visible, non-whitespace
+/// Unicode scalar that is not an ASCII digit and not one of the punctuation
+/// symbols the lexer handles as distinct tokens.
 fn is_ident_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_'
+    !ch.is_whitespace()
+        && !ch.is_control()
+        && !ch.is_ascii_digit()
+        && !is_reserved_symbol(ch)
 }
 
+/// A character may *continue* an identifier if it is any visible,
+/// non-whitespace Unicode scalar that is not a reserved symbol.
+/// ASCII digits are allowed after the first character.
 fn is_ident_continue(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
+    !ch.is_whitespace() && !ch.is_control() && !is_reserved_symbol(ch)
+}
+
+/// Characters that are always lexed as their own symbol tokens and therefore
+/// cannot appear inside an identifier.
+#[inline]
+fn is_reserved_symbol(ch: char) -> bool {
+    matches!(
+        ch,
+        '+' | '-' | '*' | '/' | '%' | '^' | '#' | '&' | '~' | '|'
+        | '<' | '>' | '=' | '(' | ')' | '{' | '}' | '[' | ']'
+        | ';' | ':' | ',' | '.' | '@' | '"' | '\''
+    )
 }
 
 fn keyword_from_str(text: &str) -> Option<Keyword> {
@@ -549,6 +570,35 @@ mod tests {
         assert_eq!(pos.grapheme(), 3);
         assert_eq!(pos.line(), 2);
         assert_eq!(pos.column(), 1);
+    }
+
+    #[test]
+    fn unicode_identifiers_are_lexed() {
+        // Token layout: namespace(0) name(1) ;(2) define(3) name(4) ((5) )(6) :(7) unit(8) end(9) eof(10)
+
+        // Greek identifier
+        let r = lex("namespace α; define δ(): unit end").unwrap();
+        assert!(matches!(&r.tokens[1].kind, TokenKind::Identifier(s) if s == "α"));
+        assert!(matches!(&r.tokens[4].kind, TokenKind::Identifier(s) if s == "δ"));
+
+        // CJK identifier
+        let r = lex("namespace 中文; define 函数(): unit end").unwrap();
+        assert!(matches!(&r.tokens[1].kind, TokenKind::Identifier(s) if s == "中文"));
+        assert!(matches!(&r.tokens[4].kind, TokenKind::Identifier(s) if s == "函数"));
+
+        // Emoji — visible non-whitespace, not a reserved symbol
+        let r = lex("namespace 🚀; define 🎯(): unit end").unwrap();
+        assert!(matches!(&r.tokens[1].kind, TokenKind::Identifier(s) if s == "🚀"));
+        assert!(matches!(&r.tokens[4].kind, TokenKind::Identifier(s) if s == "🎯"));
+    }
+
+    #[test]
+    fn reserved_symbols_are_not_part_of_identifiers() {
+        // Token layout: namespace(0) α(1) ;(2) define(3) a(4) +(5) b(6) ...
+        let r = lex("namespace α; define a+b(): unit end").unwrap();
+        assert!(matches!(&r.tokens[4].kind, TokenKind::Identifier(s) if s == "a"));
+        assert!(matches!(&r.tokens[5].kind, TokenKind::Symbol(Symbol::Plus)));
+        assert!(matches!(&r.tokens[6].kind, TokenKind::Identifier(s) if s == "b"));
     }
 
     #[test]

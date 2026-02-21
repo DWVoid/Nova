@@ -1,4 +1,5 @@
 use super::token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind};
+use icu::normalizer::ComposingNormalizerBorrowed;
 use icu::properties::props::{Emoji, EmojiPresentation, PatternSyntax, PatternWhiteSpace, XidContinue, XidStart};
 use icu::properties::CodePointSetData;
 use icu::segmenter::GraphemeClusterSegmenter;
@@ -269,7 +270,24 @@ impl<'a> Lexer<'a> {
                 }
             }
 
-            TokenKind::Identifier(text.to_string())
+            TokenKind::Identifier(
+                // Normalize the identifier text to Unicode Normalization Form C
+                // (canonical decomposition followed by canonical composition).
+                //
+                // INTENTIONAL LOSSY TRANSFORM: the stored string may differ from
+                // the verbatim source bytes.  Two identifiers that are canonically
+                // equivalent (e.g. "é" as U+00E9 vs. "e\u{0301}") will produce
+                // the same token, which is the desired behavior for name
+                // resolution.  However, this means the token stream cannot be
+                // used to reconstruct the original source text faithfully — that
+                // is a deliberate design choice.  Anything that needs the raw
+                // source (diagnostics, IDE go-to-definition, source maps) must
+                // operate on the original `&str` slice via the token's `Span`,
+                // not the stored identifier string.
+                ComposingNormalizerBorrowed::new_nfc()
+                    .normalize(text)
+                    .into_owned()
+            )
         };
         Ok(Token::new(kind, Span::new(start_pos, self.position)))
     }
@@ -571,19 +589,6 @@ fn is_pattern_syntax(ch: char) -> bool {
 #[inline]
 fn is_pattern_whitespace(ch: char) -> bool {
     CodePointSetData::new::<PatternWhiteSpace>().contains(ch)
-}
-
-/// Characters that are always lexed as their own symbol tokens.
-/// Kept for use in `scan_symbol`; identifier admission is now handled entirely
-/// by `is_pattern_syntax` / `is_pattern_whitespace` above.
-#[inline]
-fn is_reserved_symbol(ch: char) -> bool {
-    matches!(
-        ch,
-        '+' | '-' | '*' | '/' | '%' | '^' | '#' | '&' | '~' | '|'
-        | '<' | '>' | '=' | '(' | ')' | '{' | '}' | '[' | ']'
-        | ';' | ':' | ',' | '.' | '@' | '"' | '\''
-    )
 }
 
 fn keyword_from_str(text: &str) -> Option<Keyword> {
@@ -1576,6 +1581,58 @@ mod tests {
         let r = lex("ab\u{200D}").unwrap();
         assert!(matches!(&r.tokens[0].kind,
             TokenKind::Identifier(s) if s == "ab\u{200D}"));
+    }
+
+    // -- NFC normalisation of identifier text ─────────────────────────────────
+    //
+    // scan_word applies Unicode NFC to the collected text before storing it in
+    // the Identifier token.  This is a deliberately lossy transform: the stored
+    // string may not match the verbatim source bytes (e.g. NFD "e\u{0301}" is
+    // stored as NFC U+00E9).  Two canonically-equivalent spellings of the same
+    // name therefore produce identical tokens.  Source fidelity must be obtained
+    // from the token's Span, not from the identifier string.
+
+    #[test]
+    fn identifier_nfd_input_is_stored_as_nfc() {
+        // NFD: 'e' (U+0065) + combining acute (U+0301) = two codepoints.
+        // NFC: é (U+00E9) = one codepoint.
+        // The lexer must store the NFC form.
+        let nfd = "e\u{0301}";
+        let nfc = "\u{00E9}"; // é precomposed
+        let r = lex(nfd).unwrap();
+        assert!(
+            matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == nfc),
+            "expected NFC {:?}, got {:?}", nfc, r.tokens[0].kind
+        );
+    }
+
+    #[test]
+    fn identifier_already_nfc_is_unchanged() {
+        // Input already in NFC → stored string equals input.
+        let r = lex("café").unwrap();
+        assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "café"));
+    }
+
+    #[test]
+    fn identifier_nfd_and_nfc_spellings_produce_equal_tokens() {
+        // NFD and NFC spellings of the same word must lex to identical
+        // Identifier values — this is the point of normalization.
+        let nfd = "cafe\u{0301}"; // 'e' + combining acute
+        let nfc = "café";         // precomposed é (U+00E9)
+        let r_nfd = lex(nfd).unwrap();
+        let r_nfc = lex(nfc).unwrap();
+        assert_eq!(r_nfd.tokens[0].kind, r_nfc.tokens[0].kind);
+    }
+
+    #[test]
+    fn identifier_nfd_span_reflects_source_bytes_not_nfc() {
+        // Even though the stored identifier is NFC, the span must cover
+        // the original NFD source bytes so diagnostics remain accurate.
+        // NFD "e\u{0301}" is 3 bytes; NFC "é" is 2 bytes.
+        let nfd = "e\u{0301}";
+        let r = lex(nfd).unwrap();
+        assert_eq!(r.tokens[0].span.start.byte(), 0);
+        assert_eq!(r.tokens[0].span.end.byte(), 3); // 3 NFD bytes consumed
     }
 
     // -- confirm visible non-ASCII letters ARE accepted -----------------------

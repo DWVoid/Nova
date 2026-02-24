@@ -5,4 +5,5 @@ mod token;
 pub use lexer::{lex, LexError, LexResult};
 
 #[allow(dead_code)]
-pub use token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind};
+pub use token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind, Trivia, TriviaKind};
+

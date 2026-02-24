@@ -1,12 +1,13 @@
 use serde::Serialize;
-use crate::lexical::{Comment, Span};
+use crate::lexical::Span;
 
-pub type Comments = Vec<Comment>;
+/// A list of trivia items (whitespace and comments) attached to a chunk.
+pub type Trivia = Vec<crate::lexical::Trivia>;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Chunk {
     pub span: Span,
-    pub comments: Comments,
+    pub trivia: Trivia,
     pub uses: Vec<UseDecl>,
     pub namespace: NamespaceDecl,
     pub items: Vec<TopItem>,
@@ -355,7 +356,7 @@ impl TopItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::{CommentKind, Position};
+    use crate::lexical::{Position, TriviaKind};
 
     fn span() -> Span {
         Span::new(Position::new_start(), Position::new_start())
@@ -363,41 +364,15 @@ mod tests {
 
     #[test]
     fn constructs_simple_chunk() {
-        let comment = Comment {
-            kind: CommentKind::Line,
+        let trivia_item = crate::lexical::Trivia {
+            kind: TriviaKind::LineComment,
             text: "-- test".to_string(),
             span: span(),
         };
-        let name = Name {
-            value: "x".to_string(),
-            span: span(),
-        };
-        let exp = Exp {
-            span: span(),
-            kind: ExpKind::Number("1".to_string()),
-        };
-        let stat = Stat {
-            span: span(),
-            kind: StatKind::Assign {
-                vars: vec![Var {
-                    span: span(),
-                    kind: VarKind::Decl {
-                        kind: VarDeclKind::Var,
-                        name,
-                        type_spec: None,
-                    },
-                }],
-                exprs: vec![exp],
-            },
-        };
-        let block = Block {
-            span: span(),
-            stats: vec![stat],
-            ret: None,
-        };
+        // ...existing code...
         let chunk = Chunk {
             span: span(),
-            comments: vec![comment],
+            trivia: vec![trivia_item],
             uses: Vec::new(),
             namespace: NamespaceDecl {
                 span: span(),
@@ -425,7 +400,30 @@ mod tests {
                                 parts: Vec::new(),
                             },
                         },
-                        block,
+                        block: Block {
+                            span: span(),
+                            stats: vec![Stat {
+                                span: span(),
+                                kind: StatKind::Assign {
+                                    vars: vec![Var {
+                                        span: span(),
+                                        kind: VarKind::Decl {
+                                            kind: VarDeclKind::Var,
+                                            name: Name {
+                                                value: "x".to_string(),
+                                                span: span(),
+                                            },
+                                            type_spec: None,
+                                        },
+                                    }],
+                                    exprs: vec![Exp {
+                                        span: span(),
+                                        kind: ExpKind::Number("1".to_string()),
+                                    }],
+                                },
+                            }],
+                            ret: None,
+                        },
                     }),
                 }),
             })],

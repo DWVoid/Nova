@@ -600,7 +600,7 @@ mod tests {
         let span = Span::single(Position::new_start());
         Chunk {
             span,
-            comments: Vec::new(),
+            trivia: Vec::new(),
             uses: Vec::new(),
             namespace: create_test_namespace_decl(namespace_path, span),
             items: Vec::new(),

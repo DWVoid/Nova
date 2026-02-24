@@ -71,7 +71,7 @@ impl NovaAnalyzer {
                 }
             };
 
-            let chunk = match Parser::new(lex_result.tokens, lex_result.comments).parse_chunk() {
+            let chunk = match Parser::new(lex_result.tokens, lex_result.trivia).parse_chunk() {
                 Ok(chunk) => chunk,
                 Err(e) => {
                     parse_errors.push(SemanticDiagnostic {
@@ -157,7 +157,7 @@ impl NovaAnalyzer {
             }])?;
 
         // Parse into AST
-        let chunk = Parser::new(lex_result.tokens, lex_result.comments).parse_chunk()
+        let chunk = Parser::new(lex_result.tokens, lex_result.trivia).parse_chunk()
             .map_err(|e| vec![SemanticDiagnostic {
                 severity: DiagnosticSeverity::Error,
                 message: format!("Parse error: {}", e.message),

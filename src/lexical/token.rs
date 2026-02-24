@@ -1,6 +1,40 @@
 use serde::{Serialize, Serializer};
 use std::fmt;
 
+// ── Trivia ───────────────────────────────────────────────────────────────────
+
+/// A piece of non-semantic source text that sits between tokens.  Trivia
+/// includes all whitespace (spaces, tabs, newlines) and comments.  Keeping
+/// trivia allows the token stream to be used for full source reconstruction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct Trivia {
+    pub kind: TriviaKind,
+    /// The verbatim source text covered by this trivia item.
+    pub text: String,
+    pub span: Span,
+}
+
+/// The kind of a trivia item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub enum TriviaKind {
+    /// Horizontal / vertical whitespace and line breaks.
+    Whitespace,
+    /// A `--` line comment (ends before the line break).
+    LineComment,
+    /// A `--[=*[…]=*]` block comment.
+    BlockComment,
+}
+
+// ── Back-compat aliases ───────────────────────────────────────────────────────
+
+/// Alias kept for call-sites that still refer to the comment kind directly.
+pub type CommentKind = TriviaKind;
+
+/// Alias kept for call-sites that still refer to `Comment` directly.
+pub type Comment = Trivia;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Position {
     byte: usize,
@@ -74,18 +108,6 @@ impl fmt::Display for Span {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub enum CommentKind {
-    Line,
-    Block,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct Comment {
-    pub kind: CommentKind,
-    pub text: String,
-    pub span: Span,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Keyword {

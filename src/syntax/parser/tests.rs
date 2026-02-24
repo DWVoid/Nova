@@ -4,7 +4,7 @@ use crate::lexical::lex;
 
 fn parse_chunk(input: &str) -> Chunk {
     let lex_result = lex(input).unwrap();
-    Parser::new(lex_result.tokens, lex_result.comments).parse_chunk().unwrap()
+    Parser::new(lex_result.tokens, lex_result.trivia).parse_chunk().unwrap()
 }
 
 #[test]
@@ -159,5 +159,8 @@ fn collects_comments_at_chunk_level() {
         -- trailing
     "#;
     let chunk = parse_chunk(src);
-    assert_eq!(chunk.comments.len(), 2);
+    let comment_count = chunk.trivia.iter().filter(|t| {
+        matches!(t.kind, crate::lexical::TriviaKind::LineComment | crate::lexical::TriviaKind::BlockComment)
+    }).count();
+    assert_eq!(comment_count, 2);
 }

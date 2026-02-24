@@ -6,8 +6,8 @@ mod decl;
 #[cfg(test)]
 mod tests;
 
-use crate::syntax::ast::{Chunk, Comments, NamespaceDecl, TopItem, UseDecl};
-use crate::lexical::{Comment, Keyword, Position, Symbol, Token, TokenKind};
+use crate::syntax::ast::{Chunk, NamespaceDecl, TopItem, Trivia, UseDecl};
+use crate::lexical::{Keyword, Position, Symbol, Token, TokenKind, Trivia as LexTrivia};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseError {
@@ -18,16 +18,16 @@ pub struct ParseError {
 pub struct Parser {
     tokens: Vec<Token>,
     index: usize,
-    comments: Comments,
+    trivia: Trivia,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>, comments: Vec<Comment>) -> Self {
-        Self { tokens, index: 0, comments }
+    pub fn new(tokens: Vec<Token>, trivia: Vec<LexTrivia>) -> Self {
+        Self { tokens, index: 0, trivia }
     }
 
     pub fn parse_chunk(mut self) -> Result<Chunk, ParseError> {
-        let comments = std::mem::take(&mut self.comments);
+        let trivia = std::mem::take(&mut self.trivia);
         let uses = self.parse_use_decls()?;
         let namespace = self.parse_namespace_decl()?;
         let items = self.parse_top_items()?;
@@ -45,7 +45,7 @@ impl Parser {
         };
         Ok(Chunk {
             span,
-            comments,
+            trivia,
             uses,
             namespace,
             items,

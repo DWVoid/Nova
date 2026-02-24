@@ -21,17 +21,6 @@ pub struct LexResult {
     pub trivia: Vec<Trivia>,
 }
 
-impl LexResult {
-    /// Convenience accessor that returns only the comment trivia items, in
-    /// source order.  This is a filtered view of `trivia`; prefer iterating
-    /// `trivia` directly when you need whitespace as well.
-    pub fn comments(&self) -> impl Iterator<Item = &Trivia> {
-        self.trivia.iter().filter(|t| {
-            matches!(t.kind, TriviaKind::LineComment | TriviaKind::BlockComment)
-        })
-    }
-}
-
 /// Lex a Nova source string into a token stream and a flat comment list.
 pub fn lex(input: &str) -> Result<LexResult, LexError> {
     Lexer::new(input).scan()
@@ -710,16 +699,16 @@ mod tests {
     }
 
     /// Return only the comment trivia items from a LexResult.
-    fn comments(r: &super::LexResult) -> Vec<&super::Trivia> {
+    fn comments(r: &LexResult) -> Vec<&Trivia> {
         r.trivia.iter().filter(|t| {
-            matches!(t.kind, super::TriviaKind::LineComment | super::TriviaKind::BlockComment)
+            matches!(t.kind, TriviaKind::LineComment | TriviaKind::BlockComment)
         }).collect()
     }
 
     /// Return only the whitespace trivia items from a LexResult.
-    fn whitespace(r: &super::LexResult) -> Vec<&super::Trivia> {
+    fn whitespace(r: &LexResult) -> Vec<&Trivia> {
         r.trivia.iter().filter(|t| {
-            matches!(t.kind, super::TriviaKind::Whitespace)
+            matches!(t.kind, TriviaKind::Whitespace)
         }).collect()
     }
 
@@ -935,7 +924,7 @@ mod tests {
 
     // ── keywords ──────────────────────────────────────────────────────────────
 
-    // Each keyword must be recognised as its own variant, not as an Identifier.
+    // Each keyword must be recognized as its own variant, not as an Identifier.
     macro_rules! keyword_test {
         ($name:ident, $text:literal, $variant:ident) => {
             #[test]
@@ -1265,7 +1254,7 @@ mod tests {
         let r = lex("-- hello").unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
-        assert!(matches!(c[0].kind, super::TriviaKind::LineComment));
+        assert!(matches!(c[0].kind, TriviaKind::LineComment));
         assert!(c[0].text.contains("hello"));
     }
 
@@ -1317,7 +1306,7 @@ mod tests {
         let r = lex("--[[block]]").unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
-        assert!(matches!(c[0].kind, super::TriviaKind::BlockComment));
+        assert!(matches!(c[0].kind, TriviaKind::BlockComment));
     }
 
     #[test]
@@ -1325,7 +1314,7 @@ mod tests {
         let r = lex("--[=[block]=]").unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
-        assert!(matches!(c[0].kind, super::TriviaKind::BlockComment));
+        assert!(matches!(c[0].kind, TriviaKind::BlockComment));
     }
 
     #[test]
@@ -1368,9 +1357,9 @@ mod tests {
         let r = lex("-- line\n--[[block]]\n-- line2").unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 3);
-        assert!(matches!(c[0].kind, super::TriviaKind::LineComment));
-        assert!(matches!(c[1].kind, super::TriviaKind::BlockComment));
-        assert!(matches!(c[2].kind, super::TriviaKind::LineComment));
+        assert!(matches!(c[0].kind, TriviaKind::LineComment));
+        assert!(matches!(c[1].kind, TriviaKind::BlockComment));
+        assert!(matches!(c[2].kind, TriviaKind::LineComment));
     }
 
     // ── whitespace trivia ─────────────────────────────────────────────────────
@@ -1381,7 +1370,7 @@ mod tests {
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
         assert_eq!(ws[0].text, "   ");
-        assert!(matches!(ws[0].kind, super::TriviaKind::Whitespace));
+        assert!(matches!(ws[0].kind, TriviaKind::Whitespace));
     }
 
     #[test]
@@ -1584,7 +1573,7 @@ mod tests {
     #[test]
     fn reject_c1_control_nel() {
         // U+0085 NEL — is_control()=true in Rust.
-        // advance_trivia does not recognise it as a newline, so it reaches
+        // advance_trivia does not recognize it as a newline, so it reaches
         // scan_token → scan_symbol → not in symbol table → error.
         must_fail("\u{0085}");
     }

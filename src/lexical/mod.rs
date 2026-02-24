@@ -1,9 +1,9 @@
 mod lexer;
 mod token;
 
-#[allow(dead_code)]
-pub use lexer::{lex, LexError, LexResult};
+#[allow(unused)]
+pub use lexer::lex;
 
-#[allow(dead_code)]
-pub use token::{Comment, CommentKind, Keyword, Position, Span, Symbol, Token, TokenKind, Trivia, TriviaKind};
+#[allow(unused)]
+pub use token::{Keyword, Position, Span, Symbol, Token, TokenKind, Trivia, TriviaKind};
 

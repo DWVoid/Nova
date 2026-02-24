@@ -14,7 +14,7 @@ pub struct Trivia {
     pub span: Span,
 }
 
-/// The kind of a trivia item.
+/// The kind of trivia item.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub enum TriviaKind {
     /// Horizontal / vertical whitespace and line breaks.
@@ -24,16 +24,6 @@ pub enum TriviaKind {
     /// A `--[=*[…]=*]` block comment.
     BlockComment,
 }
-
-// ── Back-compat aliases ───────────────────────────────────────────────────────
-
-/// Alias kept for call-sites that still refer to the comment kind directly.
-pub type CommentKind = TriviaKind;
-
-/// Alias kept for call-sites that still refer to `Comment` directly.
-pub type Comment = Trivia;
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Position {
@@ -45,14 +35,29 @@ pub struct Position {
 
 impl Position {
     pub fn new(byte: usize, grapheme: usize, line: usize, column: usize) -> Self {
-        Self { byte, grapheme, line, column }
+        Self {
+            byte,
+            grapheme,
+            line,
+            column,
+        }
     }
 
-    pub fn new_start() -> Self { Self::new(0,0,1,0)}
-    pub fn byte(&self) -> usize { self.byte }
-    pub fn grapheme(&self) -> usize { self.grapheme }
-    pub fn line(&self) -> usize { self.line }
-    pub fn column(&self) -> usize { self.column }
+    pub fn new_start() -> Self {
+        Self::new(0, 0, 1, 0)
+    }
+    pub fn byte(&self) -> usize {
+        self.byte
+    }
+    pub fn grapheme(&self) -> usize {
+        self.grapheme
+    }
+    pub fn line(&self) -> usize {
+        self.line
+    }
+    pub fn column(&self) -> usize {
+        self.column
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,7 +71,11 @@ impl Serialize for Span {
     where
         S: Serializer,
     {
-        serializer.serialize_str(&format!("{}..{}", self.start.grapheme(), self.end.grapheme()))
+        serializer.serialize_str(&format!(
+            "{}..{}",
+            self.start.grapheme(),
+            self.end.grapheme()
+        ))
     }
 }
 
@@ -107,7 +116,6 @@ impl fmt::Display for Span {
         write!(f, "{}..{}", self.start.grapheme(), self.end.grapheme())
     }
 }
-
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Keyword {
@@ -211,14 +219,8 @@ mod tests {
 
     #[test]
     fn span_merge_keeps_outer_bounds() {
-        let a = Span::new(
-            Position::new(0, 0, 1, 0),
-            Position::new(2, 2, 1, 2),
-        );
-        let b = Span::new(
-            Position::new(2, 2, 1, 2),
-            Position::new(5, 5, 1, 5),
-        );
+        let a = Span::new(Position::new(0, 0, 1, 0), Position::new(2, 2, 1, 2));
+        let b = Span::new(Position::new(2, 2, 1, 2), Position::new(5, 5, 1, 5));
         let merged = a.merge(b);
         assert_eq!(merged.start.grapheme(), 0);
         assert_eq!(merged.end.grapheme(), 5);

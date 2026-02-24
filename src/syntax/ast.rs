@@ -366,7 +366,6 @@ mod tests {
     fn constructs_simple_chunk() {
         let trivia_item = crate::lexical::Trivia {
             kind: TriviaKind::LineComment,
-            text: "-- test".to_string(),
             span: span(),
         };
         // ...existing code...

@@ -180,7 +180,6 @@ impl<'a> Lexer<'a> {
     /// newlines) into a single [`TriviaKind::Whitespace`] item.
     fn scan_whitespace_trivia(&mut self) {
         let start_pos = self.position;
-        let start_index = self.index;
 
         loop {
             if self.remaining().starts_with("\r\n") {
@@ -196,18 +195,16 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        let text = self.input[start_index..self.index].to_string();
         let span = Span::new(start_pos, self.position);
-        self.trivia.push(Trivia { kind: TriviaKind::Whitespace, text, span });
+        self.trivia.push(Trivia { kind: TriviaKind::Whitespace, span });
     }
 
     fn scan_comment_trivia(&mut self) -> Result<(), LexError> {
         let start_pos = self.position;
-        let start_index = self.index;
         self.advance_by("--");
 
         if let Some(level) = self.peek_long_bracket_level() {
-            self.scan_block_comment_trivia(level, start_pos, start_index)?;
+            self.scan_block_comment_trivia(level, start_pos)?;
             return Ok(());
         }
 
@@ -218,11 +215,9 @@ impl<'a> Lexer<'a> {
             self.advance_char();
         }
 
-        let text = self.input[start_index..self.index].to_string();
         let span = Span::new(start_pos, self.position);
         self.trivia.push(Trivia {
             kind: TriviaKind::LineComment,
-            text,
             span,
         });
         Ok(())
@@ -495,13 +490,10 @@ impl<'a> Lexer<'a> {
         &mut self,
         level: usize,
         start_pos: Position,
-        start_index: usize,
     ) -> Result<(), LexError> {
         self.scan_long_bracket_body(level, "comment")?;
-        let end_index = self.index;
-        let text = self.input[start_index..end_index].to_string();
         let span = Span::new(start_pos, self.position);
-        self.trivia.push(Trivia { kind: TriviaKind::BlockComment, text, span });
+        self.trivia.push(Trivia { kind: TriviaKind::BlockComment, span });
         Ok(())
     }
 
@@ -710,6 +702,12 @@ mod tests {
         r.trivia.iter().filter(|t| {
             matches!(t.kind, TriviaKind::Whitespace)
         }).collect()
+    }
+
+    /// Recover the verbatim source text of a trivia item by slicing `input`
+    /// with the item's byte-offset span.
+    fn trivia_text<'a>(input: &'a str, t: &Trivia) -> &'a str {
+        &input[t.span.start.byte()..t.span.end.byte()]
     }
 
     // ── position tracking ─────────────────────────────────────────────────────
@@ -1251,11 +1249,12 @@ mod tests {
 
     #[test]
     fn line_comment_is_collected() {
-        let r = lex("-- hello").unwrap();
+        let input = "-- hello";
+        let r = lex(input).unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
         assert!(matches!(c[0].kind, TriviaKind::LineComment));
-        assert!(c[0].text.contains("hello"));
+        assert!(trivia_text(input, c[0]).contains("hello"));
     }
 
     #[test]
@@ -1285,18 +1284,20 @@ mod tests {
 
     #[test]
     fn line_comment_text_includes_dashes() {
-        let r = lex("-- note").unwrap();
-        assert!(comments(&r)[0].text.starts_with("--"));
+        let input = "-- note";
+        let r = lex(input).unwrap();
+        assert!(trivia_text(input, comments(&r)[0]).starts_with("--"));
     }
 
     #[test]
     fn multiple_line_comments_preserve_order() {
-        let r = lex("-- first\n-- second\n-- third").unwrap();
+        let input = "-- first\n-- second\n-- third";
+        let r = lex(input).unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 3);
-        assert!(c[0].text.contains("first"));
-        assert!(c[1].text.contains("second"));
-        assert!(c[2].text.contains("third"));
+        assert!(trivia_text(input, c[0]).contains("first"));
+        assert!(trivia_text(input, c[1]).contains("second"));
+        assert!(trivia_text(input, c[2]).contains("third"));
     }
 
     // ── block comments ────────────────────────────────────────────────────────
@@ -1326,25 +1327,28 @@ mod tests {
 
     #[test]
     fn block_comment_can_span_multiple_lines() {
-        let r = lex("--[[\nline1\nline2\n]]").unwrap();
+        let input = "--[[\nline1\nline2\n]]";
+        let r = lex(input).unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
-        assert!(c[0].text.contains("line1"));
+        assert!(trivia_text(input, c[0]).contains("line1"));
     }
 
     #[test]
     fn block_comment_does_not_close_on_mismatched_level() {
         // --[[ ... ]=] should not close a level-0 block comment
-        let r = lex("--[[a]=]b]]").unwrap();
+        let input = "--[[a]=]b]]";
+        let r = lex(input).unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
-        assert!(c[0].text.contains("a]=]b"));
+        assert!(trivia_text(input, c[0]).contains("a]=]b"));
     }
 
     #[test]
     fn block_comment_text_includes_opening_dashes_and_brackets() {
-        let r = lex("--[[text]]").unwrap();
-        assert!(comments(&r)[0].text.starts_with("--[["));
+        let input = "--[[text]]";
+        let r = lex(input).unwrap();
+        assert!(trivia_text(input, comments(&r)[0]).starts_with("--[["));
     }
 
     #[test]
@@ -1366,36 +1370,40 @@ mod tests {
 
     #[test]
     fn whitespace_is_collected_as_trivia() {
-        let r = lex("a   b").unwrap();
+        let input = "a   b";
+        let r = lex(input).unwrap();
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
-        assert_eq!(ws[0].text, "   ");
+        assert_eq!(trivia_text(input, ws[0]), "   ");
         assert!(matches!(ws[0].kind, TriviaKind::Whitespace));
     }
 
     #[test]
     fn newlines_are_collected_as_whitespace_trivia() {
-        let r = lex("a\nb").unwrap();
+        let input = "a\nb";
+        let r = lex(input).unwrap();
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
-        assert_eq!(ws[0].text, "\n");
+        assert_eq!(trivia_text(input, ws[0]), "\n");
     }
 
     #[test]
     fn crlf_is_collected_as_single_whitespace_trivia_item() {
-        let r = lex("a\r\nb").unwrap();
+        let input = "a\r\nb";
+        let r = lex(input).unwrap();
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
-        assert_eq!(ws[0].text, "\r\n");
+        assert_eq!(trivia_text(input, ws[0]), "\r\n");
     }
 
     #[test]
     fn mixed_whitespace_and_newlines_are_one_trivia_item() {
         // A run of spaces then a newline then spaces is one contiguous whitespace item.
-        let r = lex("a  \n  b").unwrap();
+        let input = "a  \n  b";
+        let r = lex(input).unwrap();
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
-        assert_eq!(ws[0].text, "  \n  ");
+        assert_eq!(trivia_text(input, ws[0]), "  \n  ");
     }
 
     #[test]
@@ -1408,7 +1416,9 @@ mod tests {
         // Interleave trivia and tokens in source order by span byte offset.
         let mut all: Vec<(usize, &str)> = Vec::new();
         for tri in &r.trivia {
-            all.push((tri.span.start.byte(), &tri.text));
+            let start = tri.span.start.byte();
+            let end = tri.span.end.byte();
+            all.push((start, &input[start..end]));
         }
         for tok in &r.tokens {
             if !matches!(tok.kind, TokenKind::Eof) {

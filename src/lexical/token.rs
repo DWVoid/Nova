@@ -9,8 +9,6 @@ use std::fmt;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Trivia {
     pub kind: TriviaKind,
-    /// The verbatim source text covered by this trivia item.
-    pub text: String,
     pub span: Span,
 }
 

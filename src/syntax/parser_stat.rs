@@ -1,4 +1,4 @@
-use super::{BlockEnd, ParseError, Parser};
+use super::parser::{BlockEnd, ParseError, Parser};
 use crate::syntax::ast::{Block, IfClause, Name, PrefixExpKind, RetStat, Stat, StatKind};
 use crate::lexical::{Keyword, Span, Symbol, TokenKind};
 

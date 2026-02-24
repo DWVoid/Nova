@@ -1,11 +1,3 @@
-mod expr;
-mod helpers;
-mod prefix;
-mod stat;
-mod decl;
-#[cfg(test)]
-mod tests;
-
 use crate::syntax::ast::{Chunk, NamespaceDecl, TopItem, Trivia, UseDecl};
 use crate::lexical::{Keyword, Position, Symbol, Token, TokenKind, Trivia as LexTrivia};
 
@@ -16,9 +8,9 @@ pub struct ParseError {
 }
 
 pub struct Parser {
-    tokens: Vec<Token>,
-    index: usize,
-    trivia: Trivia,
+    pub(crate) tokens: Vec<Token>,
+    pub(crate) index: usize,
+    pub(crate) trivia: Trivia,
 }
 
 impl Parser {

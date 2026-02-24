@@ -1,4 +1,4 @@
-use super::{ParseError, Parser};
+use super::parser::{ParseError, Parser};
 use crate::syntax::ast::{FunctionCall, PrefixExp, PrefixExpKind, Var, VarDeclKind, VarKind};
 use crate::lexical::{Keyword, Symbol, TokenKind};
 

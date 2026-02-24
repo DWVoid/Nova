@@ -1,4 +1,4 @@
-use super::{Assoc, BlockEnd, ParseError, Parser};
+use super::parser::{Assoc, BlockEnd, ParseError, Parser};
 use crate::syntax::ast::{Args, ArgsKind, Exp, ExpKind, Field, FieldKey, Initializer, LambdaExpr};
 use crate::lexical::{Keyword, Span, Symbol, TokenKind};
 

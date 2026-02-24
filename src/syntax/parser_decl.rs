@@ -1,4 +1,4 @@
-use super::{ParseError, Parser};
+use super::parser::{ParseError, Parser};
 use crate::syntax::ast::{
     Decorator, DefExpr, Definition, EnumDef, EnumMember, FieldDecl, Implementation, Name, Param,
     StructDef, TraitDef, TraitSig, TypeName, TypeSpec, UseDecl, UseItem, UseTail, VariantDef,

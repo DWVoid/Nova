@@ -1,30 +1,24 @@
-use super::{Assoc, BlockEnd, ParseError, Parser};
+use super::parser::{Assoc, BlockEnd, ParseError, Parser};
 use crate::lexical::{Keyword, Symbol, Token, TokenKind};
-
 impl Parser {
     pub(crate) fn advance(&mut self) -> Token {
         let token = self.current().clone();
         self.index += 1;
         token
     }
-
     pub(crate) fn checkpoint(&self) -> usize {
         self.index
     }
-
     pub(crate) fn restore(&mut self, checkpoint: usize) {
         self.index = checkpoint;
     }
-
     pub(crate) fn peek(&self, offset: usize) -> &Token {
         let idx = (self.index + offset).min(self.tokens.len() - 1);
         &self.tokens[idx]
     }
-
     pub(crate) fn peek_is_symbol(&self, offset: usize, symbol: Symbol) -> bool {
         matches!(self.peek(offset).kind, TokenKind::Symbol(s) if s == symbol)
     }
-
     pub(crate) fn expect_symbol(&mut self, symbol: Symbol) -> Result<Token, ParseError> {
         let token = self.current().clone();
         if matches!(token.kind, TokenKind::Symbol(s) if s == symbol) {
@@ -36,19 +30,15 @@ impl Parser {
             position: token.span.start,
         })
     }
-
     pub(crate) fn current(&self) -> &Token {
         &self.tokens[self.index]
     }
-
     pub(crate) fn is_keyword(&self, keyword: Keyword) -> bool {
         matches!(self.current().kind, TokenKind::Keyword(k) if k == keyword)
     }
-
     pub(crate) fn is_symbol(&self, symbol: Symbol) -> bool {
         matches!(self.current().kind, TokenKind::Symbol(s) if s == symbol)
     }
-
     pub(crate) fn is_block_end(&self, end: BlockEnd) -> bool {
         if matches!(self.current().kind, TokenKind::Eof) {
             return true;
@@ -64,7 +54,6 @@ impl Parser {
             ),
         }
     }
-
     pub(crate) fn expect_keyword(&mut self, keyword: Keyword) -> Result<Token, ParseError> {
         let token = self.current().clone();
         if matches!(token.kind, TokenKind::Keyword(k) if k == keyword) {
@@ -76,7 +65,6 @@ impl Parser {
             position: token.span.start,
         })
     }
-
     pub(crate) fn expect_eof(&mut self) -> Result<Token, ParseError> {
         let token = self.current().clone();
         if matches!(token.kind, TokenKind::Eof) {
@@ -88,7 +76,6 @@ impl Parser {
             position: token.span.start,
         })
     }
-
     pub(crate) fn peek_unop(&self) -> Option<crate::syntax::ast::UnOp> {
         match self.current().kind {
             TokenKind::Keyword(Keyword::Not) => Some(crate::syntax::ast::UnOp::Not),
@@ -98,7 +85,6 @@ impl Parser {
             _ => None,
         }
     }
-
     pub(crate) fn peek_binop(&self) -> Option<(crate::syntax::ast::BinOp, u8, Assoc)> {
         match self.current().kind {
             TokenKind::Keyword(Keyword::Or) => Some((crate::syntax::ast::BinOp::Or, 1, Assoc::Left)),
@@ -127,7 +113,6 @@ impl Parser {
             _ => None,
         }
     }
-
     pub(crate) fn binop_from_symbol(&self) -> Option<crate::syntax::ast::BinOp> {
         match self.current().kind {
             TokenKind::Symbol(Symbol::Less) => Some(crate::syntax::ast::BinOp::Less),

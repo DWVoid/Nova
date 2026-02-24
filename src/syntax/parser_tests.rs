@@ -1,4 +1,4 @@
-use super::Parser;
+use super::parser::Parser;
 use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, StatKind, TopItem, VarKind};
 use crate::lexical::lex;
 

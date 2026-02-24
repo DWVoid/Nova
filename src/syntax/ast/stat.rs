@@ -1,205 +1,96 @@
 use serde::Serialize;
-use crate::lexical::Span;
+use crate::lexical::{Keyword, Symbol, TokenKind};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
-use crate::lexical::{Keyword, Symbol, TokenKind};
-use super::block::Block;
-use super::exp::Exp;
-use super::function_call::FunctionCall;
-use super::if_clause::IfClause;
-use super::name::Name;
+use super::stat_assign::StatAssign;
+use super::stat_call::StatCall;
+use super::stat_do::StatDo;
+use super::stat_empty::StatEmpty;
+use super::stat_for::{StatForGeneric, StatForNumeric};
+use super::stat_if::StatIf;
+use super::stat_jump::{StatBreak, StatContinue};
+use super::stat_label::{StatGoto, StatLabel, is_label_start};
+use super::stat_repeat::StatRepeat;
+use super::stat_while::StatWhile;
 use super::prefix_exp::{PrefixExp, PrefixExpKind};
-use super::var::Var;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub enum StatKind {
-    Empty,
-    Assign { vars: Vec<Var>, exprs: Vec<Exp> },
-    Do { block: Block },
-    While { cond: Exp, block: Block },
-    Repeat { block: Block, cond: Exp },
-    If { clauses: Vec<IfClause>, else_block: Option<Block> },
-    ForNumeric {
-        name: Name,
-        start: Exp,
-        end: Exp,
-        step: Option<Exp>,
-        block: Block,
-    },
-    ForGeneric { names: Vec<Name>, exprs: Vec<Exp>, block: Block },
-    Break,
-    Continue,
-    Goto { label: Name },
-    Label { label: Name },
-    Call { call: FunctionCall },
+pub enum Stat {
+    Empty(StatEmpty),
+    Do(StatDo),
+    While(StatWhile),
+    Repeat(StatRepeat),
+    If(StatIf),
+    ForNumeric(StatForNumeric),
+    ForGeneric(StatForGeneric),
+    Break(StatBreak),
+    Continue(StatContinue),
+    Goto(StatGoto),
+    Label(StatLabel),
+    Call(StatCall),
+    Assign(StatAssign),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Stat {
-    pub span: Span,
-    pub kind: StatKind,
+impl Stat {
+    pub fn span(&self) -> crate::lexical::Span {
+        match self {
+            Stat::Empty(s) => s.span,
+            Stat::Do(s) => s.span,
+            Stat::While(s) => s.span,
+            Stat::Repeat(s) => s.span,
+            Stat::If(s) => s.span,
+            Stat::ForNumeric(s) => s.span,
+            Stat::ForGeneric(s) => s.span,
+            Stat::Break(s) => s.span,
+            Stat::Continue(s) => s.span,
+            Stat::Goto(s) => s.span,
+            Stat::Label(s) => s.span,
+            Stat::Call(s) => s.span,
+            Stat::Assign(s) => s.span,
+        }
+    }
 }
 
 impl Parsable for Stat {
     fn parse(p: &mut Parser) -> Result<Self, ParseError> {
-        // Empty statement
         if p.is_symbol(Symbol::Semi) {
-            let token = p.advance();
-            return Ok(Stat { span: token.span, kind: StatKind::Empty });
+            return Ok(Stat::Empty(StatEmpty::parse(p)?));
         }
-        // do … end
         if p.is_keyword(Keyword::Do) {
-            let token = p.expect_keyword(Keyword::Do)?;
-            let block = Block::parse(p)?;
-            let end = p.expect_keyword(Keyword::End)?;
-            return Ok(Stat {
-                span: token.span.merge(end.span),
-                kind: StatKind::Do { block },
-            });
+            return Ok(Stat::Do(StatDo::parse(p)?));
         }
-        // while … do … end
         if p.is_keyword(Keyword::While) {
-            let token = p.expect_keyword(Keyword::While)?;
-            let cond = Exp::parse(p)?;
-            p.expect_keyword(Keyword::Do)?;
-            let block = Block::parse(p)?;
-            let end = p.expect_keyword(Keyword::End)?;
-            return Ok(Stat {
-                span: token.span.merge(end.span),
-                kind: StatKind::While { cond, block },
-            });
+            return Ok(Stat::While(StatWhile::parse(p)?));
         }
-        // repeat … until …
         if p.is_keyword(Keyword::Repeat) {
-            let token = p.expect_keyword(Keyword::Repeat)?;
-            let block = Block::parse(p)?;
-            p.expect_keyword(Keyword::Until)?;
-            let cond = Exp::parse(p)?;
-            return Ok(Stat {
-                span: token.span.merge(cond.span),
-                kind: StatKind::Repeat { block, cond },
-            });
+            return Ok(Stat::Repeat(StatRepeat::parse(p)?));
         }
-        // if … then … [elseif …] [else …] end
         if p.is_keyword(Keyword::If) {
-            let token = p.expect_keyword(Keyword::If)?;
-            let cond = Exp::parse(p)?;
-            p.expect_keyword(Keyword::Then)?;
-            let block = Block::parse(p)?;
-            let mut clauses = vec![IfClause {
-                span: token.span.merge(block.span),
-                cond,
-                block,
-            }];
-            while p.is_keyword(Keyword::ElseIf) {
-                let elseif = p.expect_keyword(Keyword::ElseIf)?;
-                let cond = Exp::parse(p)?;
-                p.expect_keyword(Keyword::Then)?;
-                let block = Block::parse(p)?;
-                clauses.push(IfClause {
-                    span: elseif.span.merge(block.span),
-                    cond,
-                    block,
-                });
-            }
-            let else_block = if p.is_keyword(Keyword::Else) {
-                p.expect_keyword(Keyword::Else)?;
-                Some(Block::parse(p)?)
-            } else {
-                None
-            };
-            let end = p.expect_keyword(Keyword::End)?;
-            return Ok(Stat {
-                span: token.span.merge(end.span),
-                kind: StatKind::If { clauses, else_block },
-            });
+            return Ok(Stat::If(StatIf::parse(p)?));
         }
-        // for (numeric or generic)
         if p.is_keyword(Keyword::For) {
-            let token = p.expect_keyword(Keyword::For)?;
-            let name = Name::parse(p)?;
-            if p.is_symbol(Symbol::Assign) {
-                p.advance();
-                let start = Exp::parse(p)?;
-                p.expect_symbol(Symbol::Comma)?;
-                let end = Exp::parse(p)?;
-                let step = if p.is_symbol(Symbol::Comma) {
-                    p.advance();
-                    Some(Exp::parse(p)?)
-                } else {
-                    None
-                };
-                p.expect_keyword(Keyword::Do)?;
-                let block = Block::parse(p)?;
-                let end_kw = p.expect_keyword(Keyword::End)?;
-                return Ok(Stat {
-                    span: token.span.merge(end_kw.span),
-                    kind: StatKind::ForNumeric { name, start, end, step, block },
-                });
-            }
-            let mut names = vec![name];
-            while p.is_symbol(Symbol::Comma) {
-                p.advance();
-                names.push(Name::parse(p)?);
-            }
-            p.expect_keyword(Keyword::In)?;
-            let exprs = p.parse_exp_list()?;
-            p.expect_keyword(Keyword::Do)?;
-            let block = Block::parse(p)?;
-            let end_kw = p.expect_keyword(Keyword::End)?;
-            return Ok(Stat {
-                span: token.span.merge(end_kw.span),
-                kind: StatKind::ForGeneric { names, exprs, block },
+            // Peek: `for name =` → numeric; otherwise generic
+            return Ok(if is_numeric_for(p) {
+                Stat::ForNumeric(StatForNumeric::parse(p)?)
+            } else {
+                Stat::ForGeneric(StatForGeneric::parse(p)?)
             });
         }
-        // break / continue / goto / label
         if p.is_keyword(Keyword::Break) {
-            let token = p.expect_keyword(Keyword::Break)?;
-            return Ok(Stat { span: token.span, kind: StatKind::Break });
+            return Ok(Stat::Break(StatBreak::parse(p)?));
         }
         if p.is_keyword(Keyword::Continue) {
-            let token = p.expect_keyword(Keyword::Continue)?;
-            return Ok(Stat { span: token.span, kind: StatKind::Continue });
+            return Ok(Stat::Continue(StatContinue::parse(p)?));
         }
         if p.is_keyword(Keyword::Goto) {
-            let token = p.expect_keyword(Keyword::Goto)?;
-            let label = Name::parse(p)?;
-            return Ok(Stat {
-                span: token.span.merge(label.span),
-                kind: StatKind::Goto { label },
-            });
+            return Ok(Stat::Goto(StatGoto::parse(p)?));
         }
-        // ::label::
-        if matches!(p.current().kind, TokenKind::Symbol(Symbol::Colon))
-            && matches!(p.peek(1).kind, TokenKind::Symbol(Symbol::Colon))
-        {
-            let start = p.expect_symbol(Symbol::Colon)?;
-            p.expect_symbol(Symbol::Colon)?;
-            let label = Name::parse(p)?;
-            p.expect_symbol(Symbol::Colon)?;
-            let end = p.expect_symbol(Symbol::Colon)?;
-            return Ok(Stat {
-                span: start.span.merge(end.span),
-                kind: StatKind::Label { label },
-            });
+        if is_label_start(p) {
+            return Ok(Stat::Label(StatLabel::parse(p)?));
         }
-        // assignment or call
+        // assignment or call — parse prefix expression first
         let prefix = PrefixExp::parse(p)?;
         match &prefix.kind {
-            PrefixExpKind::Call(call) => {
-                if p.is_symbol(Symbol::Assign) || p.is_symbol(Symbol::Comma) {
-                    return Err(ParseError {
-                        message: "function call cannot be assignment target; use a variable or field"
-                            .to_string(),
-                        position: prefix.span.start,
-                    });
-                }
-                return Ok(Stat {
-                    span: prefix.span,
-                    kind: StatKind::Call { call: call.clone() },
-                });
-            }
-            PrefixExpKind::Var(_) => {}
             PrefixExpKind::Paren(_) => {
                 return Err(ParseError {
                     message: "parenthesized expression cannot start a statement; expected assignment or call"
@@ -207,22 +98,33 @@ impl Parsable for Stat {
                     position: prefix.span.start,
                 });
             }
+            PrefixExpKind::Call(_) => {
+                if p.is_symbol(Symbol::Assign) || p.is_symbol(Symbol::Comma) {
+                    return Err(ParseError {
+                        message: "function call cannot be assignment target; use a variable or field"
+                            .to_string(),
+                        position: prefix.span.start,
+                    });
+                }
+                match prefix.kind {
+                    PrefixExpKind::Call(call) => {
+                        return Ok(Stat::Call(StatCall { span: prefix.span, call }));
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            PrefixExpKind::Var(_) => {}
         }
+        // Must be assignment
         if !p.is_symbol(Symbol::Assign) && !p.is_symbol(Symbol::Comma) {
             return Err(ParseError {
-                message: "expected assignment '=' or ',' after variable list".to_string(),
+                message: "expected assignment '=' or ',' after variable".to_string(),
                 position: prefix.span.start,
             });
         }
         let first_var = match prefix.kind {
             PrefixExpKind::Var(var) => var,
-            _ => {
-                return Err(ParseError {
-                    message: "invalid assignment target; expected variable, field, or index"
-                        .to_string(),
-                    position: prefix.span.start,
-                });
-            }
+            _ => unreachable!(),
         };
         let mut vars = vec![first_var];
         while p.is_symbol(Symbol::Comma) {
@@ -242,9 +144,13 @@ impl Parsable for Stat {
         let eq = p.expect_symbol(Symbol::Assign)?;
         let exprs = p.parse_exp_list()?;
         let end_span = exprs.last().map(|e| e.span).unwrap_or(eq.span);
-        Ok(Stat {
-            span: vars.last().map(|v| v.span.merge(end_span)).unwrap_or(end_span),
-            kind: StatKind::Assign { vars, exprs },
-        })
+        let span = vars.last().map(|v| v.span.merge(end_span)).unwrap_or(end_span);
+        Ok(Stat::Assign(StatAssign { span, vars, exprs }))
     }
+}
+
+/// Returns true if `for` is followed by `name =` (numeric for), false for generic.
+fn is_numeric_for(p: &Parser) -> bool {
+    // token stream at current position: for(0) name(1) =(2)
+    matches!(p.peek(2).kind, TokenKind::Symbol(Symbol::Assign))
 }

@@ -18,6 +18,16 @@ mod param;
 mod prefix_exp;
 mod ret_stat;
 mod stat;
+mod stat_assign;
+mod stat_call;
+mod stat_do;
+mod stat_empty;
+mod stat_for;
+mod stat_if;
+mod stat_jump;
+mod stat_label;
+mod stat_repeat;
+mod stat_while;
 mod top;
 mod type_spec;
 mod var;
@@ -40,7 +50,17 @@ pub use ops::{BinOp, UnOp};
 pub use param::Param;
 pub use prefix_exp::{PrefixExp, PrefixExpKind};
 pub use ret_stat::RetStat;
-pub use stat::{Stat, StatKind};
+pub use stat::Stat;
+pub use stat_assign::StatAssign;
+pub use stat_call::StatCall;
+pub use stat_do::StatDo;
+pub use stat_empty::StatEmpty;
+pub use stat_for::{StatForGeneric, StatForNumeric};
+pub use stat_if::StatIf;
+pub use stat_jump::{StatBreak, StatContinue};
+pub use stat_label::{StatGoto, StatLabel};
+pub use stat_repeat::StatRepeat;
+pub use stat_while::StatWhile;
 pub use top::{
     Chunk, Decorator, DefExpr, Definition, Implementation, NamespaceDecl, TopItem, UseDecl,
     UseItem, UseTail, Visibility,

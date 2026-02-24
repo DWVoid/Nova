@@ -32,7 +32,7 @@ impl Parsable for Block {
                 break;
             }
             let stat = Stat::parse(p)?;
-            end_pos = stat.span.end;
+            end_pos = stat.span().end;
             stats.push(stat);
         }
 

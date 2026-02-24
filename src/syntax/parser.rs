@@ -1,6 +1,6 @@
-use crate::syntax::ast::{Chunk, TopItem, Trivia, UseDecl, NamespaceDecl};
-use crate::lexical::{Keyword, Position, Token, TokenKind, Trivia as LexTrivia};
 use super::parsable::Parsable;
+use crate::lexical::{Keyword, Position, Token, TokenKind, Trivia as LexTrivia};
+use crate::syntax::ast::{Chunk, NamespaceDecl, TopItem, Trivia, UseDecl};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseError {
@@ -16,7 +16,11 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>, trivia: Vec<LexTrivia>) -> Self {
-        Self { tokens, index: 0, trivia }
+        Self {
+            tokens,
+            index: 0,
+            trivia,
+        }
     }
 
     pub fn parse_chunk(mut self) -> Result<Chunk, ParseError> {
@@ -46,7 +50,13 @@ impl Parser {
         } else {
             namespace.span.merge(eof.span)
         };
-        Ok(Chunk { span, trivia, uses, namespace, items })
+        Ok(Chunk {
+            span,
+            trivia,
+            uses,
+            namespace,
+            items,
+        })
     }
 }
 

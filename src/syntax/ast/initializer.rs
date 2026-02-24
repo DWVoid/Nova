@@ -1,9 +1,9 @@
-use serde::Serialize;
+use super::field::Field;
 use crate::lexical::Span;
+use crate::lexical::Symbol;
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
-use crate::lexical::Symbol;
-use super::field::Field;
+use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Initializer {
@@ -26,5 +26,44 @@ impl Parsable for Initializer {
         let close = p.expect_symbol(Symbol::RBrace)?;
         let span = open.span.merge(close.span);
         Ok(Initializer { span, fields })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexical::lex;
+    use crate::syntax::parser::Parser;
+
+    fn parser(src: &str) -> Parser {
+        let r = lex(src).unwrap();
+        Parser::new(r.tokens, r.trivia)
+    }
+
+    #[test]
+    fn parses_empty_initializer() {
+        let mut p = parser("{}");
+        let init = Initializer::parse(&mut p).unwrap();
+        assert!(init.fields.is_empty());
+    }
+
+    #[test]
+    fn parses_fields_with_trailing_comma() {
+        let mut p = parser("{1, 2,}");
+        let init = Initializer::parse(&mut p).unwrap();
+        assert_eq!(init.fields.len(), 2);
+    }
+
+    #[test]
+    fn parses_fields_without_trailing_comma() {
+        let mut p = parser("{1, 2}");
+        let init = Initializer::parse(&mut p).unwrap();
+        assert_eq!(init.fields.len(), 2);
+    }
+
+    #[test]
+    fn rejects_missing_brace() {
+        let mut p = parser("1, 2}");
+        assert!(Initializer::parse(&mut p).is_err());
     }
 }

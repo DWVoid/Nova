@@ -1,10 +1,12 @@
 use super::parser::Parser;
-use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, Stat, TopItem, VarDeclKind};
 use crate::lexical::lex;
+use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, Stat, TopItem};
 
 fn parse_chunk(input: &str) -> Chunk {
     let lex_result = lex(input).unwrap();
-    Parser::new(lex_result.tokens, lex_result.trivia).parse_chunk().unwrap()
+    Parser::new(lex_result.tokens, lex_result.trivia)
+        .parse_chunk()
+        .unwrap()
 }
 
 #[test]
@@ -90,8 +92,12 @@ fn parses_assign_with_var_decl() {
         TopItem::Definition(def) => def,
         _ => panic!("expected definition"),
     };
-    let DefExpr::Exp(exp) = &def.expr else { panic!("expected exp"); };
-    let ExpKind::Lambda(lambda) = &exp.kind else { panic!("expected lambda"); };
+    let DefExpr::Exp(exp) = &def.expr else {
+        panic!("expected exp");
+    };
+    let ExpKind::Lambda(lambda) = &exp.kind else {
+        panic!("expected lambda");
+    };
     let stat = &lambda.block.stats[0];
     match stat {
         Stat::Assign(s) => match &s.vars[0].kind {
@@ -116,8 +122,12 @@ fn parses_invoke_and_method_call() {
         TopItem::Definition(def) => def,
         _ => panic!("expected definition"),
     };
-    let DefExpr::Exp(exp) = &def.expr else { panic!("expected exp"); };
-    let ExpKind::Lambda(lambda) = &exp.kind else { panic!("expected lambda"); };
+    let DefExpr::Exp(exp) = &def.expr else {
+        panic!("expected exp");
+    };
+    let ExpKind::Lambda(lambda) = &exp.kind else {
+        panic!("expected lambda");
+    };
     assert_eq!(lambda.block.stats.len(), 2);
     match &lambda.block.stats[0] {
         Stat::Call(s) => match &s.call.kind {
@@ -149,8 +159,12 @@ fn parses_control_flow_and_continue() {
         TopItem::Definition(def) => def,
         _ => panic!("expected definition"),
     };
-    let DefExpr::Exp(exp) = &def.expr else { panic!("expected exp"); };
-    let ExpKind::Lambda(lambda) = &exp.kind else { panic!("expected lambda"); };
+    let DefExpr::Exp(exp) = &def.expr else {
+        panic!("expected exp");
+    };
+    let ExpKind::Lambda(lambda) = &exp.kind else {
+        panic!("expected lambda");
+    };
     assert!(lambda.block.ret.is_some());
 }
 
@@ -162,8 +176,15 @@ fn collects_comments_at_chunk_level() {
         -- trailing
     "#;
     let chunk = parse_chunk(src);
-    let comment_count = chunk.trivia.iter().filter(|t| {
-        matches!(t.kind, crate::lexical::TriviaKind::LineComment | crate::lexical::TriviaKind::BlockComment)
-    }).count();
+    let comment_count = chunk
+        .trivia
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.kind,
+                crate::lexical::TriviaKind::LineComment | crate::lexical::TriviaKind::BlockComment
+            )
+        })
+        .count();
     assert_eq!(comment_count, 2);
 }

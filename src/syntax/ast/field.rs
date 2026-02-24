@@ -1,10 +1,10 @@
-use serde::Serialize;
-use crate::lexical::Span;
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
-use crate::lexical::Symbol;
 use super::exp::Exp;
 use super::name::Name;
+use crate::lexical::Span;
+use crate::lexical::Symbol;
+use crate::syntax::parsable::Parsable;
+use crate::syntax::parser::{ParseError, Parser};
+use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum FieldKey {
@@ -54,5 +54,45 @@ impl Parsable for Field {
             key: None,
             value,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexical::lex;
+    use crate::syntax::parser::Parser;
+
+    fn parser(src: &str) -> Parser {
+        let r = lex(src).unwrap();
+        Parser::new(r.tokens, r.trivia)
+    }
+
+    #[test]
+    fn parses_positional_field() {
+        let mut p = parser("42");
+        let f = Field::parse(&mut p).unwrap();
+        assert!(f.key.is_none());
+    }
+
+    #[test]
+    fn parses_name_key_field() {
+        let mut p = parser("x = 1");
+        let f = Field::parse(&mut p).unwrap();
+        assert!(matches!(f.key, Some(FieldKey::Name(_))));
+    }
+
+    #[test]
+    fn parses_exp_key_field() {
+        let mut p = parser("[0] = 1");
+        let f = Field::parse(&mut p).unwrap();
+        assert!(matches!(f.key, Some(FieldKey::Exp(_))));
+    }
+
+    #[test]
+    fn exp_key_rejects_missing_bracket() {
+        // `[0 = 1` — missing closing bracket
+        let mut p = parser("[0 = 1");
+        assert!(Field::parse(&mut p).is_err());
     }
 }

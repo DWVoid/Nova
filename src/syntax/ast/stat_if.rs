@@ -1,9 +1,9 @@
-use serde::Serialize;
+use super::block::Block;
+use super::exp::Exp;
 use crate::lexical::{Keyword, Span};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
-use super::block::Block;
-use super::exp::Exp;
+use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct IfClause {
@@ -48,6 +48,52 @@ impl Parsable for StatIf {
             None
         };
         let end = p.expect_keyword(Keyword::End)?;
-        Ok(StatIf { span: token.span.merge(end.span), clauses, else_block })
+        Ok(StatIf {
+            span: token.span.merge(end.span),
+            clauses,
+            else_block,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexical::lex;
+    use crate::syntax::parser::Parser;
+
+    fn parser(src: &str) -> Parser {
+        let r = lex(src).unwrap();
+        Parser::new(r.tokens, r.trivia)
+    }
+
+    #[test]
+    fn parses_if_only() {
+        let s = StatIf::parse(&mut parser("if true then end")).unwrap();
+        assert_eq!(s.clauses.len(), 1);
+        assert!(s.else_block.is_none());
+    }
+
+    #[test]
+    fn parses_if_else() {
+        let s = StatIf::parse(&mut parser("if true then else end")).unwrap();
+        assert!(s.else_block.is_some());
+    }
+
+    #[test]
+    fn parses_if_elseif_else() {
+        let s = StatIf::parse(&mut parser("if true then elseif false then else end")).unwrap();
+        assert_eq!(s.clauses.len(), 2);
+        assert!(s.else_block.is_some());
+    }
+
+    #[test]
+    fn rejects_missing_then() {
+        assert!(StatIf::parse(&mut parser("if true end")).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_end() {
+        assert!(StatIf::parse(&mut parser("if true then")).is_err());
     }
 }

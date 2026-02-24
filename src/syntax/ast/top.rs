@@ -1,13 +1,13 @@
-use serde::Serialize;
-use crate::lexical::Span;
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
-use crate::lexical::{Keyword, Symbol};
 use super::defs::{EnumDef, StructDef, TraitDef, VariantDef};
 use super::exp::Exp;
 use super::name::Name;
 use super::param::Param;
 use super::type_spec::{TypeName, TypeSpec};
+use crate::lexical::Span;
+use crate::lexical::{Keyword, Symbol};
+use crate::syntax::parsable::Parsable;
+use crate::syntax::parser::{ParseError, Parser};
+use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Visibility {
@@ -33,7 +33,10 @@ impl Parsable for Visibility {
         } else {
             None
         };
-        Ok(Visibility { span: token.span, scopes })
+        Ok(Visibility {
+            span: token.span,
+            scopes,
+        })
     }
 }
 
@@ -128,7 +131,14 @@ impl Parsable for Definition {
             let semi = p.advance();
             span = span.merge(semi.span);
         }
-        Ok(Definition { span, decorators, visibility, name, type_spec, expr })
+        Ok(Definition {
+            span,
+            decorators,
+            visibility,
+            name,
+            type_spec,
+            expr,
+        })
     }
 }
 
@@ -156,7 +166,12 @@ impl Parsable for Implementation {
         }
         let end = p.expect_keyword(Keyword::End)?;
         let span = start.span.merge(end.span);
-        Ok(Implementation { span, trait_type, target, items })
+        Ok(Implementation {
+            span,
+            trait_type,
+            target,
+            items,
+        })
     }
 }
 
@@ -259,9 +274,7 @@ impl TopItem {
 
 impl Parsable for TopItem {
     fn parse(p: &mut Parser) -> Result<Self, ParseError> {
-        if p.is_keyword(Keyword::Define)
-            || p.is_symbol(Symbol::At)
-            || p.is_keyword(Keyword::Export)
+        if p.is_keyword(Keyword::Define) || p.is_symbol(Symbol::At) || p.is_keyword(Keyword::Export)
         {
             return Ok(TopItem::Definition(Definition::parse(p)?));
         }
@@ -328,5 +341,165 @@ impl Parser {
             exprs.push(Exp::parse(self)?);
         }
         Ok(exprs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexical::lex;
+    use crate::syntax::parser::Parser;
+
+    fn parser(src: &str) -> Parser {
+        let r = lex(src).unwrap();
+        Parser::new(r.tokens, r.trivia)
+    }
+
+    // ── Visibility ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_bare_export() {
+        let v = Visibility::parse(&mut parser("export")).unwrap();
+        assert!(v.scopes.is_none());
+    }
+    #[test]
+    fn parses_export_with_scopes() {
+        let v = Visibility::parse(&mut parser("export(a, b)")).unwrap();
+        assert_eq!(v.scopes.unwrap().len(), 2);
+    }
+    #[test]
+    fn visibility_rejects_non_export() {
+        assert!(Visibility::parse(&mut parser("define")).is_err());
+    }
+
+    // ── Decorator ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_decorator_no_args() {
+        let d = Decorator::parse(&mut parser("@inline")).unwrap();
+        assert_eq!(d.name.value, "inline");
+        assert!(d.args.is_none());
+    }
+    #[test]
+    fn parses_decorator_with_args() {
+        let d = Decorator::parse(&mut parser("@attr(1, 2)")).unwrap();
+        assert_eq!(d.args.unwrap().len(), 2);
+    }
+    #[test]
+    fn parses_decorator_empty_args() {
+        let d = Decorator::parse(&mut parser("@attr()")).unwrap();
+        assert_eq!(d.args.unwrap().len(), 0);
+    }
+    #[test]
+    fn decorator_rejects_missing_at() {
+        assert!(Decorator::parse(&mut parser("inline")).is_err());
+    }
+
+    // ── UseDecl ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_simple_use() {
+        let u = UseDecl::parse(&mut parser("use Foo;")).unwrap();
+        assert_eq!(u.path.len(), 1);
+        assert!(u.tail.is_none());
+    }
+    #[test]
+    fn parses_use_with_alias() {
+        let u = UseDecl::parse(&mut parser("use Foo as F;")).unwrap();
+        assert!(matches!(u.tail, Some(UseTail::Alias(_))));
+    }
+    #[test]
+    fn parses_use_with_selector() {
+        let u = UseDecl::parse(&mut parser("use Foo.{A, B};")).unwrap();
+        assert!(matches!(&u.tail, Some(UseTail::Selector(v)) if v.len() == 2));
+    }
+    #[test]
+    fn use_rejects_missing_semi() {
+        assert!(UseDecl::parse(&mut parser("use Foo")).is_err());
+    }
+
+    // ── NamespaceDecl ─────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_namespace() {
+        let n = NamespaceDecl::parse(&mut parser("namespace Foo.Bar;")).unwrap();
+        assert_eq!(n.path.len(), 2);
+    }
+    #[test]
+    fn namespace_rejects_missing_semi() {
+        assert!(NamespaceDecl::parse(&mut parser("namespace Foo")).is_err());
+    }
+
+    // ── Definition ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_simple_definition() {
+        let d = Definition::parse(&mut parser("define x 42")).unwrap();
+        assert_eq!(d.name.value, "x");
+        assert!(d.visibility.is_none());
+        assert!(d.decorators.is_empty());
+        assert!(matches!(d.expr, DefExpr::Exp(_)));
+    }
+    #[test]
+    fn parses_exported_definition() {
+        let d = Definition::parse(&mut parser("export define x 0")).unwrap();
+        assert!(d.visibility.is_some());
+    }
+    #[test]
+    fn parses_decorated_definition() {
+        let d = Definition::parse(&mut parser("@inline define x 0")).unwrap();
+        assert_eq!(d.decorators.len(), 1);
+    }
+    #[test]
+    fn parses_struct_definition() {
+        let d = Definition::parse(&mut parser("define Point struct x: int y: int end")).unwrap();
+        assert!(matches!(d.expr, DefExpr::Struct(_)));
+    }
+    #[test]
+    fn definition_rejects_missing_name() {
+        assert!(Definition::parse(&mut parser("define 42")).is_err());
+    }
+
+    // ── Implementation ────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_impl_for_type() {
+        let i = Implementation::parse(&mut parser("implement for Foo end")).unwrap();
+        assert!(i.trait_type.is_none());
+        assert_eq!(i.target.parts[0].value, "Foo");
+    }
+    #[test]
+    fn parses_trait_impl() {
+        let i = Implementation::parse(&mut parser("implement Bar for Foo end")).unwrap();
+        assert!(i.trait_type.is_some());
+    }
+    #[test]
+    fn impl_rejects_missing_for() {
+        assert!(Implementation::parse(&mut parser("implement Foo end")).is_err());
+    }
+    #[test]
+    fn impl_rejects_missing_end() {
+        assert!(Implementation::parse(&mut parser("implement for Foo")).is_err());
+    }
+
+    // ── TopItem ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn top_item_definition() {
+        assert!(matches!(
+            TopItem::parse(&mut parser("define x 0")).unwrap(),
+            TopItem::Definition(_)
+        ));
+    }
+    #[test]
+    fn top_item_implementation() {
+        assert!(matches!(
+            TopItem::parse(&mut parser("implement for Foo end")).unwrap(),
+            TopItem::Implementation(_)
+        ));
+    }
+    #[test]
+    fn top_item_rejects_other() {
+        assert!(TopItem::parse(&mut parser("namespace Foo;")).is_err());
     }
 }

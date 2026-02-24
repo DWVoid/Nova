@@ -1,11 +1,11 @@
-use serde::Serialize;
-use crate::lexical::Span;
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
-use crate::lexical::{Keyword, Symbol};
 use super::exp::Exp;
 use super::name::Name;
 use super::type_spec::TypeSpec;
+use crate::lexical::Span;
+use crate::lexical::{Keyword, Symbol};
+use crate::syntax::parsable::Parsable;
+use crate::syntax::parser::{ParseError, Parser};
+use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct FieldDecl {
@@ -19,7 +19,11 @@ impl Parsable for FieldDecl {
         let name = Name::parse(p)?;
         let type_spec = TypeSpec::parse(p)?;
         let span = name.span.merge(type_spec.span);
-        Ok(FieldDecl { span, name, type_spec })
+        Ok(FieldDecl {
+            span,
+            name,
+            type_spec,
+        })
     }
 }
 
@@ -90,7 +94,11 @@ impl Parsable for EnumDef {
         }
         let end = p.expect_keyword(Keyword::End)?;
         let span = start.span.merge(end.span);
-        Ok(EnumDef { span, type_spec, members })
+        Ok(EnumDef {
+            span,
+            type_spec,
+            members,
+        })
     }
 }
 
@@ -106,7 +114,11 @@ impl Parsable for VariantMember {
         let name = Name::parse(p)?;
         let type_spec = TypeSpec::parse(p)?;
         let span = name.span.merge(type_spec.span);
-        Ok(VariantMember { span, name, type_spec })
+        Ok(VariantMember {
+            span,
+            name,
+            type_spec,
+        })
     }
 }
 
@@ -150,7 +162,12 @@ impl Parsable for TraitSig {
         let params = p.parse_param_list()?;
         let return_type = TypeSpec::parse(p)?;
         let span = name.span.merge(return_type.span);
-        Ok(TraitSig { span, name, params, return_type })
+        Ok(TraitSig {
+            span,
+            name,
+            params,
+            return_type,
+        })
     }
 }
 
@@ -177,5 +194,88 @@ impl Parsable for TraitDef {
         let end = p.expect_keyword(Keyword::End)?;
         let span = start.span.merge(end.span);
         Ok(TraitDef { span, sigs })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexical::lex;
+    use crate::syntax::parser::Parser;
+
+    fn parser(src: &str) -> Parser {
+        let r = lex(src).unwrap();
+        Parser::new(r.tokens, r.trivia)
+    }
+
+    // ── FieldDecl ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_field_decl() {
+        let f = FieldDecl::parse(&mut parser("x: int")).unwrap();
+        assert_eq!(f.name.value, "x");
+    }
+    #[test]
+    fn field_decl_rejects_missing_type() {
+        assert!(FieldDecl::parse(&mut parser("x")).is_err());
+    }
+
+    // ── StructDef ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_empty_struct() {
+        let s = StructDef::parse(&mut parser("struct end")).unwrap();
+        assert!(s.fields.is_empty());
+    }
+    #[test]
+    fn parses_struct_with_fields() {
+        let s = StructDef::parse(&mut parser("struct x: int y: str end")).unwrap();
+        assert_eq!(s.fields.len(), 2);
+    }
+    #[test]
+    fn struct_rejects_missing_end() {
+        assert!(StructDef::parse(&mut parser("struct x: int")).is_err());
+    }
+
+    // ── EnumDef ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_enum() {
+        let e = EnumDef::parse(&mut parser("enum: int A = 0 B = 1 end")).unwrap();
+        assert_eq!(e.members.len(), 2);
+    }
+    #[test]
+    fn enum_rejects_missing_end() {
+        assert!(EnumDef::parse(&mut parser("enum: int A = 0")).is_err());
+    }
+
+    // ── VariantDef ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_variant() {
+        let v = VariantDef::parse(&mut parser("variant A: int B: str end")).unwrap();
+        assert_eq!(v.members.len(), 2);
+    }
+    #[test]
+    fn variant_rejects_missing_end() {
+        assert!(VariantDef::parse(&mut parser("variant A: int")).is_err());
+    }
+
+    // ── TraitDef ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn parses_empty_trait() {
+        let t = TraitDef::parse(&mut parser("trait end")).unwrap();
+        assert!(t.sigs.is_empty());
+    }
+    #[test]
+    fn parses_trait_with_sig() {
+        let t = TraitDef::parse(&mut parser("trait foo(): unit end")).unwrap();
+        assert_eq!(t.sigs.len(), 1);
+        assert_eq!(t.sigs[0].name.value, "foo");
+    }
+    #[test]
+    fn trait_rejects_missing_end() {
+        assert!(TraitDef::parse(&mut parser("trait foo(): unit")).is_err());
     }
 }

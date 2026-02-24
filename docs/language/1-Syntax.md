@@ -223,8 +223,7 @@ BNF:
 BNF:
 ```
 <initializer> ::= "{" [ <fieldlist> ] "}"
-<fieldlist> ::= <field> { <fieldsep> <field> } [ <fieldsep> ]
-<fieldsep> ::= "," | ";"
+<fieldlist> ::= <field> { "," <field> } [ "," ]
 
 <field> ::= "[" <exp> "]" "=" <exp>
           | <name> "=" <exp>

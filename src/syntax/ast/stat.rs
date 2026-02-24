@@ -70,7 +70,7 @@ impl Parsable for Stat {
         }
         if p.is_keyword(Keyword::For) {
             // Peek: `for name =` → numeric; otherwise generic
-            return Ok(if is_numeric_for(p) {
+            return Ok(if matches!(p.peek(2).kind, TokenKind::Symbol(Symbol::Assign)) {
                 Stat::ForNumeric(StatForNumeric::parse(p)?)
             } else {
                 Stat::ForGeneric(StatForGeneric::parse(p)?)
@@ -147,10 +147,4 @@ impl Parsable for Stat {
         let span = vars.last().map(|v| v.span.merge(end_span)).unwrap_or(end_span);
         Ok(Stat::Assign(StatAssign { span, vars, exprs }))
     }
-}
-
-/// Returns true if `for` is followed by `name =` (numeric for), false for generic.
-fn is_numeric_for(p: &Parser) -> bool {
-    // token stream at current position: for(0) name(1) =(2)
-    matches!(p.peek(2).kind, TokenKind::Symbol(Symbol::Assign))
 }

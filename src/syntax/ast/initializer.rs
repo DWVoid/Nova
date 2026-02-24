@@ -16,12 +16,8 @@ impl Parsable for Initializer {
         let open = p.expect_symbol(Symbol::LBrace)?;
         let mut fields = Vec::new();
         while !p.is_symbol(Symbol::RBrace) {
-            if p.is_symbol(Symbol::Semi) {
-                p.advance();
-                continue;
-            }
             fields.push(Field::parse(p)?);
-            if p.is_symbol(Symbol::Comma) || p.is_symbol(Symbol::Semi) {
+            if p.is_symbol(Symbol::Comma) {
                 p.advance();
             } else {
                 break;

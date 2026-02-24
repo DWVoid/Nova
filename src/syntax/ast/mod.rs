@@ -9,7 +9,6 @@ mod defs;
 mod exp;
 mod field;
 mod function_call;
-mod if_clause;
 mod initializer;
 mod lambda_expr;
 mod name;
@@ -42,7 +41,6 @@ pub use defs::{
 pub use exp::{Exp, ExpKind};
 pub use field::{Field, FieldKey};
 pub use function_call::FunctionCall;
-pub use if_clause::IfClause;
 pub use initializer::Initializer;
 pub use lambda_expr::LambdaExpr;
 pub use name::Name;

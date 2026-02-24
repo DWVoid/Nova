@@ -4,7 +4,13 @@ use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
 use super::block::Block;
 use super::exp::Exp;
-use super::if_clause::IfClause;
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct IfClause {
+    pub span: Span,
+    pub cond: Exp,
+    pub block: Block,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatIf {

@@ -115,15 +115,88 @@ The lexer supports short-quoted strings and long-bracket strings.
 ### 6.1 Short Strings
 
 - Delimiters: single quote `'` or double quote `"`.
-- Backslash escape sequences are accepted but not decoded; the lexer preserves them as two characters (e.g., `"\n"` remains `\\n` in the token text).
-- A line break inside a short string is an error.
+- Escape sequences are fully decoded; the `StringLiteral` token carries the final string value, not the raw source text.
+- A literal (unescaped) line break inside a short string is an error.
 
 BNF:
 ```
-<short-string> ::= "\"" { <short-char> } "\"" | "'" { <short-char> } "'"
-<short-char> ::= <escape> | <non-quote-non-linebreak>
-<escape> ::= "\\" <any-char>
+<short-string> ::= "\"" { <short-char> } "\""
+                 | "'"  { <short-char> } "'"
+<short-char>   ::= <escape> | <non-quote-non-linebreak>
+<escape>       ::= "\\" <escape-body>
+<escape-body>  ::= <simple-escape>
+                 | <decimal-escape>
+                 | <hex-escape>
+                 | <unicode-escape>
+                 | <skip-escape>
 ```
+
+#### Simple escapes
+
+| Sequence | Decoded value         |
+|----------|-----------------------|
+| `\a`     | U+0007 BELL           |
+| `\b`     | U+0008 BACKSPACE      |
+| `\f`     | U+000C FORM FEED      |
+| `\n`     | U+000A LINE FEED      |
+| `\r`     | U+000D CARRIAGE RETURN|
+| `\t`     | U+0009 HORIZONTAL TAB |
+| `\v`     | U+000B VERTICAL TAB   |
+| `\\`     | U+005C BACKSLASH      |
+| `\'`     | U+0027 APOSTROPHE     |
+| `\"`     | U+0022 QUOTATION MARK |
+
+#### Decimal escape — `\NNN`
+
+- One, two, or three ASCII decimal digits immediately after `\`.
+- The digits are interpreted as a decimal integer in the range 0–255.
+- The resulting byte value is used as the character (Latin-1 subset of Unicode).
+- Values greater than 255 are a lexical error.
+
+```
+<decimal-escape> ::= <digit> [ <digit> [ <digit> ] ]
+<digit>          ::= "0".."9"
+```
+
+Example: `\65` and `\065` both produce `A`.
+
+#### Hexadecimal escape — `\xHH`
+
+- Exactly two ASCII hexadecimal digits after `\x`.
+- The two digits are interpreted as a hexadecimal integer in the range 0x00–0xFF.
+- The resulting byte value is used as the character.
+- Fewer than two hex digits, or a non-hex character, is a lexical error.
+
+```
+<hex-escape> ::= "x" <hex-digit> <hex-digit>
+<hex-digit>  ::= <digit> | "a".."f" | "A".."F"
+```
+
+Example: `\x41` produces `A`.
+
+#### Unicode escape — `\u{H…}`
+
+- One or more ASCII hexadecimal digits enclosed in braces after `\u`.
+- The digits are interpreted as a hexadecimal Unicode scalar value (U+0000–U+10FFFF).
+- The scalar is encoded as UTF-8 and appended to the string value.
+- A value above U+10FFFF, a missing `{`, an empty brace pair, or a non-hex character inside the braces is a lexical error.
+
+```
+<unicode-escape> ::= "u" "{" <hex-digit> { <hex-digit> } "}"
+```
+
+Examples: `\u{41}` → `A`, `\u{2603}` → `☃`, `\u{1F600}` → `😀`.
+
+#### Whitespace-skip escape — `\z`
+
+- `\z` consumes all immediately following whitespace characters (spaces, tabs, and line breaks).
+- Nothing is appended to the string value; this escape is used to continue a long string literal across a line break without embedding the break or any indentation.
+
+```
+<skip-escape> ::= "z" { <whitespace> | <linebreak> }
+```
+
+Example: `"hello\z   world"` produces `helloworld`.
 
 ### 6.2 Long Strings
 

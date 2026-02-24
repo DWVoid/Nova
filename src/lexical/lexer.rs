@@ -395,15 +395,9 @@ impl<'a> Lexer<'a> {
             }
 
             if ch == '\\' {
-                self.advance_char();
-                let Some(escaped) = self.advance_char() else {
-                    return Err(LexError {
-                        message: "unterminated escape sequence".to_string(),
-                        position: self.position,
-                    });
-                };
-                content.push('\\');
-                content.push(escaped);
+                self.advance_char(); // consume '\'
+                let decoded = self.decode_escape()?;
+                content.push_str(&decoded);
                 continue;
             }
 
@@ -422,6 +416,127 @@ impl<'a> Lexer<'a> {
             message: "unterminated string literal".to_string(),
             position: self.position,
         })
+    }
+
+    /// Decodes a single escape sequence.  Called after the leading `\` has
+    /// already been consumed.  Returns the decoded string fragment (almost
+    /// always a single character, but `\uHHHH` may produce a multi-byte
+    /// UTF-8 sequence and `\z` produces an empty string).
+    fn decode_escape(&mut self) -> Result<String, LexError> {
+        let escape_pos = self.position;
+        let Some(esc) = self.advance_char() else {
+            return Err(LexError {
+                message: "unterminated escape sequence".to_string(),
+                position: escape_pos,
+            });
+        };
+
+        match esc {
+            'a'  => Ok("\x07".to_string()),
+            'b'  => Ok("\x08".to_string()),
+            'f'  => Ok("\x0C".to_string()),
+            'n'  => Ok("\n".to_string()),
+            'r'  => Ok("\r".to_string()),
+            't'  => Ok("\t".to_string()),
+            'v'  => Ok("\x0B".to_string()),
+            '\\' => Ok("\\".to_string()),
+            '\'' => Ok("'".to_string()),
+            '"'  => Ok("\"".to_string()),
+
+            // \z — skip following whitespace (including newlines)
+            'z' => {
+                while self.peek_is_whitespace() {
+                    self.advance_char();
+                }
+                Ok(String::new())
+            }
+
+            // \NNN — up to three decimal digits, value 0..=255
+            c if c.is_ascii_digit() => {
+                let mut num = c as u32 - b'0' as u32;
+                for _ in 0..2 {
+                    match self.peek_char() {
+                        Some(d) if d.is_ascii_digit() => {
+                            self.advance_char();
+                            num = num * 10 + (d as u32 - b'0' as u32);
+                        }
+                        _ => break,
+                    }
+                }
+                if num > 255 {
+                    return Err(LexError {
+                        message: format!("decimal escape \\{num} out of range (max 255)"),
+                        position: escape_pos,
+                    });
+                }
+                Ok((num as u8 as char).to_string())
+            }
+
+            // \xHH — exactly two hex digits, value 0x00..=0xFF
+            'x' => {
+                let hi = self.peek_char().filter(|c| c.is_ascii_hexdigit()).ok_or_else(|| LexError {
+                    message: "\\x escape requires two hex digits".to_string(),
+                    position: self.position,
+                })?;
+                self.advance_char();
+                let lo = self.peek_char().filter(|c| c.is_ascii_hexdigit()).ok_or_else(|| LexError {
+                    message: "\\x escape requires two hex digits".to_string(),
+                    position: self.position,
+                })?;
+                self.advance_char();
+                let val = hex_digit(hi) * 16 + hex_digit(lo);
+                Ok((val as u8 as char).to_string())
+            }
+
+            // \u{HHHH} — one or more hex digits inside braces, Unicode scalar
+            'u' => {
+                if self.peek_char() != Some('{') {
+                    return Err(LexError {
+                        message: "\\u escape requires '{' (e.g. \\u{1F600})".to_string(),
+                        position: escape_pos,
+                    });
+                }
+                self.advance_char(); // consume '{'
+                let mut val: u32 = 0;
+                let mut digits = 0usize;
+                loop {
+                    match self.peek_char() {
+                        Some('}') => { self.advance_char(); break; }
+                        Some(c) if c.is_ascii_hexdigit() => {
+                            self.advance_char();
+                            val = val * 16 + hex_digit(c) as u32;
+                            digits += 1;
+                            if val > 0x10FFFF {
+                                return Err(LexError {
+                                    message: "\\u{} Unicode escape value exceeds U+10FFFF".to_string(),
+                                    position: escape_pos,
+                                });
+                            }
+                        }
+                        _ => return Err(LexError {
+                            message: "unterminated or invalid \\u{} escape".to_string(),
+                            position: self.position,
+                        }),
+                    }
+                }
+                if digits == 0 {
+                    return Err(LexError {
+                        message: "\\u{} escape must contain at least one hex digit".to_string(),
+                        position: escape_pos,
+                    });
+                }
+                let ch = char::from_u32(val).ok_or_else(|| LexError {
+                    message: format!("\\u{{}} value U+{val:04X} is not a valid Unicode scalar"),
+                    position: escape_pos,
+                })?;
+                Ok(ch.to_string())
+            }
+
+            other => Err(LexError {
+                message: format!("unknown escape sequence '\\{other}'"),
+                position: escape_pos,
+            }),
+        }
     }
 
     fn peek_long_bracket_level(&self) -> Option<usize> {
@@ -565,6 +680,18 @@ impl<'a> Lexer<'a> {
 
         self.advance_by(consume);
         Ok(Token::new(kind, Span::new(start_pos, self.position)))
+    }
+}
+
+/// Returns the numeric value of an ASCII hex digit (0–15).
+/// Panics if `c` is not a valid ASCII hex digit — callers must guard with
+/// `c.is_ascii_hexdigit()` first.
+fn hex_digit(c: char) -> u8 {
+    match c {
+        '0'..='9' => c as u8 - b'0',
+        'a'..='f' => c as u8 - b'a' + 10,
+        'A'..='F' => c as u8 - b'A' + 10,
+        _ => panic!("hex_digit called with non-hex character '{c}'"),
     }
 }
 
@@ -1163,14 +1290,14 @@ mod tests {
     #[test]
     fn string_with_escape_sequence_is_lexed() {
         let kinds = tokens(r#""a\nb""#);
-        // The raw escape is preserved verbatim by the lexer
-        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == r"a\nb"));
+        // \n is decoded to an actual newline character
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "a\nb"));
     }
 
     #[test]
     fn string_with_backslash_quote_escape_is_lexed() {
         let kinds = tokens(r#""a\"b""#);
-        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == r#"a\"b"#));
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "a\"b"));
     }
 
     #[test]
@@ -1194,7 +1321,147 @@ mod tests {
         must_fail("'hello");
     }
 
-    // ── long strings ──────────────────────────────────────────────────────────
+    // ── escape sequence decoding ──────────────────────────────────────────────
+
+    #[test]
+    fn escape_a_is_bell() {
+        let kinds = tokens(r#""\a""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\x07"));
+    }
+
+    #[test]
+    fn escape_b_is_backspace() {
+        let kinds = tokens(r#""\b""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\x08"));
+    }
+
+    #[test]
+    fn escape_f_is_form_feed() {
+        let kinds = tokens(r#""\f""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\x0C"));
+    }
+
+    #[test]
+    fn escape_n_is_newline() {
+        let kinds = tokens(r#""\n""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\n"));
+    }
+
+    #[test]
+    fn escape_r_is_carriage_return() {
+        let kinds = tokens(r#""\r""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\r"));
+    }
+
+    #[test]
+    fn escape_t_is_tab() {
+        let kinds = tokens(r#""\t""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\t"));
+    }
+
+    #[test]
+    fn escape_v_is_vertical_tab() {
+        let kinds = tokens(r#""\v""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\x0B"));
+    }
+
+    #[test]
+    fn escape_backslash_is_backslash() {
+        let kinds = tokens(r#""\\""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\\"));
+    }
+
+    #[test]
+    fn escape_single_quote() {
+        let kinds = tokens(r#""\'""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "'"));
+    }
+
+    #[test]
+    fn escape_double_quote() {
+        let kinds = tokens(r#""\"""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\""));
+    }
+
+    #[test]
+    fn escape_decimal_single_digit() {
+        // \65 = 'A'
+        let kinds = tokens(r#""\65""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "A"));
+    }
+
+    #[test]
+    fn escape_decimal_three_digits() {
+        // \065 = 'A'
+        let kinds = tokens(r#""\065""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "A"));
+    }
+
+    #[test]
+    fn escape_decimal_out_of_range_is_rejected() {
+        must_fail(r#""\256""#);
+    }
+
+    #[test]
+    fn escape_hex_lowercase() {
+        // \x41 = 'A'
+        let kinds = tokens(r#""\x41""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "A"));
+    }
+
+    #[test]
+    fn escape_hex_uppercase() {
+        let kinds = tokens(r#""\x4F""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "O"));
+    }
+
+    #[test]
+    fn escape_hex_incomplete_is_rejected() {
+        must_fail(r#""\xG1""#);
+    }
+
+    #[test]
+    fn escape_unicode_basic() {
+        // \u{0041} = 'A'
+        let kinds = tokens(r#""\u{0041}""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "A"));
+    }
+
+    #[test]
+    fn escape_unicode_snowman() {
+        // U+2603 SNOWMAN
+        let kinds = tokens(r#""\u{2603}""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\u{2603}"));
+    }
+
+    #[test]
+    fn escape_unicode_emoji() {
+        // U+1F600 GRINNING FACE
+        let kinds = tokens(r#""\u{1F600}""#);
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "\u{1F600}"));
+    }
+
+    #[test]
+    fn escape_unicode_out_of_range_is_rejected() {
+        must_fail(r#""\u{110000}""#);
+    }
+
+    #[test]
+    fn escape_unicode_missing_brace_is_rejected() {
+        must_fail(r#""\u0041""#);
+    }
+
+    #[test]
+    fn escape_z_skips_whitespace() {
+        // \z followed by spaces/newline should produce empty, continuing content after
+        let kinds = tokens("\"a\\z   b\"");
+        assert!(matches!(&kinds[0], TokenKind::StringLiteral(s) if s == "ab"));
+    }
+
+    #[test]
+    fn escape_unknown_is_rejected() {
+        must_fail(r#""\q""#);
+    }
 
     #[test]
     fn long_string_level_0_is_lexed() {

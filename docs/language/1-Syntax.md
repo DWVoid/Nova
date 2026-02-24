@@ -116,7 +116,6 @@ BNF:
 <stat> ::= ";"
         | <exp> { "," <exp> } "=" <explist>
         | <exp> <args>
-        | <exp> ":" <name> <args>
         | "do" <block> "end"
         | "while" <exp> "do" <block> "end"
         | "repeat" <block> "until" <exp>
@@ -162,14 +161,14 @@ BNF:
         | "(" <exp> ")"
         | <exp> "." <name>
         | <exp> "[" <exp> "]"
-        | <exp> ":" <name> <args>
         | <exp> <args>
         | <unop> <exp>
         | <exp> <binop> <exp>
 ```
 
-Postfix operators (`.`, `[]`, `:method`, and call arguments) bind tighter than
-any prefix or binary operator and are left-associative.
+Postfix operators (`.`, `[]`, and call arguments) bind tighter than any prefix
+or binary operator and are left-associative.  Method calls are expressed as
+`obj.method(args)` — field access followed by a call.
 
 The `var`/`val` forms introduce a local binding site.  They are syntactically
 valid in any expression position but are semantically restricted to the

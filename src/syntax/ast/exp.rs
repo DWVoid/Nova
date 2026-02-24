@@ -39,8 +39,8 @@ pub enum ExpKind {
     Field { prefix: Box<Exp>, name: Name },
     /// Index access: `prefix[index]`.
     Index { prefix: Box<Exp>, index: Box<Exp> },
-    /// A call or method call: `prefix(args)` / `prefix:name(args)`.
-    Call { prefix: Box<Exp>, method: Option<Name>, args: Args },
+    /// A function call: `prefix(args)`.
+    Call { prefix: Box<Exp>, args: Args },
     /// A local binding site: `var name [: T]` or `val name [: T]`.
     /// Valid only as an l-value in an assignment statement; the semantic
     /// stage enforces this constraint.
@@ -116,20 +116,12 @@ impl Exp {
                 base = Exp { span, kind: ExpKind::Index { prefix: Box::new(base), index: Box::new(index) } };
                 continue;
             }
-            if p.is_symbol(Symbol::Colon) {
-                p.advance();
-                let method = Name::parse(p)?;
-                let args = Args::parse(p)?;
-                let span = base.span.merge(args.span);
-                base = Exp { span, kind: ExpKind::Call { prefix: Box::new(base), method: Some(method), args } };
-                continue;
-            }
             if matches!(p.current().kind,
                 TokenKind::Symbol(Symbol::LParen) | TokenKind::Symbol(Symbol::LBrace))
             {
                 let args = Args::parse(p)?;
                 let span = base.span.merge(args.span);
-                base = Exp { span, kind: ExpKind::Call { prefix: Box::new(base), method: None, args } };
+                base = Exp { span, kind: ExpKind::Call { prefix: Box::new(base), args } };
                 continue;
             }
             break;

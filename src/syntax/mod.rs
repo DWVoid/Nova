@@ -1,9 +1,10 @@
 pub mod ast;
 pub mod parser;
-mod parser_decl;
-mod parser_expr;
+mod parsable;
+mod ast_top;
+mod ast_exp;
 mod parser_helpers;
-mod parser_prefix;
-mod parser_stat;
+mod ast_stat;
 #[cfg(test)]
 mod parser_tests;
+mod ast_def;

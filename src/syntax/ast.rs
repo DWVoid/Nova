@@ -353,6 +353,18 @@ impl TopItem {
     }
 }
 
+impl DefExpr {
+    pub fn span(&self) -> crate::lexical::Span {
+        match self {
+            DefExpr::Struct(def) => def.span,
+            DefExpr::Enum(def) => def.span,
+            DefExpr::Variant(def) => def.span,
+            DefExpr::Trait(def) => def.span,
+            DefExpr::Exp(exp) => exp.span,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

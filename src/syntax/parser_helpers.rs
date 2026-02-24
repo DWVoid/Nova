@@ -1,4 +1,4 @@
-use super::parser::{Assoc, BlockEnd, ParseError, Parser};
+use super::parser::{Assoc, ParseError, Parser};
 use crate::lexical::{Keyword, Symbol, Token, TokenKind};
 impl Parser {
     pub(crate) fn advance(&mut self) -> Token {
@@ -39,20 +39,15 @@ impl Parser {
     pub(crate) fn is_symbol(&self, symbol: Symbol) -> bool {
         matches!(self.current().kind, TokenKind::Symbol(s) if s == symbol)
     }
-    pub(crate) fn is_block_end(&self, end: BlockEnd) -> bool {
-        if matches!(self.current().kind, TokenKind::Eof) {
-            return true;
-        }
-        match end {
-            BlockEnd::Chunk => matches!(self.current().kind, TokenKind::Eof),
-            BlockEnd::Nested => matches!(
-                self.current().kind,
-                TokenKind::Keyword(Keyword::End)
-                    | TokenKind::Keyword(Keyword::Else)
-                    | TokenKind::Keyword(Keyword::ElseIf)
-                    | TokenKind::Keyword(Keyword::Until)
-            ),
-        }
+    pub(crate) fn is_block_end(&self) -> bool {
+        matches!(
+            self.current().kind,
+            TokenKind::Eof
+                | TokenKind::Keyword(Keyword::End)
+                | TokenKind::Keyword(Keyword::Else)
+                | TokenKind::Keyword(Keyword::ElseIf)
+                | TokenKind::Keyword(Keyword::Until)
+        )
     }
     pub(crate) fn expect_keyword(&mut self, keyword: Keyword) -> Result<Token, ParseError> {
         let token = self.current().clone();

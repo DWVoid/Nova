@@ -1,33 +1,24 @@
 use serde::Serialize;
-use crate::lexical::{Span, Symbol};
+use crate::lexical::Span;
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
-use super::function_call::FunctionCall;
-use super::prefix_exp::{PrefixExp, PrefixExpKind};
+use super::exp::{Exp, ExpKind};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatCall {
     pub span: Span,
-    pub call: FunctionCall,
+    /// The call expression. Always `ExpKind::Call { .. }`.
+    pub call: Exp,
 }
 
 impl Parsable for StatCall {
     fn parse(p: &mut Parser) -> Result<Self, ParseError> {
-        let prefix = PrefixExp::parse(p)?;
-        match prefix.kind {
-            PrefixExpKind::Call(call) => {
-                if p.is_symbol(Symbol::Assign) || p.is_symbol(Symbol::Comma) {
-                    return Err(ParseError {
-                        message: "function call cannot be assignment target; use a variable or field"
-                            .to_string(),
-                        position: prefix.span.start,
-                    });
-                }
-                Ok(StatCall { span: prefix.span, call })
-            }
+        let exp = Exp::parse(p)?;
+        match exp.kind {
+            ExpKind::Call { .. } => Ok(StatCall { span: exp.span, call: exp }),
             _ => Err(ParseError {
-                message: "expected function call".to_string(),
-                position: prefix.span.start,
+                message: "expected function call expression".to_string(),
+                position: exp.span.start,
             }),
         }
     }

@@ -114,8 +114,9 @@ BNF:
 <block> ::= { <stat> } [ <retstat> [ ";" ] ]
 
 <stat> ::= ";"
-        | <varlist> "=" <explist>
-        | <invoke>
+        | <exp> { "," <exp> } "=" <explist>
+        | <exp> <args>
+        | <exp> ":" <name> <args>
         | "do" <block> "end"
         | "while" <exp> "do" <block> "end"
         | "repeat" <block> "until" <exp>
@@ -130,11 +131,22 @@ BNF:
 <retstat> ::= "return" [ <explist> ]
 
 <namelist> ::= <name> { "," <name> }
+<explist>  ::= <exp> { "," <exp> }
 ```
+
+The left-hand side of an assignment and the target of a call statement are
+written as plain expressions.  The semantic stage enforces that assignment
+targets are valid l-values (`<name>`, field access, index access, or a
+`var`/`val` declaration) and that call statements resolve to an actual call.
 
 ## 8. Expressions
 
 ### 8.1 Expression Forms
+
+All expression forms, including names, field/index access, calls, and local
+variable declarations, are unified into a single `<exp>` rule.  The parser
+makes no distinction between l-values and r-values — that analysis is deferred
+to the semantic stage.
 
 BNF:
 ```
@@ -143,11 +155,25 @@ BNF:
         | "true"
         | <number>
         | <string>
-        | <prefixexp>
+        | <name>
         | <lambda_expr>
+        | "var" <name> [ <type_spec> ]
+        | "val" <name> [ <type_spec> ]
+        | "(" <exp> ")"
+        | <exp> "." <name>
+        | <exp> "[" <exp> "]"
+        | <exp> ":" <name> <args>
+        | <exp> <args>
         | <unop> <exp>
         | <exp> <binop> <exp>
 ```
+
+Postfix operators (`.`, `[]`, `:method`, and call arguments) bind tighter than
+any prefix or binary operator and are left-associative.
+
+The `var`/`val` forms introduce a local binding site.  They are syntactically
+valid in any expression position but are semantically restricted to the
+left-hand side of an assignment statement.
 
 ### 8.2 Lambda Expressions
 
@@ -194,31 +220,7 @@ BNF (operator set):
          | "^"
 ```
 
-## 9. Prefix Expressions, Variables, and Calls
-
-BNF:
-```
-<prefixexp> ::= <name> { <suffix> }
-              | "(" <exp> ")" { <suffix> }
-
-<suffix> ::= "." <name>
-          | "[" <exp> "]"
-          | ":" <name> <args>
-          | <args>
-
-<var> ::= "var" <name> [ <type_spec> ]
-        | "val" <name> [ <type_spec> ]
-        | <name>
-        | <prefixexp> "[" <exp> "]"
-        | <prefixexp> "." <name>
-
-<varlist> ::= <var> { "," <var> }
-
-<invoke> ::= <prefixexp> <args>
-           | <prefixexp> ":" <name> <args>
-```
-
-## 10. Initializers
+## 9. Initializers
 
 BNF:
 ```
@@ -230,7 +232,7 @@ BNF:
           | <exp>
 ```
 
-## 11. Call Arguments
+## 10. Call Arguments
 
 BNF:
 ```

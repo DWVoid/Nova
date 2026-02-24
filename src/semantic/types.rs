@@ -709,8 +709,14 @@ impl TypeSystem {
                 }
             }
 
-            ExpKind::Prefix(_prefix_exp) => {
-                // TODO: Handle prefix expressions (variables, function calls, etc.)
+            // Postfix / compound forms — full resolution deferred to later semantic passes
+            ExpKind::Name(_)
+            | ExpKind::Paren(_)
+            | ExpKind::Field { .. }
+            | ExpKind::Index { .. }
+            | ExpKind::Call { .. }
+            | ExpKind::VarDecl { .. } => {
+                // TODO: resolve names, fields, indices, calls against the symbol table
                 TypeCheckResult::Success(NovaType::Error)
             }
         }

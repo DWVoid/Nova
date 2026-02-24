@@ -1,5 +1,5 @@
 use super::parser::Parser;
-use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, Stat, TopItem, VarKind};
+use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, Stat, TopItem, VarDeclKind};
 use crate::lexical::lex;
 
 fn parse_chunk(input: &str) -> Chunk {
@@ -95,7 +95,7 @@ fn parses_assign_with_var_decl() {
     let stat = &lambda.block.stats[0];
     match stat {
         Stat::Assign(s) => match &s.vars[0].kind {
-            VarKind::Decl { .. } => {}
+            ExpKind::VarDecl { .. } => {}
             _ => panic!("expected var decl"),
         },
         _ => panic!("expected assign"),
@@ -120,9 +120,12 @@ fn parses_invoke_and_method_call() {
     let ExpKind::Lambda(lambda) = &exp.kind else { panic!("expected lambda"); };
     assert_eq!(lambda.block.stats.len(), 2);
     match &lambda.block.stats[0] {
-        Stat::Call(s) => match &s.call.args.kind {
-            ArgsKind::ExpList(list) => assert_eq!(list.len(), 2),
-            _ => panic!("expected exp list"),
+        Stat::Call(s) => match &s.call.kind {
+            ExpKind::Call { args, .. } => match &args.kind {
+                ArgsKind::ExpList(list) => assert_eq!(list.len(), 2),
+                _ => panic!("expected exp list"),
+            },
+            _ => panic!("expected call kind"),
         },
         _ => panic!("expected call stat"),
     }

@@ -8,13 +8,11 @@ mod block;
 mod defs;
 mod exp;
 mod field;
-mod function_call;
 mod initializer;
 mod lambda_expr;
 mod name;
 mod ops;
 mod param;
-mod prefix_exp;
 mod ret_stat;
 mod stat;
 mod stat_assign;
@@ -29,7 +27,6 @@ mod stat_repeat;
 mod stat_while;
 mod top;
 mod type_spec;
-mod var;
 
 // Re-export every public type so the rest of the crate sees them as
 // `crate::syntax::ast::Foo` exactly as before.
@@ -38,15 +35,13 @@ pub use block::Block;
 pub use defs::{
     EnumDef, EnumMember, FieldDecl, StructDef, TraitDef, TraitSig, VariantDef, VariantMember,
 };
-pub use exp::{Exp, ExpKind};
+pub use exp::{Exp, ExpKind, VarDeclKind};
 pub use field::{Field, FieldKey};
-pub use function_call::FunctionCall;
 pub use initializer::Initializer;
 pub use lambda_expr::LambdaExpr;
 pub use name::Name;
 pub use ops::{BinOp, UnOp};
 pub use param::Param;
-pub use prefix_exp::{PrefixExp, PrefixExpKind};
 pub use ret_stat::RetStat;
 pub use stat::Stat;
 pub use stat_assign::StatAssign;
@@ -64,7 +59,6 @@ pub use top::{
     UseItem, UseTail, Visibility,
 };
 pub use type_spec::{TypeName, TypeSpec};
-pub use var::{Var, VarDeclKind, VarKind};
 
 /// A list of trivia items (whitespace and comments) attached to a chunk.
 pub type Trivia = Vec<crate::lexical::Trivia>;

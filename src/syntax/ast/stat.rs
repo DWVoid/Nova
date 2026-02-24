@@ -1,17 +1,51 @@
-use super::parsable::Parsable;
-use super::parser::{ParseError, Parser};
+use serde::Serialize;
+use crate::lexical::Span;
+use crate::syntax::parsable::Parsable;
+use crate::syntax::parser::{ParseError, Parser};
 use crate::lexical::{Keyword, Symbol, TokenKind};
-use crate::syntax::ast::{Block, Exp, IfClause, Name, PrefixExp, PrefixExpKind, Stat, StatKind};
+use super::block::Block;
+use super::exp::Exp;
+use super::function_call::FunctionCall;
+use super::if_clause::IfClause;
+use super::name::Name;
+use super::prefix_exp::{PrefixExp, PrefixExpKind};
+use super::var::Var;
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum StatKind {
+    Empty,
+    Assign { vars: Vec<Var>, exprs: Vec<Exp> },
+    Do { block: Block },
+    While { cond: Exp, block: Block },
+    Repeat { block: Block, cond: Exp },
+    If { clauses: Vec<IfClause>, else_block: Option<Block> },
+    ForNumeric {
+        name: Name,
+        start: Exp,
+        end: Exp,
+        step: Option<Exp>,
+        block: Block,
+    },
+    ForGeneric { names: Vec<Name>, exprs: Vec<Exp>, block: Block },
+    Break,
+    Continue,
+    Goto { label: Name },
+    Label { label: Name },
+    Call { call: FunctionCall },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Stat {
+    pub span: Span,
+    pub kind: StatKind,
+}
 
 impl Parsable for Stat {
     fn parse(p: &mut Parser) -> Result<Self, ParseError> {
         // Empty statement
         if p.is_symbol(Symbol::Semi) {
             let token = p.advance();
-            return Ok(Stat {
-                span: token.span,
-                kind: StatKind::Empty,
-            });
+            return Ok(Stat { span: token.span, kind: StatKind::Empty });
         }
         // do … end
         if p.is_keyword(Keyword::Do) {
@@ -77,10 +111,7 @@ impl Parsable for Stat {
             let end = p.expect_keyword(Keyword::End)?;
             return Ok(Stat {
                 span: token.span.merge(end.span),
-                kind: StatKind::If {
-                    clauses,
-                    else_block,
-                },
+                kind: StatKind::If { clauses, else_block },
             });
         }
         // for (numeric or generic)
@@ -103,13 +134,7 @@ impl Parsable for Stat {
                 let end_kw = p.expect_keyword(Keyword::End)?;
                 return Ok(Stat {
                     span: token.span.merge(end_kw.span),
-                    kind: StatKind::ForNumeric {
-                        name,
-                        start,
-                        end,
-                        step,
-                        block,
-                    },
+                    kind: StatKind::ForNumeric { name, start, end, step, block },
                 });
             }
             let mut names = vec![name];
@@ -124,27 +149,17 @@ impl Parsable for Stat {
             let end_kw = p.expect_keyword(Keyword::End)?;
             return Ok(Stat {
                 span: token.span.merge(end_kw.span),
-                kind: StatKind::ForGeneric {
-                    names,
-                    exprs,
-                    block,
-                },
+                kind: StatKind::ForGeneric { names, exprs, block },
             });
         }
         // break / continue / goto / label
         if p.is_keyword(Keyword::Break) {
             let token = p.expect_keyword(Keyword::Break)?;
-            return Ok(Stat {
-                span: token.span,
-                kind: StatKind::Break,
-            });
+            return Ok(Stat { span: token.span, kind: StatKind::Break });
         }
         if p.is_keyword(Keyword::Continue) {
             let token = p.expect_keyword(Keyword::Continue)?;
-            return Ok(Stat {
-                span: token.span,
-                kind: StatKind::Continue,
-            });
+            return Ok(Stat { span: token.span, kind: StatKind::Continue });
         }
         if p.is_keyword(Keyword::Goto) {
             let token = p.expect_keyword(Keyword::Goto)?;
@@ -174,9 +189,8 @@ impl Parsable for Stat {
             PrefixExpKind::Call(call) => {
                 if p.is_symbol(Symbol::Assign) || p.is_symbol(Symbol::Comma) {
                     return Err(ParseError {
-                        message:
-                            "function call cannot be assignment target; use a variable or field"
-                                .to_string(),
+                        message: "function call cannot be assignment target; use a variable or field"
+                            .to_string(),
                         position: prefix.span.start,
                     });
                 }
@@ -186,21 +200,20 @@ impl Parsable for Stat {
                 });
             }
             PrefixExpKind::Var(_) => {}
-            PrefixExpKind::Paren(_) => return Err(ParseError {
-                message:
-                    "parenthesized expression cannot start a statement; expected assignment or call"
+            PrefixExpKind::Paren(_) => {
+                return Err(ParseError {
+                    message: "parenthesized expression cannot start a statement; expected assignment or call"
                         .to_string(),
-                position: prefix.span.start,
-            }),
+                    position: prefix.span.start,
+                });
+            }
         }
-
         if !p.is_symbol(Symbol::Assign) && !p.is_symbol(Symbol::Comma) {
             return Err(ParseError {
                 message: "expected assignment '=' or ',' after variable list".to_string(),
                 position: prefix.span.start,
             });
         }
-
         let first_var = match prefix.kind {
             PrefixExpKind::Var(var) => var,
             _ => {
@@ -230,10 +243,7 @@ impl Parsable for Stat {
         let exprs = p.parse_exp_list()?;
         let end_span = exprs.last().map(|e| e.span).unwrap_or(eq.span);
         Ok(Stat {
-            span: vars
-                .last()
-                .map(|v| v.span.merge(end_span))
-                .unwrap_or(end_span),
+            span: vars.last().map(|v| v.span.merge(end_span)).unwrap_or(end_span),
             kind: StatKind::Assign { vars, exprs },
         })
     }

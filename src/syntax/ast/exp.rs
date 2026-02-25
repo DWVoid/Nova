@@ -1,7 +1,19 @@
 use super::args::Args;
+use super::exp_binary::ExpBinary;
+use super::exp_bool::ExpBool;
+use super::exp_call::ExpCall;
+use super::exp_field::ExpField;
+use super::exp_index::ExpIndex;
+use super::exp_lambda::ExpLambda;
+use super::exp_name::ExpName;
+use super::exp_nil::ExpNil;
+use super::exp_number::ExpNumber;
+use super::exp_paren::ExpParen;
+use super::exp_string::ExpString;
+use super::exp_unary::ExpUnary;
+use super::exp_var_decl::{ExpVarDecl, VarDeclKind};
 use super::lambda_expr::LambdaExpr;
 use super::name::Name;
-use super::ops::{BinOp, UnOp};
 use super::type_spec::TypeSpec;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol, TokenKind};
@@ -9,73 +21,58 @@ use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{Assoc, ParseError, Parser};
 use serde::Serialize;
 
-/// Distinguishes `var` (mutable) from `val` (immutable) at a declaration site.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-pub enum VarDeclKind {
-    Var,
-    Val,
-}
-
 /// A fully unified expression node.
 ///
-/// The forms previously split between `Exp`/`PrefixExp`/`Var`/`FunctionCall`
-/// all live here.  Whether a given node is a valid l-value, a callable
-/// expression, or a pure value is not checked by the parser — that
-/// distinction is deferred entirely to the semantic stage.
+/// Each variant is a distinct struct that carries the node's span and fields.
+/// Whether a node is a valid l-value, callable expression, or pure value is
+/// not checked by the parser — that distinction is deferred to the semantic stage.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub enum ExpKind {
-    // ── Literals ─────────────────────────────────────────────────────────
-    Nil,
-    Bool(bool),
-    Number(String),
-    String(String),
+pub enum Exp {
+    // ── Literals ──────────────────────────────────────────────────────────
+    Nil(ExpNil),
+    Bool(ExpBool),
+    Number(ExpNumber),
+    String(ExpString),
 
     // ── Atomic / postfix forms ────────────────────────────────────────────
     /// A bare identifier: `foo`.
-    Name(String),
+    Name(ExpName),
     /// A parenthesised sub-expression: `( exp )`.
-    Paren(Box<Exp>),
+    Paren(ExpParen),
     /// Field access: `prefix.name`.
-    Field {
-        prefix: Box<Exp>,
-        name: Name,
-    },
+    Field(ExpField),
     /// Index access: `prefix[index]`.
-    Index {
-        prefix: Box<Exp>,
-        index: Box<Exp>,
-    },
+    Index(ExpIndex),
     /// A function call: `prefix(args)`.
-    Call {
-        prefix: Box<Exp>,
-        args: Args,
-    },
+    Call(ExpCall),
     /// A local binding site: `var name [: T]` or `val name [: T]`.
-    /// Valid only as an l-value in an assignment statement; the semantic
-    /// stage enforces this constraint.
-    VarDecl {
-        kind: VarDeclKind,
-        name: Name,
-        type_spec: Option<TypeSpec>,
-    },
+    VarDecl(ExpVarDecl),
 
     // ── Operator forms ────────────────────────────────────────────────────
-    Lambda(LambdaExpr),
-    Unary {
-        op: UnOp,
-        exp: Box<Exp>,
-    },
-    Binary {
-        op: BinOp,
-        left: Box<Exp>,
-        right: Box<Exp>,
-    },
+    Lambda(ExpLambda),
+    Unary(ExpUnary),
+    Binary(Box<ExpBinary>),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Exp {
-    pub span: Span,
-    pub kind: ExpKind,
+impl Exp {
+    /// Return the source span of this expression.
+    pub fn span(&self) -> Span {
+        match self {
+            Exp::Nil(e)    => e.span,
+            Exp::Bool(e)   => e.span,
+            Exp::Number(e) => e.span,
+            Exp::String(e) => e.span,
+            Exp::Name(e)   => e.span,
+            Exp::Paren(e)  => e.span,
+            Exp::Field(e)  => e.span,
+            Exp::Index(e)  => e.span,
+            Exp::Call(e)   => e.span,
+            Exp::VarDecl(e)=> e.span,
+            Exp::Lambda(e) => e.span,
+            Exp::Unary(e)  => e.span,
+            Exp::Binary(e) => e.span,
+        }
+    }
 }
 
 // ── Parsable ──────────────────────────────────────────────────────────────────
@@ -101,15 +98,13 @@ impl Exp {
             p.advance();
             let next_min = if assoc == Assoc::Left { prec + 1 } else { prec };
             let right = Self::parse_prec(p, next_min)?;
-            let span = left.span.merge(right.span);
-            left = Exp {
+            let span = left.span().merge(right.span());
+            left = Exp::Binary(Box::new(ExpBinary {
                 span,
-                kind: ExpKind::Binary {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            }));
         }
         Ok(left)
     }
@@ -118,14 +113,12 @@ impl Exp {
         if let Some(op) = p.peek_unop() {
             let token = p.advance();
             let exp = Self::parse_unary(p)?;
-            let span = token.span.merge(exp.span);
-            return Ok(Exp {
+            let span = token.span.merge(exp.span());
+            return Ok(Exp::Unary(ExpUnary {
                 span,
-                kind: ExpKind::Unary {
-                    op,
-                    exp: Box::new(exp),
-                },
-            });
+                op,
+                exp: Box::new(exp),
+            }));
         }
         Self::parse_postfix(p)
     }
@@ -138,28 +131,24 @@ impl Exp {
             if p.is_symbol(Symbol::Dot) {
                 p.advance();
                 let name = Name::parse(p)?;
-                let span = base.span.merge(name.span);
-                base = Exp {
+                let span = base.span().merge(name.span);
+                base = Exp::Field(ExpField {
                     span,
-                    kind: ExpKind::Field {
-                        prefix: Box::new(base),
-                        name,
-                    },
-                };
+                    prefix: Box::new(base),
+                    name,
+                });
                 continue;
             }
             if p.is_symbol(Symbol::LBracket) {
                 p.advance();
                 let index = Exp::parse(p)?;
                 let close = p.expect_symbol(Symbol::RBracket)?;
-                let span = base.span.merge(close.span);
-                base = Exp {
+                let span = base.span().merge(close.span);
+                base = Exp::Index(ExpIndex {
                     span,
-                    kind: ExpKind::Index {
-                        prefix: Box::new(base),
-                        index: Box::new(index),
-                    },
-                };
+                    prefix: Box::new(base),
+                    index: Box::new(index),
+                });
                 continue;
             }
             if matches!(
@@ -167,14 +156,12 @@ impl Exp {
                 TokenKind::Symbol(Symbol::LParen) | TokenKind::Symbol(Symbol::LBrace)
             ) {
                 let args = Args::parse(p)?;
-                let span = base.span.merge(args.span);
-                base = Exp {
+                let span = base.span().merge(args.span);
+                base = Exp::Call(ExpCall {
                     span,
-                    kind: ExpKind::Call {
-                        prefix: Box::new(base),
-                        args,
-                    },
-                };
+                    prefix: Box::new(base),
+                    args,
+                });
                 continue;
             }
             break;
@@ -187,45 +174,27 @@ impl Exp {
         match token.kind {
             TokenKind::Number(text) => {
                 p.advance();
-                Ok(Exp {
-                    span: token.span,
-                    kind: ExpKind::Number(text),
-                })
+                Ok(Exp::Number(ExpNumber { span: token.span, value: text }))
             }
             TokenKind::StringLiteral(text) => {
                 p.advance();
-                Ok(Exp {
-                    span: token.span,
-                    kind: ExpKind::String(text),
-                })
+                Ok(Exp::String(ExpString { span: token.span, value: text }))
             }
             TokenKind::Keyword(Keyword::Nil) => {
                 p.advance();
-                Ok(Exp {
-                    span: token.span,
-                    kind: ExpKind::Nil,
-                })
+                Ok(Exp::Nil(ExpNil { span: token.span }))
             }
             TokenKind::Keyword(Keyword::True) => {
                 p.advance();
-                Ok(Exp {
-                    span: token.span,
-                    kind: ExpKind::Bool(true),
-                })
+                Ok(Exp::Bool(ExpBool { span: token.span, value: true }))
             }
             TokenKind::Keyword(Keyword::False) => {
                 p.advance();
-                Ok(Exp {
-                    span: token.span,
-                    kind: ExpKind::Bool(false),
-                })
+                Ok(Exp::Bool(ExpBool { span: token.span, value: false }))
             }
             TokenKind::Identifier(name) => {
                 p.advance();
-                Ok(Exp {
-                    span: token.span,
-                    kind: ExpKind::Name(name),
-                })
+                Ok(Exp::Name(ExpName { span: token.span, name }))
             }
             TokenKind::Keyword(Keyword::Var) | TokenKind::Keyword(Keyword::Val) => {
                 let decl_kind = if matches!(token.kind, TokenKind::Keyword(Keyword::Var)) {
@@ -244,38 +213,27 @@ impl Exp {
                 if let Some(ts) = &type_spec {
                     span = span.merge(ts.span);
                 }
-                Ok(Exp {
-                    span,
-                    kind: ExpKind::VarDecl {
-                        kind: decl_kind,
-                        name,
-                        type_spec,
-                    },
-                })
+                Ok(Exp::VarDecl(ExpVarDecl { span, kind: decl_kind, name, type_spec }))
             }
             TokenKind::Symbol(Symbol::LParen) => {
                 if Self::can_start_lambda(p)? {
                     let lambda = LambdaExpr::parse(p)?;
-                    return Ok(Exp {
-                        span: lambda.span,
-                        kind: ExpKind::Lambda(lambda),
-                    });
+                    let span = lambda.span;
+                    return Ok(Exp::Lambda(ExpLambda { span, lambda }));
                 }
                 let open = p.advance();
                 let inner = Exp::parse(p)?;
                 let close = p.expect_symbol(Symbol::RParen)?;
-                Ok(Exp {
+                Ok(Exp::Paren(ExpParen {
                     span: open.span.merge(close.span),
-                    kind: ExpKind::Paren(Box::new(inner)),
-                })
+                    inner: Box::new(inner),
+                }))
             }
             TokenKind::Keyword(Keyword::Const) => {
                 if Self::can_start_lambda(p)? {
                     let lambda = LambdaExpr::parse(p)?;
-                    return Ok(Exp {
-                        span: lambda.span,
-                        kind: ExpKind::Lambda(lambda),
-                    });
+                    let span = lambda.span;
+                    return Ok(Exp::Lambda(ExpLambda { span, lambda }));
                 }
                 Err(ParseError {
                     message: "expected lambda after 'const'".to_string(),
@@ -357,6 +315,7 @@ impl Exp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::ops::{BinOp, UnOp};
     use crate::lexical::lex;
     use crate::syntax::parser::Parser;
 
@@ -365,8 +324,8 @@ mod tests {
         Parser::new(r.tokens, r.trivia)
     }
 
-    fn parse(src: &str) -> ExpKind {
-        Exp::parse(&mut parser(src)).unwrap().kind
+    fn parse(src: &str) -> Exp {
+        Exp::parse(&mut parser(src)).unwrap()
     }
 
     fn parse_err(src: &str) -> bool {
@@ -377,35 +336,35 @@ mod tests {
 
     #[test]
     fn parses_nil() {
-        assert!(matches!(parse("nil"), ExpKind::Nil));
+        assert!(matches!(parse("nil"), Exp::Nil(_)));
     }
     #[test]
     fn parses_true() {
-        assert!(matches!(parse("true"), ExpKind::Bool(true)));
+        assert!(matches!(parse("true"), Exp::Bool(ExpBool { value: true, .. })));
     }
     #[test]
     fn parses_false() {
-        assert!(matches!(parse("false"), ExpKind::Bool(false)));
+        assert!(matches!(parse("false"), Exp::Bool(ExpBool { value: false, .. })));
     }
     #[test]
     fn parses_number() {
-        assert!(matches!(parse("42"), ExpKind::Number(_)));
+        assert!(matches!(parse("42"), Exp::Number(_)));
     }
     #[test]
     fn parses_string() {
-        assert!(matches!(parse("\"hi\""), ExpKind::String(_)));
+        assert!(matches!(parse("\"hi\""), Exp::String(_)));
     }
 
     // ── Atomic forms ──────────────────────────────────────────────────────
 
     #[test]
     fn parses_name() {
-        assert!(matches!(parse("foo"), ExpKind::Name(ref s) if s == "foo"));
+        assert!(matches!(parse("foo"), Exp::Name(ExpName { ref name, .. }) if name == "foo"));
     }
 
     #[test]
     fn parses_paren() {
-        assert!(matches!(parse("(1)"), ExpKind::Paren(_)));
+        assert!(matches!(parse("(1)"), Exp::Paren(_)));
     }
 
     // ── VarDecl ───────────────────────────────────────────────────────────
@@ -414,10 +373,7 @@ mod tests {
     fn parses_var_decl_no_type() {
         assert!(matches!(
             parse("var x"),
-            ExpKind::VarDecl {
-                kind: VarDeclKind::Var,
-                ..
-            }
+            Exp::VarDecl(ExpVarDecl { kind: VarDeclKind::Var, .. })
         ));
     }
 
@@ -425,10 +381,7 @@ mod tests {
     fn parses_val_decl_with_type() {
         assert!(matches!(
             parse("val x: Foo"),
-            ExpKind::VarDecl {
-                kind: VarDeclKind::Val,
-                ..
-            }
+            Exp::VarDecl(ExpVarDecl { kind: VarDeclKind::Val, .. })
         ));
     }
 
@@ -436,99 +389,76 @@ mod tests {
 
     #[test]
     fn parses_field_access() {
-        assert!(matches!(parse("a.b"), ExpKind::Field { .. }));
+        assert!(matches!(parse("a.b"), Exp::Field(_)));
     }
 
     #[test]
     fn parses_chained_field() {
-        // a.b.c should produce Field(Field(Name, b), c)
-        let e = Exp::parse(&mut parser("a.b.c")).unwrap();
-        assert!(matches!(e.kind, ExpKind::Field { .. }));
+        assert!(matches!(parse("a.b.c"), Exp::Field(_)));
     }
 
     #[test]
     fn parses_index_access() {
-        assert!(matches!(parse("a[0]"), ExpKind::Index { .. }));
+        assert!(matches!(parse("a[0]"), Exp::Index(_)));
     }
 
     #[test]
     fn parses_call_no_args() {
-        assert!(matches!(parse("f()"), ExpKind::Call { .. }));
+        assert!(matches!(parse("f()"), Exp::Call(_)));
     }
 
     #[test]
     fn parses_call_with_args() {
-        assert!(matches!(parse("f(1, 2)"), ExpKind::Call { .. }));
+        assert!(matches!(parse("f(1, 2)"), Exp::Call(_)));
     }
 
     #[test]
     fn parses_call_initializer_arg() {
-        assert!(matches!(parse("f{1}"), ExpKind::Call { .. }));
+        assert!(matches!(parse("f{1}"), Exp::Call(_)));
     }
 
     #[test]
     fn parses_chained_call() {
-        // f()() — call result called again
-        assert!(matches!(parse("f()()"), ExpKind::Call { .. }));
+        assert!(matches!(parse("f()()"), Exp::Call(_)));
     }
 
     // ── Unary ─────────────────────────────────────────────────────────────
 
     #[test]
     fn parses_unary_neg() {
-        assert!(matches!(parse("-1"), ExpKind::Unary { op: UnOp::Neg, .. }));
+        assert!(matches!(parse("-1"), Exp::Unary(ExpUnary { op: UnOp::Neg, .. })));
     }
     #[test]
     fn parses_unary_not() {
-        assert!(matches!(
-            parse("not x"),
-            ExpKind::Unary { op: UnOp::Not, .. }
-        ));
+        assert!(matches!(parse("not x"), Exp::Unary(ExpUnary { op: UnOp::Not, .. })));
     }
     #[test]
     fn parses_unary_len() {
-        assert!(matches!(parse("#x"), ExpKind::Unary { op: UnOp::Len, .. }));
+        assert!(matches!(parse("#x"), Exp::Unary(ExpUnary { op: UnOp::Len, .. })));
     }
     #[test]
     fn parses_unary_bitnot() {
-        assert!(matches!(
-            parse("~x"),
-            ExpKind::Unary {
-                op: UnOp::BitNot,
-                ..
-            }
-        ));
+        assert!(matches!(parse("~x"), Exp::Unary(ExpUnary { op: UnOp::BitNot, .. })));
     }
 
     // ── Binary ────────────────────────────────────────────────────────────
 
     #[test]
     fn parses_binary_add() {
-        assert!(matches!(
-            parse("1 + 2"),
-            ExpKind::Binary { op: BinOp::Add, .. }
-        ));
+        assert!(matches!(parse("1 + 2"), Exp::Binary(ref b) if b.op == BinOp::Add));
     }
 
     #[test]
     fn parses_binary_and() {
-        assert!(matches!(
-            parse("a and b"),
-            ExpKind::Binary { op: BinOp::And, .. }
-        ));
+        assert!(matches!(parse("a and b"), Exp::Binary(ref b) if b.op == BinOp::And));
     }
 
     #[test]
     fn precedence_mul_over_add() {
-        // 1 + 2 * 3 → Binary(Add, 1, Binary(Mul, 2, 3))
-        let e = Exp::parse(&mut parser("1 + 2 * 3")).unwrap();
-        if let ExpKind::Binary {
-            op: BinOp::Add,
-            right,
-            ..
-        } = e.kind
-        {
-            assert!(matches!(right.kind, ExpKind::Binary { op: BinOp::Mul, .. }));
+        let e = parse("1 + 2 * 3");
+        if let Exp::Binary(ref b) = e {
+            assert_eq!(b.op, BinOp::Add);
+            assert!(matches!(*b.right, Exp::Binary(ref r) if r.op == BinOp::Mul));
         } else {
             panic!("expected add at root");
         }
@@ -536,15 +466,10 @@ mod tests {
 
     #[test]
     fn right_assoc_pow() {
-        // 2 ^ 3 ^ 4 → Binary(Pow, 2, Binary(Pow, 3, 4))
-        let e = Exp::parse(&mut parser("2 ^ 3 ^ 4")).unwrap();
-        if let ExpKind::Binary {
-            op: BinOp::Pow,
-            right,
-            ..
-        } = e.kind
-        {
-            assert!(matches!(right.kind, ExpKind::Binary { op: BinOp::Pow, .. }));
+        let e = parse("2 ^ 3 ^ 4");
+        if let Exp::Binary(ref b) = e {
+            assert_eq!(b.op, BinOp::Pow);
+            assert!(matches!(*b.right, Exp::Binary(ref r) if r.op == BinOp::Pow));
         } else {
             panic!("expected pow at root");
         }
@@ -554,12 +479,12 @@ mod tests {
 
     #[test]
     fn parses_lambda_expr() {
-        assert!(matches!(parse("(): unit end"), ExpKind::Lambda(_)));
+        assert!(matches!(parse("(): unit end"), Exp::Lambda(_)));
     }
 
     #[test]
     fn parses_const_lambda_expr() {
-        assert!(matches!(parse("const (): unit end"), ExpKind::Lambda(_)));
+        assert!(matches!(parse("const (): unit end"), Exp::Lambda(_)));
     }
 
     // ── Rejections ────────────────────────────────────────────────────────

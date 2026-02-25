@@ -445,8 +445,8 @@ impl NamespaceTree {
                     crate::syntax::ast::DefExpr::Variant(_) => DefinitionKind::Type,
                     crate::syntax::ast::DefExpr::Trait(_) => DefinitionKind::Trait,
                     crate::syntax::ast::DefExpr::Exp(exp) => {
-                        match &exp.kind {
-                            crate::syntax::ast::ExpKind::Lambda(_) => DefinitionKind::Function,
+                        match exp {
+                            crate::syntax::ast::Exp::Lambda(_) => DefinitionKind::Function,
                             _ => DefinitionKind::Value,
                         }
                     }

@@ -4,7 +4,7 @@
 //! type checking, type resolution, and constraint solving. It builds upon the symbol
 //! table system from Step 3 to provide comprehensive type analysis.
 
-use crate::syntax::ast::{TopItem, Definition, DefExpr, Exp, ExpKind, TypeName};
+use crate::syntax::ast::{TopItem, Definition, DefExpr, Exp, TypeName};
 use crate::lexical::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName};
 use super::bundle::BundleName;
@@ -629,13 +629,14 @@ impl TypeSystem {
         expression: &Exp,
         expected_type: Option<&NovaType>,
     ) -> TypeCheckResult {
-        match &expression.kind {
-            ExpKind::Number(_) => TypeCheckResult::Success(NovaType::Primitive(PrimitiveType::Integer)), // TODO: Distinguish int/float
-            ExpKind::Bool(_) => TypeCheckResult::Success(NovaType::Primitive(PrimitiveType::Boolean)),
-            ExpKind::String(_) => TypeCheckResult::Success(NovaType::Primitive(PrimitiveType::String)),
-            ExpKind::Nil => TypeCheckResult::Success(NovaType::Unit),
+        match expression {
+            Exp::Number(_) => TypeCheckResult::Success(NovaType::Primitive(PrimitiveType::Integer)), // TODO: Distinguish int/float
+            Exp::Bool(_) => TypeCheckResult::Success(NovaType::Primitive(PrimitiveType::Boolean)),
+            Exp::String(_) => TypeCheckResult::Success(NovaType::Primitive(PrimitiveType::String)),
+            Exp::Nil(_) => TypeCheckResult::Success(NovaType::Unit),
             
-            ExpKind::Lambda(lambda) => {
+            Exp::Lambda(exp_lambda) => {
+                let lambda = &exp_lambda.lambda;
                 // Type check lambda expression
                 let mut param_types = Vec::new();
                 
@@ -661,7 +662,7 @@ impl TypeSystem {
                             message: "Function type mismatch".to_string(),
                             expected: Some(expected.clone()),
                             actual: Some(function_type),
-                            location: expression.span,
+                            location: expression.span(),
                             suggestions: vec!["Check function signature".to_string()],
                         })
                     }
@@ -670,14 +671,14 @@ impl TypeSystem {
                 }
             }
 
-            ExpKind::Binary { left, right, op } => {
+            Exp::Binary(b) => {
                 // Type check binary expression
-                let left_result = self.type_check_expression(left, None);
-                let right_result = self.type_check_expression(right, None);
+                let left_result = self.type_check_expression(&b.left, None);
+                let right_result = self.type_check_expression(&b.right, None);
 
                 match (left_result, right_result) {
                     (TypeCheckResult::Success(left_type), TypeCheckResult::Success(right_type)) => {
-                        self.type_check_binary_operation(&left_type, &right_type, op, expression.span)
+                        self.type_check_binary_operation(&left_type, &right_type, &b.op, expression.span())
                     }
                     (TypeCheckResult::Error(err), _) | (_, TypeCheckResult::Error(err)) => {
                         TypeCheckResult::Error(err)
@@ -686,36 +687,36 @@ impl TypeSystem {
                         message: "Cannot type check binary expression".to_string(),
                         expected: None,
                         actual: None,
-                        location: expression.span,
+                        location: expression.span(),
                         suggestions: Vec::new(),
                     })
                 }
             }
 
-            ExpKind::Unary { op, exp } => {
-                let operand_result = self.type_check_expression(exp, None);
+            Exp::Unary(u) => {
+                let operand_result = self.type_check_expression(&u.exp, None);
                 match operand_result {
                     TypeCheckResult::Success(operand_type) => {
-                        self.type_check_unary_operation(&operand_type, op, expression.span)
+                        self.type_check_unary_operation(&operand_type, &u.op, expression.span())
                     }
                     TypeCheckResult::Error(err) => TypeCheckResult::Error(err),
                     _ => TypeCheckResult::Error(TypeCheckError {
                         message: "Cannot type check unary expression".to_string(),
                         expected: None,
                         actual: None,
-                        location: expression.span,
+                        location: expression.span(),
                         suggestions: Vec::new(),
                     })
                 }
             }
 
             // Postfix / compound forms — full resolution deferred to later semantic passes
-            ExpKind::Name(_)
-            | ExpKind::Paren(_)
-            | ExpKind::Field { .. }
-            | ExpKind::Index { .. }
-            | ExpKind::Call { .. }
-            | ExpKind::VarDecl { .. } => {
+            Exp::Name(_)
+            | Exp::Paren(_)
+            | Exp::Field(_)
+            | Exp::Index(_)
+            | Exp::Call(_)
+            | Exp::VarDecl(_) => {
                 // TODO: resolve names, fields, indices, calls against the symbol table
                 TypeCheckResult::Success(NovaType::Error)
             }

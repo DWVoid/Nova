@@ -798,7 +798,7 @@ impl DecoratorSystem {
                     parameter_name: param.name.clone(),
                     value: self.convert_ast_to_decorator_value(arg),
                     value_type: param.param_type.clone(),
-                    source_span: arg.span,
+                    source_span: arg.span(),
                 };
                 resolved_args.push(resolved_arg);
             }
@@ -831,19 +831,19 @@ impl DecoratorSystem {
 
     /// Convert AST expression to decorator value
     fn convert_ast_to_decorator_value(&self, exp: &Exp) -> DecoratorValue {
-        match &exp.kind {
-            crate::syntax::ast::ExpKind::Number(n) => {
+        match exp {
+            crate::syntax::ast::Exp::Number(n) => {
                 // Try to parse as integer first, then float
-                if let Ok(i) = n.parse::<i64>() {
+                if let Ok(i) = n.value.parse::<i64>() {
                     DecoratorValue::Integer(i)
-                } else if let Ok(f) = n.parse::<f64>() {
+                } else if let Ok(f) = n.value.parse::<f64>() {
                     DecoratorValue::Float(f)
                 } else {
                     DecoratorValue::Expression(exp.clone())
                 }
             }
-            crate::syntax::ast::ExpKind::String(s) => DecoratorValue::String(s.clone()),
-            crate::syntax::ast::ExpKind::Bool(b) => DecoratorValue::Boolean(*b),
+            crate::syntax::ast::Exp::String(s) => DecoratorValue::String(s.value.clone()),
+            crate::syntax::ast::Exp::Bool(b) => DecoratorValue::Boolean(b.value),
             _ => DecoratorValue::Expression(exp.clone()),
         }
     }
@@ -1053,7 +1053,7 @@ impl Default for DecoratorSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::ast::{Name, ExpKind};
+    use crate::syntax::ast::{Name, ExpString, ExpNil};
 
     #[test]
     fn test_decorator_system_creation() {
@@ -1096,10 +1096,10 @@ mod tests {
     fn test_ast_to_decorator_value_conversion() {
         let decorator_system = DecoratorSystem::new(BundleName::from("test"));
         
-        let string_exp = Exp {
-            kind: ExpKind::String("test".to_string()),
+        let string_exp = Exp::String(ExpString {
             span: Span::single(Position::new_start()),
-        };
+            value: "test".to_string(),
+        });
         
         let value = decorator_system.convert_ast_to_decorator_value(&string_exp);
         match value {
@@ -1120,10 +1120,9 @@ mod tests {
                 span: Span::single(Position::new_start()),
             },
             type_spec: None,
-            expr: crate::syntax::ast::DefExpr::Exp(Exp {
-                kind: ExpKind::Nil,
+            expr: crate::syntax::ast::DefExpr::Exp(Exp::Nil(ExpNil {
                 span: Span::single(Position::new_start()),
-            }),
+            })),
             span: Span::single(Position::new_start()),
         };
         

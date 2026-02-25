@@ -28,7 +28,7 @@ impl Parsable for Field {
             p.expect_symbol(Symbol::RBracket)?;
             p.expect_symbol(Symbol::Assign)?;
             let value = Exp::parse(p)?;
-            let span = open.span.merge(value.span);
+            let span = open.span.merge(value.span());
             return Ok(Field {
                 span,
                 key: Some(FieldKey::Exp(key)),
@@ -40,7 +40,7 @@ impl Parsable for Field {
                 let name = Name::parse(p)?;
                 p.expect_symbol(Symbol::Assign)?;
                 let value = Exp::parse(p)?;
-                let span = name.span.merge(value.span);
+                let span = name.span.merge(value.span());
                 return Ok(Field {
                     span,
                     key: Some(FieldKey::Name(name)),
@@ -50,7 +50,7 @@ impl Parsable for Field {
         }
         let value = Exp::parse(p)?;
         Ok(Field {
-            span: value.span,
+            span: value.span(),
             key: None,
             value,
         })

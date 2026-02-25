@@ -18,7 +18,7 @@ impl Parsable for RetStat {
         if !p.is_block_end() && !p.is_symbol(crate::lexical::Symbol::Semi) {
             exprs = p.parse_exp_list()?;
         }
-        let end_span = exprs.last().map(|e| e.span).unwrap_or(token.span);
+        let end_span = exprs.last().map(|e| e.span()).unwrap_or(token.span);
         Ok(RetStat {
             span: token.span.merge(end_span),
             exprs,

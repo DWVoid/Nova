@@ -65,7 +65,7 @@ impl Parsable for EnumMember {
         let name = Name::parse(p)?;
         p.expect_symbol(Symbol::Assign)?;
         let value = Exp::parse(p)?;
-        let span = name.span.merge(value.span);
+        let span = name.span.merge(value.span());
         Ok(EnumMember { span, name, value })
     }
 }

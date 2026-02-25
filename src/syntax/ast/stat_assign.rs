@@ -23,10 +23,10 @@ impl Parsable for StatAssign {
         }
         let eq = p.expect_symbol(Symbol::Assign)?;
         let exprs = p.parse_exp_list()?;
-        let end_span = exprs.last().map(|e| e.span).unwrap_or(eq.span);
+        let end_span = exprs.last().map(|e| e.span()).unwrap_or(eq.span);
         let span = vars
             .last()
-            .map(|v| v.span.merge(end_span))
+            .map(|v| v.span().merge(end_span))
             .unwrap_or(end_span);
         Ok(StatAssign { span, vars, exprs })
     }
@@ -60,10 +60,7 @@ mod tests {
     #[test]
     fn parses_var_decl_assign() {
         let s = StatAssign::parse(&mut parser("var x = 1")).unwrap();
-        assert!(matches!(
-            s.vars[0].kind,
-            super::super::exp::ExpKind::VarDecl { .. }
-        ));
+        assert!(matches!(s.vars[0], super::super::exp::Exp::VarDecl(_)));
     }
 
     #[test]

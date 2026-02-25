@@ -857,10 +857,9 @@ mod tests {
                 span: Span::single(Position::new_start()),
             },
             type_spec: None,
-            expr: DefExpr::Exp(crate::syntax::ast::Exp {
-                kind: crate::syntax::ast::ExpKind::Nil,
+            expr: DefExpr::Exp(crate::syntax::ast::Exp::Nil(crate::syntax::ast::ExpNil {
                 span: Span::single(Position::new_start()),
-            }),
+            })),
             span: Span::single(Position::new_start()),
         };
 

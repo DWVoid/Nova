@@ -19,7 +19,7 @@ impl Parsable for StatRepeat {
         p.expect_keyword(Keyword::Until)?;
         let cond = Exp::parse(p)?;
         Ok(StatRepeat {
-            span: token.span.merge(cond.span),
+            span: token.span.merge(cond.span()),
             block,
             cond,
         })
@@ -40,10 +40,7 @@ mod tests {
     #[test]
     fn parses_repeat() {
         let s = StatRepeat::parse(&mut parser("repeat until true")).unwrap();
-        assert!(matches!(
-            s.cond.kind,
-            super::super::exp::ExpKind::Bool(true)
-        ));
+        assert!(matches!(s.cond, super::super::exp::Exp::Bool(super::super::exp_bool::ExpBool { value: true, .. })));
     }
     #[test]
     fn rejects_missing_until() {

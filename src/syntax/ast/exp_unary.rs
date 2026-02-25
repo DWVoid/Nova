@@ -1,0 +1,11 @@
+use super::ops::UnOp;
+use crate::lexical::Span;
+use serde::Serialize;
+
+/// A unary operator expression: `-x`, `not x`, `#x`, `~x`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ExpUnary {
+    pub span: Span,
+    pub op: UnOp,
+    pub exp: Box<super::exp::Exp>,
+}

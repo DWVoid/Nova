@@ -1,4 +1,4 @@
-use super::exp::{Exp, ExpKind};
+use super::exp::Exp;
 use crate::lexical::Span;
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -7,22 +7,21 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatCall {
     pub span: Span,
-    /// The call expression. Always `ExpKind::Call { .. }`.
+    /// The call expression. Always `Exp::Call(..)`.
     pub call: Exp,
 }
 
 impl Parsable for StatCall {
     fn parse(p: &mut Parser) -> Result<Self, ParseError> {
         let exp = Exp::parse(p)?;
-        match exp.kind {
-            ExpKind::Call { .. } => Ok(StatCall {
-                span: exp.span,
-                call: exp,
-            }),
-            _ => Err(ParseError {
+        if matches!(exp, Exp::Call(_)) {
+            let span = exp.span();
+            Ok(StatCall { span, call: exp })
+        } else {
+            Err(ParseError {
                 message: "expected function call expression".to_string(),
-                position: exp.span.start,
-            }),
+                position: exp.span().start,
+            })
         }
     }
 }
@@ -41,10 +40,7 @@ mod tests {
     #[test]
     fn parses_call_stat() {
         let s = StatCall::parse(&mut parser("f()")).unwrap();
-        assert!(matches!(
-            s.call.kind,
-            super::super::exp::ExpKind::Call { .. }
-        ));
+        assert!(matches!(s.call, Exp::Call(_)));
     }
     #[test]
     fn parses_chained_call_stat() {

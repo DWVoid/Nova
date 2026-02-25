@@ -4,7 +4,7 @@
 //! namespaces and bundles, handles symbol conflicts, and provides cross-reference
 //! resolution for the Nova semantic analysis system.
 
-use crate::syntax::ast::{TopItem, Definition, DefExpr, ExpKind};
+use crate::syntax::ast::{TopItem, Definition, DefExpr, Exp};
 use crate::lexical::{Position, Span};
 use super::{SemanticDiagnostic, DiagnosticSeverity, DiagnosticCategory, QualifiedName, ExportedSymbol, ImportedSymbol, ResolutionStatus, UnresolvedReason, SymbolConflict, Definition as SemanticDefinition, Visibility};
 use super::bundle::BundleName;
@@ -176,8 +176,8 @@ impl SymbolTableBuilder {
                         })
                     }
                     DefExpr::Exp(exp) => {
-                        match &exp.kind {
-                            ExpKind::Lambda(_) => {
+                        match exp {
+                            Exp::Lambda(_) => {
                                 Some(SemanticDefinition::Function {
                                     signature: super::FunctionSignature {
                                         name: def.name.value.clone(),
@@ -533,7 +533,7 @@ impl SymbolTableBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax::ast::{Name, Exp, ExpKind};
+    use crate::syntax::ast::{Name, Exp, ExpLambda};
 
     fn create_test_definition(name: &str, is_exported: bool) -> TopItem {
         TopItem::Definition(Definition {
@@ -552,9 +552,9 @@ mod tests {
                 span: Span::single(Position::new_start()),
             },
             type_spec: None,
-            expr: DefExpr::Exp(Exp {
+            expr: DefExpr::Exp(Exp::Lambda(ExpLambda {
                 span: Span::single(Position::new_start()),
-                kind: ExpKind::Lambda(crate::syntax::ast::LambdaExpr {
+                lambda: crate::syntax::ast::LambdaExpr {
                     span: Span::single(Position::new_start()),
                     is_const: false,
                     params: Vec::new(),
@@ -573,8 +573,8 @@ mod tests {
                         stats: Vec::new(),
                         ret: None,
                     },
-                }),
-            }),
+                },
+            })),
         })
     }
 

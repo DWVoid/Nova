@@ -85,7 +85,7 @@ impl DefExpr {
             DefExpr::Enum(def) => def.span,
             DefExpr::Variant(def) => def.span,
             DefExpr::Trait(def) => def.span,
-            DefExpr::Exp(exp) => exp.span,
+            DefExpr::Exp(exp) => exp.span(),
         }
     }
 }

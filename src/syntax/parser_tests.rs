@@ -1,6 +1,6 @@
 use super::parser::Parser;
 use crate::lexical::lex;
-use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, ExpKind, Stat, TopItem};
+use crate::syntax::ast::{ArgsKind, Chunk, DefExpr, Exp, ExpLambda, Stat, TopItem};
 
 fn parse_chunk(input: &str) -> Chunk {
     let lex_result = lex(input).unwrap();
@@ -45,8 +45,8 @@ fn parses_simple_definition_lambda() {
     assert_eq!(chunk.items.len(), 1);
     match &chunk.items[0] {
         TopItem::Definition(def) => match &def.expr {
-            DefExpr::Exp(exp) => match &exp.kind {
-                ExpKind::Lambda(_) => {}
+            DefExpr::Exp(exp) => match exp {
+                Exp::Lambda(_) => {}
                 _ => panic!("expected lambda expression"),
             },
             _ => panic!("expected expression definition"),
@@ -95,13 +95,13 @@ fn parses_assign_with_var_decl() {
     let DefExpr::Exp(exp) = &def.expr else {
         panic!("expected exp");
     };
-    let ExpKind::Lambda(lambda) = &exp.kind else {
+    let Exp::Lambda(exp_lambda) = exp else {
         panic!("expected lambda");
     };
-    let stat = &lambda.block.stats[0];
+    let stat = &exp_lambda.lambda.block.stats[0];
     match stat {
-        Stat::Assign(s) => match &s.vars[0].kind {
-            ExpKind::VarDecl { .. } => {}
+        Stat::Assign(s) => match &s.vars[0] {
+            Exp::VarDecl(_) => {}
             _ => panic!("expected var decl"),
         },
         _ => panic!("expected assign"),
@@ -125,13 +125,13 @@ fn parses_invoke_and_method_call() {
     let DefExpr::Exp(exp) = &def.expr else {
         panic!("expected exp");
     };
-    let ExpKind::Lambda(lambda) = &exp.kind else {
+    let Exp::Lambda(exp_lambda) = exp else {
         panic!("expected lambda");
     };
-    assert_eq!(lambda.block.stats.len(), 2);
-    match &lambda.block.stats[0] {
-        Stat::Call(s) => match &s.call.kind {
-            ExpKind::Call { args, .. } => match &args.kind {
+    assert_eq!(exp_lambda.lambda.block.stats.len(), 2);
+    match &exp_lambda.lambda.block.stats[0] {
+        Stat::Call(s) => match &s.call {
+            Exp::Call(c) => match &c.args.kind {
                 ArgsKind::ExpList(list) => assert_eq!(list.len(), 2),
                 _ => panic!("expected exp list"),
             },
@@ -162,10 +162,10 @@ fn parses_control_flow_and_continue() {
     let DefExpr::Exp(exp) = &def.expr else {
         panic!("expected exp");
     };
-    let ExpKind::Lambda(lambda) = &exp.kind else {
+    let Exp::Lambda(exp_lambda) = exp else {
         panic!("expected lambda");
     };
-    assert!(lambda.block.ret.is_some());
+    assert!(exp_lambda.lambda.block.ret.is_some());
 }
 
 #[test]

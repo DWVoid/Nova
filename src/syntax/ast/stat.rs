@@ -1,4 +1,4 @@
-use super::exp::{Exp, ExpKind};
+use super::exp::Exp;
 use super::stat_assign::StatAssign;
 use super::stat_call::StatCall;
 use super::stat_do::StatDo;
@@ -95,12 +95,12 @@ impl Parsable for Stat {
         let exp = Exp::parse(p)?;
 
         // A bare parenthesised expression is not a valid statement.
-        if matches!(exp.kind, ExpKind::Paren(_)) {
+        if matches!(exp, Exp::Paren(_)) {
             return Err(ParseError {
                 message: "parenthesized expression cannot start a statement; \
                           expected assignment or call"
                     .to_string(),
-                position: exp.span.start,
+                position: exp.span().start,
             });
         }
 
@@ -113,24 +113,23 @@ impl Parsable for Stat {
             }
             let eq = p.expect_symbol(Symbol::Assign)?;
             let exprs = p.parse_exp_list()?;
-            let end_span = exprs.last().map(|e| e.span).unwrap_or(eq.span);
+            let end_span = exprs.last().map(|e| e.span()).unwrap_or(eq.span);
             let span = vars
                 .last()
-                .map(|v| v.span.merge(end_span))
+                .map(|v| v.span().merge(end_span))
                 .unwrap_or(end_span);
             return Ok(Stat::Assign(StatAssign { span, vars, exprs }));
         }
 
         // Otherwise the expression must be a call.
-        match exp.kind {
-            ExpKind::Call { .. } => Ok(Stat::Call(StatCall {
-                span: exp.span,
-                call: exp,
-            })),
-            _ => Err(ParseError {
+        if matches!(exp, Exp::Call(_)) {
+            let span = exp.span();
+            Ok(Stat::Call(StatCall { span, call: exp }))
+        } else {
+            Err(ParseError {
                 message: "expression statement must be a function call or assignment".to_string(),
-                position: exp.span.start,
-            }),
+                position: exp.span().start,
+            })
         }
     }
 }

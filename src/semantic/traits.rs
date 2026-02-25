@@ -604,7 +604,8 @@ impl TraitSystem {
         // Process method implementations
         for item in &impl_block.items {
             if let Definition { expr: DefExpr::Exp(exp), .. } = item {
-                if let crate::syntax::ast::ExpKind::Lambda(lambda) = &exp.kind {
+                if let crate::syntax::ast::Exp::Lambda(exp_lambda) = exp {
+                    let lambda = &exp_lambda.lambda;
                     // Check if this method exists in trait
                     if let Some(trait_method) = trait_def.signatures.get(&item.name.value) {
                         let method_impl = self.create_method_implementation(item, lambda, trait_method)?;
@@ -663,7 +664,8 @@ impl TraitSystem {
         // Process method implementations
         for item in &impl_block.items {
             if let Definition { expr: DefExpr::Exp(exp), .. } = item {
-                if let crate::syntax::ast::ExpKind::Lambda(lambda) = &exp.kind {
+                if let crate::syntax::ast::Exp::Lambda(exp_lambda) = exp {
+                    let lambda = &exp_lambda.lambda;
                     // For inherent implementations, we create the signature from the lambda
                     let trait_method = self.create_trait_method_from_lambda(item, lambda)?;
                     let method_impl = self.create_method_implementation(item, lambda, &trait_method)?;

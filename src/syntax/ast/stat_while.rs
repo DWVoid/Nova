@@ -1,5 +1,6 @@
 use super::block::Block;
 use super::exp::Exp;
+use super::stat::Stat;
 use crate::lexical::{Keyword, Span};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -10,6 +11,12 @@ pub struct StatWhile {
     pub span: Span,
     pub cond: Exp,
     pub block: Block,
+}
+
+impl StatWhile {
+    pub fn new(span: Span, cond: Exp, block: Block) -> Stat {
+        Stat::While(StatWhile { span, cond, block })
+    }
 }
 
 impl Parsable for StatWhile {

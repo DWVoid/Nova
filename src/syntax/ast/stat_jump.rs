@@ -1,3 +1,4 @@
+use super::stat::Stat;
 use crate::lexical::{Keyword, Span};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -6,6 +7,12 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatBreak {
     pub span: Span,
+}
+
+impl StatBreak {
+    pub fn new(span: Span) -> Stat {
+        Stat::Break(StatBreak { span })
+    }
 }
 
 impl Parsable for StatBreak {
@@ -18,6 +25,12 @@ impl Parsable for StatBreak {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatContinue {
     pub span: Span,
+}
+
+impl StatContinue {
+    pub fn new(span: Span) -> Stat {
+        Stat::Continue(StatContinue { span })
+    }
 }
 
 impl Parsable for StatContinue {

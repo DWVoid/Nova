@@ -1,5 +1,6 @@
 use super::block::Block;
 use super::exp::Exp;
+use super::stat::Stat;
 use crate::lexical::{Keyword, Span};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -17,6 +18,12 @@ pub struct StatIf {
     pub span: Span,
     pub clauses: Vec<IfClause>,
     pub else_block: Option<Block>,
+}
+
+impl StatIf {
+    pub fn new(span: Span, clauses: Vec<IfClause>, else_block: Option<Block>) -> Stat {
+        Stat::If(StatIf { span, clauses, else_block })
+    }
 }
 
 impl Parsable for StatIf {

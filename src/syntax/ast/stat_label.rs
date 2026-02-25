@@ -1,4 +1,5 @@
 use super::name::Name;
+use super::stat::Stat;
 use crate::lexical::{Keyword, Span, Symbol, TokenKind};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -8,6 +9,12 @@ use serde::Serialize;
 pub struct StatGoto {
     pub span: Span,
     pub label: Name,
+}
+
+impl StatGoto {
+    pub fn new(span: Span, label: Name) -> Stat {
+        Stat::Goto(StatGoto { span, label })
+    }
 }
 
 impl Parsable for StatGoto {
@@ -25,6 +32,12 @@ impl Parsable for StatGoto {
 pub struct StatLabel {
     pub span: Span,
     pub label: Name,
+}
+
+impl StatLabel {
+    pub fn new(span: Span, label: Name) -> Stat {
+        Stat::Label(StatLabel { span, label })
+    }
 }
 
 impl Parsable for StatLabel {

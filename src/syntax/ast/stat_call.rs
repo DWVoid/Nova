@@ -1,4 +1,5 @@
 use super::exp::Exp;
+use super::stat::Stat;
 use crate::lexical::Span;
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -9,6 +10,12 @@ pub struct StatCall {
     pub span: Span,
     /// The call expression. Always `Exp::Call(..)`.
     pub call: Exp,
+}
+
+impl StatCall {
+    pub fn new(span: Span, call: Exp) -> Stat {
+        Stat::Call(StatCall { span, call })
+    }
 }
 
 impl Parsable for StatCall {

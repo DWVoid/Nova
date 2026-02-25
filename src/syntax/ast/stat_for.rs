@@ -1,6 +1,7 @@
 use super::block::Block;
 use super::exp::Exp;
 use super::name::Name;
+use super::stat::Stat;
 use crate::lexical::{Keyword, Span, Symbol};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -14,6 +15,12 @@ pub struct StatForNumeric {
     pub end: Exp,
     pub step: Option<Exp>,
     pub block: Block,
+}
+
+impl StatForNumeric {
+    pub fn new(span: Span, name: Name, start: Exp, end: Exp, step: Option<Exp>, block: Block) -> Stat {
+        Stat::ForNumeric(StatForNumeric { span, name, start, end, step, block })
+    }
 }
 
 impl Parsable for StatForNumeric {
@@ -50,6 +57,12 @@ pub struct StatForGeneric {
     pub names: Vec<Name>,
     pub exprs: Vec<Exp>,
     pub block: Block,
+}
+
+impl StatForGeneric {
+    pub fn new(span: Span, names: Vec<Name>, exprs: Vec<Exp>, block: Block) -> Stat {
+        Stat::ForGeneric(StatForGeneric { span, names, exprs, block })
+    }
 }
 
 impl Parsable for StatForGeneric {

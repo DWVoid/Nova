@@ -1,3 +1,4 @@
+use super::stat::Stat;
 use crate::lexical::{Span, Symbol};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -6,6 +7,12 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatEmpty {
     pub span: Span,
+}
+
+impl StatEmpty {
+    pub fn new(span: Span) -> Stat {
+        Stat::Empty(StatEmpty { span })
+    }
 }
 
 impl Parsable for StatEmpty {

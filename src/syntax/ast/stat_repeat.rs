@@ -1,5 +1,6 @@
 use super::block::Block;
 use super::exp::Exp;
+use super::stat::Stat;
 use crate::lexical::{Keyword, Span};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -10,6 +11,12 @@ pub struct StatRepeat {
     pub span: Span,
     pub block: Block,
     pub cond: Exp,
+}
+
+impl StatRepeat {
+    pub fn new(span: Span, block: Block, cond: Exp) -> Stat {
+        Stat::Repeat(StatRepeat { span, block, cond })
+    }
 }
 
 impl Parsable for StatRepeat {

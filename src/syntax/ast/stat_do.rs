@@ -1,4 +1,5 @@
 use super::block::Block;
+use super::stat::Stat;
 use crate::lexical::{Keyword, Span};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -8,6 +9,12 @@ use serde::Serialize;
 pub struct StatDo {
     pub span: Span,
     pub block: Block,
+}
+
+impl StatDo {
+    pub fn new(span: Span, block: Block) -> Stat {
+        Stat::Do(StatDo { span, block })
+    }
 }
 
 impl Parsable for StatDo {

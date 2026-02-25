@@ -1,4 +1,5 @@
 use super::exp::Exp;
+use super::stat::Stat;
 use crate::lexical::{Span, Symbol};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
@@ -11,6 +12,12 @@ pub struct StatAssign {
     /// a legal l-value (Name, Field, Index, or VarDecl).
     pub vars: Vec<Exp>,
     pub exprs: Vec<Exp>,
+}
+
+impl StatAssign {
+    pub fn new(span: Span, vars: Vec<Exp>, exprs: Vec<Exp>) -> Stat {
+        Stat::Assign(StatAssign { span, vars, exprs })
+    }
 }
 
 impl Parsable for StatAssign {

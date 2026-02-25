@@ -1,3 +1,4 @@
+use super::exp::Exp;
 use super::ops::UnOp;
 use crate::lexical::Span;
 use serde::Serialize;
@@ -8,4 +9,14 @@ pub struct ExpUnary {
     pub span: Span,
     pub op: UnOp,
     pub exp: Box<super::exp::Exp>,
+}
+
+impl ExpUnary {
+    pub fn new(span: Span, op: UnOp, exp: Exp) -> Exp {
+        Exp::Unary(ExpUnary {
+            span,
+            op,
+            exp: Box::new(exp),
+        })
+    }
 }

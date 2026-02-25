@@ -1,3 +1,4 @@
+use super::exp::Exp;
 use crate::lexical::Span;
 use serde::Serialize;
 
@@ -7,4 +8,10 @@ use serde::Serialize;
 pub struct ExpNumber {
     pub span: Span,
     pub value: String,
+}
+
+impl ExpNumber {
+    pub fn new(span: Span, value: String) -> Exp {
+        Exp::Number(ExpNumber { span, value })
+    }
 }

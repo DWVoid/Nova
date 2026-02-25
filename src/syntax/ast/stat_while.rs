@@ -41,7 +41,10 @@ mod tests {
     #[test]
     fn parses_while() {
         let s = StatWhile::parse(&mut parser("while true do end")).unwrap();
-        assert!(matches!(s.cond, super::super::exp::Exp::Bool(super::super::exp_bool::ExpBool { value: true, .. })));
+        assert!(matches!(
+            s.cond,
+            super::super::exp::Exp::Bool(super::super::exp_bool::ExpBool { value: true, .. })
+        ));
     }
     #[test]
     fn rejects_missing_do() {

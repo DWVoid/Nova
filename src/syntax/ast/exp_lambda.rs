@@ -1,3 +1,4 @@
+use super::exp::Exp;
 use super::lambda_expr::LambdaExpr;
 use crate::lexical::Span;
 use serde::Serialize;
@@ -7,4 +8,11 @@ use serde::Serialize;
 pub struct ExpLambda {
     pub span: Span,
     pub lambda: LambdaExpr,
+}
+
+impl ExpLambda {
+    pub fn new(lambda: LambdaExpr) -> Exp {
+        let span = lambda.span;
+        Exp::Lambda(ExpLambda { span, lambda })
+    }
 }

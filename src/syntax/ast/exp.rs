@@ -58,18 +58,18 @@ impl Exp {
     /// Return the source span of this expression.
     pub fn span(&self) -> Span {
         match self {
-            Exp::Nil(e)    => e.span,
-            Exp::Bool(e)   => e.span,
+            Exp::Nil(e) => e.span,
+            Exp::Bool(e) => e.span,
             Exp::Number(e) => e.span,
             Exp::String(e) => e.span,
-            Exp::Name(e)   => e.span,
-            Exp::Paren(e)  => e.span,
-            Exp::Field(e)  => e.span,
-            Exp::Index(e)  => e.span,
-            Exp::Call(e)   => e.span,
-            Exp::VarDecl(e)=> e.span,
+            Exp::Name(e) => e.span,
+            Exp::Paren(e) => e.span,
+            Exp::Field(e) => e.span,
+            Exp::Index(e) => e.span,
+            Exp::Call(e) => e.span,
+            Exp::VarDecl(e) => e.span,
             Exp::Lambda(e) => e.span,
-            Exp::Unary(e)  => e.span,
+            Exp::Unary(e) => e.span,
             Exp::Binary(e) => e.span,
         }
     }
@@ -99,12 +99,7 @@ impl Exp {
             let next_min = if assoc == Assoc::Left { prec + 1 } else { prec };
             let right = Self::parse_prec(p, next_min)?;
             let span = left.span().merge(right.span());
-            left = Exp::Binary(Box::new(ExpBinary {
-                span,
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            }));
+            left = ExpBinary::new(span, op, left, right);
         }
         Ok(left)
     }
@@ -114,11 +109,7 @@ impl Exp {
             let token = p.advance();
             let exp = Self::parse_unary(p)?;
             let span = token.span.merge(exp.span());
-            return Ok(Exp::Unary(ExpUnary {
-                span,
-                op,
-                exp: Box::new(exp),
-            }));
+            return Ok(ExpUnary::new(span, op, exp));
         }
         Self::parse_postfix(p)
     }
@@ -132,11 +123,7 @@ impl Exp {
                 p.advance();
                 let name = Name::parse(p)?;
                 let span = base.span().merge(name.span);
-                base = Exp::Field(ExpField {
-                    span,
-                    prefix: Box::new(base),
-                    name,
-                });
+                base = ExpField::new(span, base, name);
                 continue;
             }
             if p.is_symbol(Symbol::LBracket) {
@@ -144,11 +131,7 @@ impl Exp {
                 let index = Exp::parse(p)?;
                 let close = p.expect_symbol(Symbol::RBracket)?;
                 let span = base.span().merge(close.span);
-                base = Exp::Index(ExpIndex {
-                    span,
-                    prefix: Box::new(base),
-                    index: Box::new(index),
-                });
+                base = ExpIndex::new(span, base, index);
                 continue;
             }
             if matches!(
@@ -157,11 +140,7 @@ impl Exp {
             ) {
                 let args = Args::parse(p)?;
                 let span = base.span().merge(args.span);
-                base = Exp::Call(ExpCall {
-                    span,
-                    prefix: Box::new(base),
-                    args,
-                });
+                base = ExpCall::new(span, base, args);
                 continue;
             }
             break;
@@ -174,27 +153,27 @@ impl Exp {
         match token.kind {
             TokenKind::Number(text) => {
                 p.advance();
-                Ok(Exp::Number(ExpNumber { span: token.span, value: text }))
+                Ok(ExpNumber::new(token.span, text))
             }
             TokenKind::StringLiteral(text) => {
                 p.advance();
-                Ok(Exp::String(ExpString { span: token.span, value: text }))
+                Ok(ExpString::new(token.span, text))
             }
             TokenKind::Keyword(Keyword::Nil) => {
                 p.advance();
-                Ok(Exp::Nil(ExpNil { span: token.span }))
+                Ok(ExpNil::new(token.span))
             }
             TokenKind::Keyword(Keyword::True) => {
                 p.advance();
-                Ok(Exp::Bool(ExpBool { span: token.span, value: true }))
+                Ok(ExpBool::new(token.span, true))
             }
             TokenKind::Keyword(Keyword::False) => {
                 p.advance();
-                Ok(Exp::Bool(ExpBool { span: token.span, value: false }))
+                Ok(ExpBool::new(token.span, false))
             }
             TokenKind::Identifier(name) => {
                 p.advance();
-                Ok(Exp::Name(ExpName { span: token.span, name }))
+                Ok(ExpName::new(token.span, name))
             }
             TokenKind::Keyword(Keyword::Var) | TokenKind::Keyword(Keyword::Val) => {
                 let decl_kind = if matches!(token.kind, TokenKind::Keyword(Keyword::Var)) {
@@ -213,27 +192,22 @@ impl Exp {
                 if let Some(ts) = &type_spec {
                     span = span.merge(ts.span);
                 }
-                Ok(Exp::VarDecl(ExpVarDecl { span, kind: decl_kind, name, type_spec }))
+                Ok(ExpVarDecl::new(span, decl_kind, name, type_spec))
             }
             TokenKind::Symbol(Symbol::LParen) => {
                 if Self::can_start_lambda(p)? {
                     let lambda = LambdaExpr::parse(p)?;
-                    let span = lambda.span;
-                    return Ok(Exp::Lambda(ExpLambda { span, lambda }));
+                    return Ok(ExpLambda::new(lambda));
                 }
                 let open = p.advance();
                 let inner = Exp::parse(p)?;
                 let close = p.expect_symbol(Symbol::RParen)?;
-                Ok(Exp::Paren(ExpParen {
-                    span: open.span.merge(close.span),
-                    inner: Box::new(inner),
-                }))
+                Ok(ExpParen::new(open.span.merge(close.span), inner))
             }
             TokenKind::Keyword(Keyword::Const) => {
                 if Self::can_start_lambda(p)? {
                     let lambda = LambdaExpr::parse(p)?;
-                    let span = lambda.span;
-                    return Ok(Exp::Lambda(ExpLambda { span, lambda }));
+                    return Ok(ExpLambda::new(lambda));
                 }
                 Err(ParseError {
                     message: "expected lambda after 'const'".to_string(),
@@ -314,8 +288,8 @@ impl Exp {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ops::{BinOp, UnOp};
+    use super::*;
     use crate::lexical::lex;
     use crate::syntax::parser::Parser;
 
@@ -340,11 +314,17 @@ mod tests {
     }
     #[test]
     fn parses_true() {
-        assert!(matches!(parse("true"), Exp::Bool(ExpBool { value: true, .. })));
+        assert!(matches!(
+            parse("true"),
+            Exp::Bool(ExpBool { value: true, .. })
+        ));
     }
     #[test]
     fn parses_false() {
-        assert!(matches!(parse("false"), Exp::Bool(ExpBool { value: false, .. })));
+        assert!(matches!(
+            parse("false"),
+            Exp::Bool(ExpBool { value: false, .. })
+        ));
     }
     #[test]
     fn parses_number() {
@@ -373,7 +353,10 @@ mod tests {
     fn parses_var_decl_no_type() {
         assert!(matches!(
             parse("var x"),
-            Exp::VarDecl(ExpVarDecl { kind: VarDeclKind::Var, .. })
+            Exp::VarDecl(ExpVarDecl {
+                kind: VarDeclKind::Var,
+                ..
+            })
         ));
     }
 
@@ -381,7 +364,10 @@ mod tests {
     fn parses_val_decl_with_type() {
         assert!(matches!(
             parse("val x: Foo"),
-            Exp::VarDecl(ExpVarDecl { kind: VarDeclKind::Val, .. })
+            Exp::VarDecl(ExpVarDecl {
+                kind: VarDeclKind::Val,
+                ..
+            })
         ));
     }
 
@@ -426,19 +412,34 @@ mod tests {
 
     #[test]
     fn parses_unary_neg() {
-        assert!(matches!(parse("-1"), Exp::Unary(ExpUnary { op: UnOp::Neg, .. })));
+        assert!(matches!(
+            parse("-1"),
+            Exp::Unary(ExpUnary { op: UnOp::Neg, .. })
+        ));
     }
     #[test]
     fn parses_unary_not() {
-        assert!(matches!(parse("not x"), Exp::Unary(ExpUnary { op: UnOp::Not, .. })));
+        assert!(matches!(
+            parse("not x"),
+            Exp::Unary(ExpUnary { op: UnOp::Not, .. })
+        ));
     }
     #[test]
     fn parses_unary_len() {
-        assert!(matches!(parse("#x"), Exp::Unary(ExpUnary { op: UnOp::Len, .. })));
+        assert!(matches!(
+            parse("#x"),
+            Exp::Unary(ExpUnary { op: UnOp::Len, .. })
+        ));
     }
     #[test]
     fn parses_unary_bitnot() {
-        assert!(matches!(parse("~x"), Exp::Unary(ExpUnary { op: UnOp::BitNot, .. })));
+        assert!(matches!(
+            parse("~x"),
+            Exp::Unary(ExpUnary {
+                op: UnOp::BitNot,
+                ..
+            })
+        ));
     }
 
     // ── Binary ────────────────────────────────────────────────────────────

@@ -482,9 +482,9 @@ pub fn analyze_bundle(chunks: Vec<Chunk>) -> Result<SemanticModel, Vec<SemanticD
                         },
                         type_spec: None,
                         expr: crate::syntax::ast::DefExpr::Exp(
-                            crate::syntax::ast::Exp::Nil(crate::syntax::ast::ExpNil {
-                                span: crate::lexical::Span::single(crate::lexical::Position::new_start()),
-                            })
+                            crate::syntax::ast::ExpNil::new(
+                                crate::lexical::Span::single(crate::lexical::Position::new_start()),
+                            )
                         ),
                         span: crate::lexical::Span::single(crate::lexical::Position::new_start()),
                     }

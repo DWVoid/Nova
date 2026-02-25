@@ -40,7 +40,10 @@ mod tests {
     #[test]
     fn parses_repeat() {
         let s = StatRepeat::parse(&mut parser("repeat until true")).unwrap();
-        assert!(matches!(s.cond, super::super::exp::Exp::Bool(super::super::exp_bool::ExpBool { value: true, .. })));
+        assert!(matches!(
+            s.cond,
+            super::super::exp::Exp::Bool(super::super::exp_bool::ExpBool { value: true, .. })
+        ));
     }
     #[test]
     fn rejects_missing_until() {

@@ -1,3 +1,4 @@
+use super::exp::Exp;
 use super::name::Name;
 use super::type_spec::TypeSpec;
 use crate::lexical::Span;
@@ -20,4 +21,15 @@ pub struct ExpVarDecl {
     pub kind: VarDeclKind,
     pub name: Name,
     pub type_spec: Option<TypeSpec>,
+}
+
+impl ExpVarDecl {
+    pub fn new(span: Span, kind: VarDeclKind, name: Name, type_spec: Option<TypeSpec>) -> Exp {
+        Exp::VarDecl(ExpVarDecl {
+            span,
+            kind,
+            name,
+            type_spec,
+        })
+    }
 }

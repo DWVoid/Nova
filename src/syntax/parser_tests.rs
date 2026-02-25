@@ -165,7 +165,7 @@ fn parses_control_flow_and_continue() {
     let Exp::Lambda(exp_lambda) = exp else {
         panic!("expected lambda");
     };
-    assert!(exp_lambda.lambda.block.ret.is_some());
+    assert!(exp_lambda.lambda.block.stats.iter().any(|s| matches!(s, crate::syntax::ast::Stat::Return(_))));
 }
 
 #[test]

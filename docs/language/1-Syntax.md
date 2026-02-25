@@ -111,7 +111,7 @@ BNF:
 
 BNF:
 ```
-<block> ::= { <stat> } [ <retstat> [ ";" ] ]
+<block> ::= { <stat> }
 
 <stat> ::= ";"
         | <exp> { "," <exp> } "=" <explist>
@@ -126,12 +126,16 @@ BNF:
         | "continue"
         | "goto" <name>
         | "::" <name> "::"
-
-<retstat> ::= "return" [ <explist> ]
+        | "return" [ <explist> ] [ ";" ]
 
 <namelist> ::= <name> { "," <name> }
 <explist>  ::= <exp> { "," <exp> }
 ```
+
+A `return` statement may appear anywhere in a block, but once parsed it
+terminates the block — no further statements may follow it (the optional
+trailing `;` is consumed as part of the return, not as a separate empty
+statement).
 
 The left-hand side of an assignment and the target of a call statement are
 written as plain expressions.  The semantic stage enforces that assignment

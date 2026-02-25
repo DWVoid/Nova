@@ -1,7 +1,5 @@
-use super::ret_stat::RetStat;
 use super::stat::Stat;
-use crate::lexical::Keyword;
-use crate::lexical::Span;
+use crate::lexical::{Keyword, Span};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
 use serde::Serialize;
@@ -10,7 +8,6 @@ use serde::Serialize;
 pub struct Block {
     pub span: Span,
     pub stats: Vec<Stat>,
-    pub ret: Option<RetStat>,
 }
 
 impl Parsable for Block {
@@ -18,26 +15,24 @@ impl Parsable for Block {
         let start = p.current().span.start;
         let mut end_pos = start;
         let mut stats = Vec::new();
-        let mut ret = None;
 
         while !p.is_block_end() {
-            if p.is_keyword(Keyword::Return) {
-                let retstat = RetStat::parse(p)?;
-                end_pos = retstat.span.end;
-                ret = Some(retstat);
+            let stat = Stat::parse(p)?;
+            let is_return = matches!(stat, Stat::Return(_));
+            end_pos = stat.span().end;
+            stats.push(stat);
+            // A return may be followed by an optional ';'; consume it and stop.
+            if is_return {
                 if p.is_symbol(crate::lexical::Symbol::Semi) {
                     let semi = p.advance();
                     end_pos = semi.span.end;
                 }
                 break;
             }
-            let stat = Stat::parse(p)?;
-            end_pos = stat.span().end;
-            stats.push(stat);
         }
 
         let span = Span::new(start, end_pos);
-        Ok(Block { span, stats, ret })
+        Ok(Block { span, stats })
     }
 }
 
@@ -57,15 +52,22 @@ mod tests {
         let mut p = parser("end");
         let b = Block::parse(&mut p).unwrap();
         assert!(b.stats.is_empty());
-        assert!(b.ret.is_none());
     }
 
     #[test]
     fn parses_block_with_return() {
         let mut p = parser("return 1 end");
         let b = Block::parse(&mut p).unwrap();
-        assert!(b.ret.is_some());
-        assert_eq!(b.ret.unwrap().exprs.len(), 1);
+        assert_eq!(b.stats.len(), 1);
+        assert!(matches!(b.stats[0], Stat::Return(_)));
+    }
+
+    #[test]
+    fn parses_block_with_return_semi() {
+        let mut p = parser("return 1; end");
+        let b = Block::parse(&mut p).unwrap();
+        assert_eq!(b.stats.len(), 1);
+        assert!(matches!(b.stats[0], Stat::Return(_)));
     }
 
     #[test]
@@ -79,7 +81,7 @@ mod tests {
     fn parses_block_stats_then_return() {
         let mut p = parser("f() return 0 end");
         let b = Block::parse(&mut p).unwrap();
-        assert_eq!(b.stats.len(), 1);
-        assert!(b.ret.is_some());
+        assert_eq!(b.stats.len(), 2);
+        assert!(matches!(b.stats[1], Stat::Return(_)));
     }
 }

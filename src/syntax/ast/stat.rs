@@ -6,8 +6,9 @@ use super::stat_empty::StatEmpty;
 use super::stat_for::{StatForGeneric, StatForNumeric};
 use super::stat_if::StatIf;
 use super::stat_jump::{StatBreak, StatContinue};
-use super::stat_label::{StatGoto, StatLabel, is_label_start};
+use super::stat_label::{is_label_start, StatGoto, StatLabel};
 use super::stat_repeat::StatRepeat;
+use super::stat_return::StatReturn;
 use super::stat_while::StatWhile;
 use crate::lexical::{Keyword, Symbol, TokenKind};
 use crate::syntax::parsable::Parsable;
@@ -17,6 +18,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum Stat {
     Empty(StatEmpty),
+    Return(StatReturn),
     Do(StatDo),
     While(StatWhile),
     Repeat(StatRepeat),
@@ -35,6 +37,7 @@ impl Stat {
     pub fn span(&self) -> crate::lexical::Span {
         match self {
             Stat::Empty(s) => s.span,
+            Stat::Return(s) => s.span,
             Stat::Do(s) => s.span,
             Stat::While(s) => s.span,
             Stat::Repeat(s) => s.span,
@@ -55,6 +58,9 @@ impl Parsable for Stat {
     fn parse(p: &mut Parser) -> Result<Self, ParseError> {
         if p.is_symbol(Symbol::Semi) {
             return Ok(Stat::Empty(StatEmpty::parse(p)?));
+        }
+        if p.is_keyword(Keyword::Return) {
+            return Ok(Stat::Return(StatReturn::parse(p)?));
         }
         if p.is_keyword(Keyword::Do) {
             return Ok(Stat::Do(StatDo::parse(p)?));
@@ -148,6 +154,14 @@ mod tests {
         Stat::parse(&mut parser(src)).unwrap()
     }
 
+    #[test]
+    fn dispatches_return() {
+        assert!(matches!(stat("return end"), Stat::Return(_)));
+    }
+    #[test]
+    fn dispatches_return_value() {
+        assert!(matches!(stat("return 1 end"), Stat::Return(_)));
+    }
     #[test]
     fn dispatches_empty() {
         assert!(matches!(stat(";"), Stat::Empty(_)));

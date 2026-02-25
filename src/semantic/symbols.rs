@@ -571,7 +571,6 @@ mod tests {
                     block: crate::syntax::ast::Block {
                         span: Span::single(Position::new_start()),
                         stats: Vec::new(),
-                        ret: None,
                     },
                 },
             })),

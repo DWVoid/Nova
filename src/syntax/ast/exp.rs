@@ -20,6 +20,7 @@ use crate::lexical::{Keyword, Symbol, TokenKind};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{Assoc, ParseError, Parser};
 use serde::Serialize;
+use crate::syntax::ast::{BinOp, UnOp};
 
 /// A fully unified expression node.
 ///
@@ -51,7 +52,7 @@ pub enum Exp {
     // ── Operator forms ────────────────────────────────────────────────────
     Lambda(ExpLambda),
     Unary(ExpUnary),
-    Binary(Box<ExpBinary>),
+    Binary(ExpBinary),
 }
 
 impl Exp {
@@ -89,7 +90,7 @@ impl Exp {
     fn parse_prec(p: &mut Parser, min_prec: u8) -> Result<Exp, ParseError> {
         let mut left = Self::parse_unary(p)?;
         loop {
-            let Some((op, prec, assoc)) = p.peek_binop() else {
+            let Some((op, prec, assoc)) = Self::peek_binop(p) else {
                 break;
             };
             if prec < min_prec {
@@ -105,7 +106,7 @@ impl Exp {
     }
 
     fn parse_unary(p: &mut Parser) -> Result<Exp, ParseError> {
-        if let Some(op) = p.peek_unop() {
+        if let Some(op) = Self::peek_unop(p) {
             let token = p.advance();
             let exp = Self::parse_unary(p)?;
             let span = token.span.merge(exp.span());
@@ -204,16 +205,6 @@ impl Exp {
                 let close = p.expect_symbol(Symbol::RParen)?;
                 Ok(ExpParen::new(open.span.merge(close.span), inner))
             }
-            TokenKind::Keyword(Keyword::Const) => {
-                if Self::can_start_lambda(p)? {
-                    let lambda = LambdaExpr::parse(p)?;
-                    return Ok(ExpLambda::new(lambda));
-                }
-                Err(ParseError {
-                    message: "expected lambda after 'const'".to_string(),
-                    position: token.span.start,
-                })
-            }
             _ => Err(ParseError {
                 message: format!("unexpected token in expression: {:?}", token.kind),
                 position: token.span.start,
@@ -221,68 +212,126 @@ impl Exp {
         }
     }
 
-    // ── Lambda lookahead helpers ──────────────────────────────────────────
-
+    // ── Lambda lookahead ──────────────────────────────────────────────────
+    //
+    // A `(` starts a lambda expression if and only if the token immediately
+    // after its matching `)` is `:` (the return-type annotation).
+    //
+    // A plain parenthesised expression `(expr)` can never be followed by `:`
+    // in a position where an expression is expected, because `:` is not a
+    // binary operator.  `const` now appears *after* the return type, so it
+    // plays no role in distinguishing the two forms at the leading `(`.
+    //
+    // The scan only needs to track paren nesting depth — it never needs to
+    // understand the token content.
     fn can_start_lambda(p: &mut Parser) -> Result<bool, ParseError> {
         let checkpoint = p.checkpoint();
-        if p.is_keyword(Keyword::Const) {
-            p.advance();
-        }
+        // Must start with `(`
         if !p.is_symbol(Symbol::LParen) {
             p.restore(checkpoint);
             return Ok(false);
         }
-        p.advance();
-        if !p.is_symbol(Symbol::RParen) {
-            if !Self::skip_lambda_param(p)? {
-                p.restore(checkpoint);
-                return Ok(false);
-            }
-            while p.is_symbol(Symbol::Comma) {
-                p.advance();
-                if !Self::skip_lambda_param(p)? {
+        // Walk forward, tracking nesting, until the matching `)` is found.
+        let mut depth: usize = 0;
+        loop {
+            match p.current().kind {
+                TokenKind::Symbol(Symbol::LParen) => {
+                    depth += 1;
+                    p.advance();
+                }
+                TokenKind::Symbol(Symbol::RParen) => {
+                    depth -= 1;
+                    p.advance();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Eof => {
                     p.restore(checkpoint);
                     return Ok(false);
                 }
+                _ => {
+                    p.advance();
+                }
             }
         }
-        if !p.is_symbol(Symbol::RParen) {
-            p.restore(checkpoint);
-            return Ok(false);
-        }
-        p.advance();
-        let has_type = p.is_symbol(Symbol::Colon);
+        // A `:` here means this is a lambda parameter list followed by a return type.
+        let result = p.is_symbol(Symbol::Colon);
         p.restore(checkpoint);
-        Ok(has_type)
+        Ok(result)
     }
 
-    fn skip_lambda_param(p: &mut Parser) -> Result<bool, ParseError> {
-        if !matches!(p.current().kind, TokenKind::Identifier(_)) {
-            return Ok(false);
+    fn peek_unop(p: &mut Parser) -> Option<UnOp> {
+        match p.current().kind {
+            TokenKind::Keyword(Keyword::Not) => Some(UnOp::Not),
+            TokenKind::Symbol(Symbol::Minus) => Some(UnOp::Neg),
+            TokenKind::Symbol(Symbol::Hash) => Some(UnOp::Len),
+            TokenKind::Symbol(Symbol::Tilde) => Some(UnOp::BitNot),
+            _ => None,
         }
-        p.advance();
-        if p.is_symbol(Symbol::Colon) {
-            p.advance();
-            if !Self::skip_type_name(p) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
-
-    fn skip_type_name(p: &mut Parser) -> bool {
-        if !matches!(p.current().kind, TokenKind::Identifier(_)) {
-            return false;
-        }
-        p.advance();
-        while p.is_symbol(Symbol::Dot) {
-            p.advance();
-            if !matches!(p.current().kind, TokenKind::Identifier(_)) {
-                return false;
+    fn peek_binop(p: &mut Parser) -> Option<(BinOp, u8, Assoc)> {
+        match p.current().kind {
+            TokenKind::Keyword(Keyword::Or) => {
+                Some((BinOp::Or, 1, Assoc::Left))
             }
-            p.advance();
+            TokenKind::Keyword(Keyword::And) => {
+                Some((BinOp::And, 2, Assoc::Left))
+            }
+            TokenKind::Symbol(Symbol::Less)
+            | TokenKind::Symbol(Symbol::LessEq)
+            | TokenKind::Symbol(Symbol::Greater)
+            | TokenKind::Symbol(Symbol::GreaterEq)
+            | TokenKind::Symbol(Symbol::EqEq)
+            | TokenKind::Symbol(Symbol::NotEq) => Some((Self::binop_from_symbol(p)?, 3, Assoc::Left)),
+            TokenKind::Symbol(Symbol::Pipe) => {
+                Some((BinOp::BitOr, 4, Assoc::Left))
+            }
+            TokenKind::Symbol(Symbol::Tilde) => {
+                Some((BinOp::BitXor, 5, Assoc::Left))
+            }
+            TokenKind::Symbol(Symbol::Amp) => {
+                Some((BinOp::BitAnd, 6, Assoc::Left))
+            }
+            TokenKind::Symbol(Symbol::ShiftLeft) | TokenKind::Symbol(Symbol::ShiftRight) => {
+                Some((Self::binop_from_symbol(p)?, 7, Assoc::Left))
+            }
+            TokenKind::Symbol(Symbol::DotDot) => {
+                Some((BinOp::Concat, 8, Assoc::Right))
+            }
+            TokenKind::Symbol(Symbol::Plus) | TokenKind::Symbol(Symbol::Minus) => {
+                Some((Self::binop_from_symbol(p)?, 9, Assoc::Left))
+            }
+            TokenKind::Symbol(Symbol::Star)
+            | TokenKind::Symbol(Symbol::Slash)
+            | TokenKind::Symbol(Symbol::FloorDiv)
+            | TokenKind::Symbol(Symbol::Percent) => {
+                Some((Self::binop_from_symbol(p)?, 10, Assoc::Left))
+            }
+            TokenKind::Symbol(Symbol::Caret) => {
+                Some((BinOp::Pow, 12, Assoc::Right))
+            }
+            _ => None,
         }
-        true
+    }
+    fn binop_from_symbol(p: &mut Parser) -> Option<BinOp> {
+        match p.current().kind {
+            TokenKind::Symbol(Symbol::Less) => Some(BinOp::Less),
+            TokenKind::Symbol(Symbol::LessEq) => Some(BinOp::LessEq),
+            TokenKind::Symbol(Symbol::Greater) => Some(BinOp::Greater),
+            TokenKind::Symbol(Symbol::GreaterEq) => Some(BinOp::GreaterEq),
+            TokenKind::Symbol(Symbol::EqEq) => Some(BinOp::Eq),
+            TokenKind::Symbol(Symbol::NotEq) => Some(BinOp::NotEq),
+            TokenKind::Symbol(Symbol::ShiftLeft) => Some(BinOp::ShiftLeft),
+            TokenKind::Symbol(Symbol::ShiftRight) => Some(BinOp::ShiftRight),
+            TokenKind::Symbol(Symbol::Plus) => Some(BinOp::Add),
+            TokenKind::Symbol(Symbol::Minus) => Some(BinOp::Sub),
+            TokenKind::Symbol(Symbol::Star) => Some(BinOp::Mul),
+            TokenKind::Symbol(Symbol::Slash) => Some(BinOp::Div),
+            TokenKind::Symbol(Symbol::FloorDiv) => Some(BinOp::FloorDiv),
+            TokenKind::Symbol(Symbol::Percent) => Some(BinOp::Mod),
+            _ => None,
+        }
     }
 }
 
@@ -485,7 +534,7 @@ mod tests {
 
     #[test]
     fn parses_const_lambda_expr() {
-        assert!(matches!(parse("const (): unit end"), Exp::Lambda(_)));
+        assert!(matches!(parse("(): unit const end"), Exp::Lambda(_)));
     }
 
     // ── Rejections ────────────────────────────────────────────────────────

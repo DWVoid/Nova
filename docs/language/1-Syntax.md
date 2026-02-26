@@ -182,12 +182,17 @@ left-hand side of an assignment statement.
 
 BNF:
 ```
-<lambda_expr> ::= [ "const" ] <param_list> <type_spec> <block> "end"
+<lambda_expr> ::= <param_list> <type_spec> [ "const" ] <block> "end"
 
 <param_list> ::= "(" [ <param_items> ] ")"
 <param_items> ::= <param> { "," <param> }
 <param> ::= <name> [ <type_spec> ]
 ```
+
+`const` placed after the return-type annotation qualifies the *body* as
+const-evaluable.  This position keeps the signature `(params): type` visually
+intact and avoids `const` appearing in the middle of a `define` line between
+the bound name and its parameter list.
 
 ### 8.3 Unary Operators
 

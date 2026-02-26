@@ -79,12 +79,12 @@ export define EXAMPLE_CONSTANT: integer 42
 -- they are similar to normal functions, but they can only call other const functions and use other const items --
 -- and they can be evaluated at compile time --
 -- they can also be used for compile time type manipulation --
-export define example_const_function const(x: integer): integer
+export define example_const_function (x: integer): integer const
     return x + EXAMPLE_CONSTANT;
 end
 
 -- this one demos ways to manipulate code as data using const functions --
-export define manipulator const(x: Meta.Struct, a1: integer): Meta.Struct
+export define manipulator (x: Meta.Struct, a1: integer): Meta.Struct const
     -- method body, manipulate here --
 end
 

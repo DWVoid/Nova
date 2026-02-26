@@ -19,14 +19,14 @@ pub struct LambdaExpr {
 impl Parsable for LambdaExpr {
     fn parse(p: &mut Parser) -> Result<Self, ParseError> {
         let start = p.current().span.start;
+        let params = p.parse_param_list()?;
+        let return_type = TypeSpec::parse(p)?;
         let is_const = if p.is_keyword(Keyword::Const) {
             p.advance();
             true
         } else {
             false
         };
-        let params = p.parse_param_list()?;
-        let return_type = TypeSpec::parse(p)?;
         let block = Block::parse(p)?;
         let end = p.expect_keyword(Keyword::End)?;
         let span = Span::new(start, end.span.end);
@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn parses_const_lambda() {
-        let mut p = parser("const (): unit end");
+        let mut p = parser("(): unit const end");
         let l = LambdaExpr::parse(&mut p).unwrap();
         assert!(l.is_const);
     }

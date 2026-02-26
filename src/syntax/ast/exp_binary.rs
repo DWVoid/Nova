@@ -14,11 +14,11 @@ pub struct ExpBinary {
 
 impl ExpBinary {
     pub fn new(span: Span, op: BinOp, left: Exp, right: Exp) -> Exp {
-        Exp::Binary(Box::new(ExpBinary {
+        Exp::Binary(ExpBinary {
             span,
             op,
             left: Box::new(left),
             right: Box::new(right),
-        }))
+        })
     }
 }

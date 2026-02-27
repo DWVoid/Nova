@@ -1,4 +1,4 @@
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer, Deserializer};
 use std::fmt;
 
 // ── Trivia ───────────────────────────────────────────────────────────────────
@@ -6,14 +6,14 @@ use std::fmt;
 /// A piece of non-semantic source text that sits between tokens.  Trivia
 /// includes all whitespace (spaces, tabs, newlines) and comments.  Keeping
 /// trivia allows the token stream to be used for full source reconstruction.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Trivia {
     pub kind: TriviaKind,
     pub span: Span,
 }
 
 /// The kind of trivia item.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TriviaKind {
     /// Horizontal / vertical whitespace and line breaks.
     Whitespace,
@@ -23,7 +23,7 @@ pub enum TriviaKind {
     BlockComment,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Position {
     byte: usize,
     grapheme: usize,
@@ -77,6 +77,23 @@ impl Serialize for Span {
     }
 }
 
+impl<'de> Deserialize<'de> for Span {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let (start_s, end_s) = s.split_once("..").ok_or_else(|| {
+            serde::de::Error::custom(format!("invalid Span format: {:?}", s))
+        })?;
+        let start_g: usize = start_s.parse().map_err(serde::de::Error::custom)?;
+        let end_g: usize = end_s.parse().map_err(serde::de::Error::custom)?;
+        let start = Position::new(0, start_g, 0, 0);
+        let end   = Position::new(0, end_g,   0, 0);
+        Ok(Span { start, end })
+    }
+}
+
 impl Span {
     pub fn new(start: Position, end: Position) -> Self {
         Self { start, end }
@@ -115,7 +132,7 @@ impl fmt::Display for Span {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Keyword {
     And,
     As,
@@ -153,7 +170,7 @@ pub enum Keyword {
     While,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Symbol {
     Plus,
     Minus,
@@ -189,7 +206,7 @@ pub enum Symbol {
     At,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TokenKind {
     Eof,
     Identifier(String),
@@ -199,7 +216,7 @@ pub enum TokenKind {
     Symbol(Symbol),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,

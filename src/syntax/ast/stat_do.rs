@@ -3,10 +3,10 @@ use super::stat::Stat;
 use crate::lexical::{Keyword, Span};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatDo {
     pub span: Span,
     pub block: Block,

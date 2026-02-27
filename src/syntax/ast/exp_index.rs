@@ -1,9 +1,9 @@
 use super::exp::Exp;
 use crate::lexical::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Index access expression: `prefix[index]`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpIndex {
     pub span: Span,
     pub prefix: Box<Exp>,

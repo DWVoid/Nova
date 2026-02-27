@@ -4,16 +4,16 @@ use crate::lexical::Span;
 use crate::lexical::Symbol;
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FieldKey {
     Exp(Exp),
     Name(Name),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Field {
     pub span: Span,
     pub key: Option<FieldKey>,

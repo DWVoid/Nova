@@ -12,10 +12,10 @@ use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DefExpr {
     Struct(StructDef),
     Enum(EnumDef),
@@ -36,7 +36,7 @@ impl DefExpr {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Definition {
     pub span: Span,
     pub decorators: Vec<Decorator>,
@@ -88,7 +88,7 @@ impl Parsable for Definition {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Implementation {
     pub span: Span,
     pub trait_type: Option<TypeName>,
@@ -121,7 +121,7 @@ impl Parsable for Implementation {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TopItem {
     Definition(Definition),
     Implementation(Implementation),

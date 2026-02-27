@@ -1,10 +1,10 @@
 use super::exp::Exp;
 use crate::lexical::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A numeric literal expression: `42`, `3.14`, etc.
 /// The value is stored as the source text.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpNumber {
     pub span: Span,
     pub value: String,

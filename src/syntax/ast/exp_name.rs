@@ -1,9 +1,9 @@
 use super::exp::Exp;
 use crate::lexical::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A bare identifier expression: `foo`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpName {
     pub span: Span,
     pub name: String,

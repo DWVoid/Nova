@@ -1,10 +1,10 @@
 use super::args::Args;
 use super::exp::Exp;
 use crate::lexical::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A function call expression: `prefix(args)`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpCall {
     pub span: Span,
     pub prefix: Box<Exp>,

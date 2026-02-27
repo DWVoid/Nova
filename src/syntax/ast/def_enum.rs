@@ -5,10 +5,10 @@ use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EnumMember {
     pub span: Span,
     pub name: Name,
@@ -25,7 +25,7 @@ impl Parsable for EnumMember {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EnumDef {
     pub span: Span,
     pub type_spec: TypeSpec,

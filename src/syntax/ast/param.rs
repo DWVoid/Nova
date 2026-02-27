@@ -3,10 +3,10 @@ use super::type_spec::TypeSpec;
 use crate::lexical::Symbol;
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Param {
     pub name: Name,
     pub type_spec: Option<TypeSpec>,

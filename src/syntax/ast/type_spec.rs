@@ -3,10 +3,10 @@ use crate::lexical::Span;
 use crate::lexical::Symbol;
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TypeName {
     pub span: Span,
     pub parts: Vec<Name>,
@@ -23,7 +23,7 @@ impl Parsable for TypeName {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TypeSpec {
     pub span: Span,
     pub ty: TypeName,

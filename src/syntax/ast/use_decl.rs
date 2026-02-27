@@ -3,10 +3,10 @@ use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UseItem {
     pub name: Name,
     pub alias: Option<Name>,
@@ -25,13 +25,13 @@ impl Parsable for UseItem {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum UseTail {
     Selector(Vec<UseItem>),
     Alias(Name),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UseDecl {
     pub span: Span,
     pub path: Vec<Name>,

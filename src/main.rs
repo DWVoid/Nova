@@ -1,6 +1,7 @@
 mod lexical;
 mod syntax;
 mod formats;
+mod semantic;
 
 use std::io::{self, Read};
 

@@ -4,10 +4,10 @@ use crate::lexical::Keyword;
 use crate::lexical::Span;
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatReturn {
     pub span: Span,
     pub exprs: Vec<Exp>,

@@ -6,11 +6,11 @@ use crate::lexical::Keyword;
 use crate::lexical::Span;
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
 /// A lambda expression used as a value: `(params): RetType [const] block end`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpLambda {
     pub span: Span,
     pub is_const: bool,

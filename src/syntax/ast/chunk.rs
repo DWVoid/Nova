@@ -4,10 +4,10 @@ use super::use_decl::UseDecl;
 use crate::lexical::{Keyword, Span, Symbol, Token, TokenKind, Trivia as LexTrivia};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NamespaceDecl {
     pub span: Span,
     pub path: Vec<Name>,
@@ -23,7 +23,7 @@ impl Parsable for NamespaceDecl {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chunk {
     pub span: Span,
     pub trivia: Vec<LexTrivia>,

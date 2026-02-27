@@ -4,16 +4,16 @@ use crate::lexical::Span;
 use crate::lexical::{Symbol, TokenKind};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ArgsKind {
     ExpList(Vec<Exp>),
     Initializer(Initializer),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Args {
     pub span: Span,
     pub kind: ArgsKind,

@@ -19,7 +19,7 @@ use crate::lexical::{Keyword, Symbol, TokenKind};
 use crate::syntax::ast::{BinOp, UnOp};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
 /// Operator associativity, used by the Pratt expression parser.
@@ -34,7 +34,7 @@ pub(crate) enum Assoc {
 /// Each variant is a distinct struct that carries the node's span and fields.
 /// Whether a node is a valid l-value, callable expression, or pure value is
 /// not checked by the parser — that distinction is deferred to the semantic stage.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Exp {
     // ── Literals ──────────────────────────────────────────────────────────
     Nil(ExpNil),

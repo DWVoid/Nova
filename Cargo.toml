@@ -13,4 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
-icu = { version = "2.1.1", features = ["compiled_data"]}
+icu = { version = "2.1.1", features = ["compiled_data"] }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+toml = "0.8"
+rmp-serde = "1"

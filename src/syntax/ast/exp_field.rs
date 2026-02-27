@@ -1,10 +1,10 @@
 use super::exp::Exp;
 use super::name::Name;
 use crate::lexical::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Field access expression: `prefix.name`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpField {
     pub span: Span,
     pub prefix: Box<Exp>,

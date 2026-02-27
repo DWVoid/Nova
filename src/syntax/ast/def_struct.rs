@@ -4,10 +4,10 @@ use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FieldDecl {
     pub span: Span,
     pub name: Name,
@@ -23,7 +23,7 @@ impl Parsable for FieldDecl {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StructDef {
     pub span: Span,
     pub fields: Vec<FieldDecl>,

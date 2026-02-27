@@ -5,10 +5,10 @@ use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TraitSig {
     pub span: Span,
     pub name: Name,
@@ -26,7 +26,7 @@ impl Parsable for TraitSig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TraitDef {
     pub span: Span,
     pub sigs: Vec<TraitSig>,

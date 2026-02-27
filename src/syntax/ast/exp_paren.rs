@@ -1,9 +1,9 @@
 use super::exp::Exp;
 use crate::lexical::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A parenthesised sub-expression: `( exp )`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpParen {
     pub span: Span,
     pub inner: Box<Exp>,

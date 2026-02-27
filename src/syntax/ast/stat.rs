@@ -13,10 +13,10 @@ use super::stat_while::StatWhile;
 use crate::lexical::{Keyword, Symbol, TokenKind};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Stat {
     Empty(StatEmpty),
     Return(StatReturn),

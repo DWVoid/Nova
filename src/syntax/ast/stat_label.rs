@@ -3,10 +3,10 @@ use super::stat::Stat;
 use crate::lexical::{Keyword, Span, Symbol, TokenKind};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatGoto {
     pub span: Span,
     pub label: Name,
@@ -29,7 +29,7 @@ impl Parsable for StatGoto {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatLabel {
     pub span: Span,
     pub label: Name,

@@ -1,10 +1,10 @@
 use super::exp::Exp;
 use super::ops::UnOp;
 use crate::lexical::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A unary operator expression: `-x`, `not x`, `#x`, `~x`.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpUnary {
     pub span: Span,
     pub op: UnOp,

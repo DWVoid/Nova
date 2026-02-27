@@ -1,10 +1,10 @@
 use super::exp::Exp;
 use super::ops::BinOp;
 use crate::lexical::Span;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A binary operator expression: `a + b`, `a and b`, etc.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpBinary {
     pub span: Span,
     pub op: BinOp,

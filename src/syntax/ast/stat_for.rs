@@ -5,10 +5,10 @@ use super::stat::Stat;
 use crate::lexical::{Keyword, Span, Symbol};
 use crate::syntax::parse::Parsable;
 use crate::syntax::parse::Parser;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatForNumeric {
     pub span: Span,
     pub name: Name,
@@ -66,7 +66,7 @@ impl Parsable for StatForNumeric {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StatForGeneric {
     pub span: Span,
     pub names: Vec<Name>,

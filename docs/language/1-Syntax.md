@@ -247,3 +247,111 @@ BNF:
 <args> ::= "(" [ <explist> ] ")"
         | <initializer>
 ```
+
+## 11. AST Cross-Reference
+
+This section cross-references every grammar rule with the Rust struct or enum
+that represents it in `src/syntax/ast/`.  It also lists named AST types that
+are not explicitly called out in the BNF rules above, and pure helper rules
+that have no named struct of their own.
+
+### 11.1 Grammar Rule → AST Type
+
+| Grammar rule | AST type | Notes |
+|---|---|---|
+| `<compilation_unit>` | `Chunk` | |
+| `<top_item>` | `TopItem` | enum |
+| `<use_decl>` | `UseDecl` | |
+| `<use_item>` | `UseItem` | |
+| `<use_alias>` / `<use_selector>` | `UseTail` | enum with `Alias` and `Selector` variants |
+| `<namespace_decl>` | `NamespaceDecl` | |
+| `<visibility>` | `Visibility` | |
+| `<definition>` | `Definition` | |
+| `<def_expr>` | `DefExpr` | enum |
+| `<implementation>` | `Implementation` | |
+| `<struct_def>` | `StructDef` | |
+| `<field_decl>` | `FieldDecl` | |
+| `<enum_def>` | `EnumDef` | |
+| `<enum_member>` | `EnumMember` | |
+| `<variant_def>` | `VariantDef` | |
+| `<variant_member>` | `VariantMember` | |
+| `<trait_def>` | `TraitDef` | |
+| `<trait_sig>` | `TraitSig` | |
+| `<decorator>` | `Decorator` | |
+| `<type>` | `TypeName` | |
+| `<type_spec>` | `TypeSpec` | |
+| `<block>` | `Block` | |
+| `<stat>` | `Stat` | enum; each variant is a dedicated struct (see §11.2) |
+| `<exp>` | `Exp` | enum; each variant is a dedicated struct (see §11.3) |
+| `<lambda_expr>` | `ExpLambda` | |
+| `<param>` | `Param` | |
+| `<unop>` | `UnOp` | enum |
+| `<binop>` | `BinOp` | enum |
+| `<initializer>` | `Initializer` | |
+| `<field>` | `Field` | struct; `FieldKey` enum for the key variant |
+| `<args>` | `Args` | `ArgsKind` enum for `ExpList` vs `Initializer` |
+| `<name>` | `Name` | |
+
+### 11.2 Statement Structs (`Stat` variants)
+
+Each variant of the `Stat` enum has a dedicated struct:
+
+| `Stat` variant | Struct |
+|---|---|
+| `Stat::Empty` | `StatEmpty` |
+| `Stat::Assign` | `StatAssign` |
+| `Stat::Call` | `StatCall` |
+| `Stat::Do` | `StatDo` |
+| `Stat::While` | `StatWhile` |
+| `Stat::Repeat` | `StatRepeat` |
+| `Stat::If` | `StatIf` (with `IfClause` for each `if`/`elseif` arm) |
+| `Stat::ForNumeric` | `StatForNumeric` |
+| `Stat::ForGeneric` | `StatForGeneric` |
+| `Stat::Break` | `StatBreak` |
+| `Stat::Continue` | `StatContinue` |
+| `Stat::Goto` | `StatGoto` |
+| `Stat::Label` | `StatLabel` |
+| `Stat::Return` | `StatReturn` |
+
+### 11.3 Expression Structs (`Exp` variants)
+
+Each variant of the `Exp` enum has a dedicated struct:
+
+| `Exp` variant | Struct |
+|---|---|
+| `Exp::Nil` | `ExpNil` |
+| `Exp::Bool` | `ExpBool` |
+| `Exp::Number` | `ExpNumber` |
+| `Exp::String` | `ExpString` |
+| `Exp::Name` | `ExpName` |
+| `Exp::Lambda` | `ExpLambda` |
+| `Exp::VarDecl` | `ExpVarDecl` (`VarDeclKind` enum for `var`/`val`) |
+| `Exp::Paren` | `ExpParen` |
+| `Exp::Field` | `ExpField` |
+| `Exp::Index` | `ExpIndex` |
+| `Exp::Call` | `ExpCall` |
+| `Exp::Unary` | `ExpUnary` |
+| `Exp::Binary` | `ExpBinary` |
+
+### 11.4 Grammar Rules Without a Dedicated Named Struct
+
+The following grammar rules are purely structural groupings that are
+represented as `Vec<T>` or inline fields rather than named structs:
+
+| Grammar rule | Representation |
+|---|---|
+| `<use_selector>` | inline in `UseDecl::parse`; result stored as `UseTail::Selector(Vec<UseItem>)` |
+| `<use_list>` | `Vec<UseItem>` |
+| `<use_alias>` | `UseTail::Alias(Name)` |
+| `<namespace_path>` | `Vec<Name>` |
+| `<scope_list>` | `Vec<Name>` (inside `Visibility`) |
+| `<impl_body>` | `Vec<Definition>` (inside `Implementation`) |
+| `<struct_body>` | `Vec<FieldDecl>` (inside `StructDef`) |
+| `<enum_body>` | `Vec<EnumMember>` (inside `EnumDef`) |
+| `<variant_body>` | `Vec<VariantMember>` (inside `VariantDef`) |
+| `<trait_body>` | `Vec<TraitSig>` (inside `TraitDef`) |
+| `<namelist>` | `Vec<Name>` (inside `StatForGeneric`) |
+| `<explist>` | `Vec<Exp>` — `impl Parsable for Vec<Exp>` in `exp.rs` |
+| `<param_list>` | `Vec<Param>` — `Parser::parse_param_list` helper |
+| `<param_items>` | inline inside `parse_param_list` |
+| `<fieldlist>` | `Vec<Field>` (inside `Initializer`) |

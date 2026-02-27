@@ -1,6 +1,9 @@
 use super::chunk::NamespaceDecl;
 use super::decorator::Decorator;
-use super::defs::{EnumDef, StructDef, TraitDef, VariantDef};
+use super::def_enum::EnumDef;
+use super::def_struct::StructDef;
+use super::def_trait::TraitDef;
+use super::def_variant::VariantDef;
 use super::exp::Exp;
 use super::name::Name;
 use super::param::Param;

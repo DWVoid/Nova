@@ -6,7 +6,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExpParen {
     pub span: Span,
-    pub inner: Box<super::exp::Exp>,
+    pub inner: Box<Exp>,
 }
 
 impl ExpParen {

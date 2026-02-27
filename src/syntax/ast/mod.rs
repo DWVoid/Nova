@@ -2,6 +2,7 @@
 //!
 //! Each struct/enum lives in its own submodule file; this module re-exports
 //! everything so callers continue to use `crate::syntax::ast::*` unchanged.
+#![allow(unused)]
 
 mod args;
 mod block;
@@ -22,7 +23,6 @@ mod exp_unary;
 mod exp_var_decl;
 mod field;
 mod initializer;
-mod lambda_expr;
 mod name;
 mod ops;
 mod param;
@@ -43,46 +43,19 @@ mod type_spec;
 
 // Re-export every public type so the rest of the crate sees them as
 // `crate::syntax::ast::Foo` exactly as before.
-pub use args::{Args, ArgsKind};
+pub use args::ArgsKind;
 pub use block::Block;
-pub use defs::{
-    EnumDef, EnumMember, FieldDecl, StructDef, TraitDef, TraitSig, VariantDef, VariantMember,
-};
+pub use defs::{StructDef, TraitDef, TraitSig};
 pub use exp::Exp;
-pub use exp_binary::ExpBinary;
-pub use exp_bool::ExpBool;
-pub use exp_call::ExpCall;
-pub use exp_field::ExpField;
-pub use exp_index::ExpIndex;
 pub use exp_lambda::ExpLambda;
-pub use exp_name::ExpName;
 pub use exp_nil::ExpNil;
-pub use exp_number::ExpNumber;
-pub use exp_paren::ExpParen;
 pub use exp_string::ExpString;
-pub use exp_unary::ExpUnary;
-pub use exp_var_decl::{ExpVarDecl, VarDeclKind};
-pub use field::{Field, FieldKey};
-pub use initializer::Initializer;
-pub use lambda_expr::LambdaExpr;
 pub use name::Name;
 pub use ops::{BinOp, UnOp};
-pub use param::Param;
 pub use stat::Stat;
-pub use stat_assign::StatAssign;
-pub use stat_call::StatCall;
-pub use stat_do::StatDo;
-pub use stat_empty::StatEmpty;
-pub use stat_for::{StatForGeneric, StatForNumeric};
-pub use stat_if::StatIf;
-pub use stat_jump::{StatBreak, StatContinue};
-pub use stat_label::{StatGoto, StatLabel};
-pub use stat_repeat::StatRepeat;
-pub use stat_return::StatReturn;
-pub use stat_while::StatWhile;
 pub use top::{
     Chunk, Decorator, DefExpr, Definition, Implementation, NamespaceDecl, TopItem, UseDecl,
-    UseItem, UseTail, Visibility,
+    UseTail, Visibility,
 };
 pub use type_spec::{TypeName, TypeSpec};
 

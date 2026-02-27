@@ -22,7 +22,11 @@ pub struct StatIf {
 
 impl StatIf {
     pub fn new(span: Span, clauses: Vec<IfClause>, else_block: Option<Block>) -> Stat {
-        Stat::If(StatIf { span, clauses, else_block })
+        Stat::If(StatIf {
+            span,
+            clauses,
+            else_block,
+        })
     }
 }
 

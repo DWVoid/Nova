@@ -6,7 +6,7 @@ use super::stat_empty::StatEmpty;
 use super::stat_for::{StatForGeneric, StatForNumeric};
 use super::stat_if::StatIf;
 use super::stat_jump::{StatBreak, StatContinue};
-use super::stat_label::{is_label_start, StatGoto, StatLabel};
+use super::stat_label::{StatGoto, StatLabel, is_label_start};
 use super::stat_repeat::StatRepeat;
 use super::stat_return::StatReturn;
 use super::stat_while::StatWhile;

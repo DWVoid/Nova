@@ -605,7 +605,7 @@ impl TraitSystem {
         for item in &impl_block.items {
             if let Definition { expr: DefExpr::Exp(exp), .. } = item {
                 if let crate::syntax::ast::Exp::Lambda(exp_lambda) = exp {
-                    let lambda = &exp_lambda.lambda;
+                    let lambda = exp_lambda;
                     // Check if this method exists in trait
                     if let Some(trait_method) = trait_def.signatures.get(&item.name.value) {
                         let method_impl = self.create_method_implementation(item, lambda, trait_method)?;
@@ -665,7 +665,7 @@ impl TraitSystem {
         for item in &impl_block.items {
             if let Definition { expr: DefExpr::Exp(exp), .. } = item {
                 if let crate::syntax::ast::Exp::Lambda(exp_lambda) = exp {
-                    let lambda = &exp_lambda.lambda;
+                    let lambda = exp_lambda;
                     // For inherent implementations, we create the signature from the lambda
                     let trait_method = self.create_trait_method_from_lambda(item, lambda)?;
                     let method_impl = self.create_method_implementation(item, lambda, &trait_method)?;
@@ -685,7 +685,7 @@ impl TraitSystem {
     fn create_trait_method_from_lambda(
         &self,
         def: &Definition,
-        lambda: &crate::syntax::ast::LambdaExpr,
+        lambda: &crate::syntax::ast::ExpLambda,
     ) -> Result<TraitMethodSignature, SemanticDiagnostic> {
         let mut parameters = Vec::new();
 
@@ -728,7 +728,7 @@ impl TraitSystem {
     fn create_method_implementation(
         &self,
         def: &Definition,
-        lambda: &crate::syntax::ast::LambdaExpr,
+        lambda: &crate::syntax::ast::ExpLambda,
         trait_method: &TraitMethodSignature,
     ) -> Result<MethodImplementation, SemanticDiagnostic> {
         // Validate signature compatibility

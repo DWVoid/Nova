@@ -8,7 +8,7 @@ use serde::Serialize;
 pub struct ExpUnary {
     pub span: Span,
     pub op: UnOp,
-    pub exp: Box<super::exp::Exp>,
+    pub exp: Box<Exp>,
 }
 
 impl ExpUnary {

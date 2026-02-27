@@ -1,5 +1,5 @@
 use super::stat::Stat;
-use crate::lexical::{Keyword, Span};
+use crate::lexical::Span;
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{ParseError, Parser};
 use serde::Serialize;

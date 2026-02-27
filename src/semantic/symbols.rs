@@ -554,24 +554,21 @@ mod tests {
             type_spec: None,
             expr: DefExpr::Exp(Exp::Lambda(ExpLambda {
                 span: Span::single(Position::new_start()),
-                lambda: crate::syntax::ast::LambdaExpr {
+                is_const: false,
+                params: Vec::new(),
+                return_type: crate::syntax::ast::TypeSpec {
                     span: Span::single(Position::new_start()),
-                    is_const: false,
-                    params: Vec::new(),
-                    return_type: crate::syntax::ast::TypeSpec {
+                    ty: crate::syntax::ast::TypeName {
                         span: Span::single(Position::new_start()),
-                        ty: crate::syntax::ast::TypeName {
+                        parts: vec![Name {
+                            value: "unit".to_string(),
                             span: Span::single(Position::new_start()),
-                            parts: vec![Name {
-                                value: "unit".to_string(),
-                                span: Span::single(Position::new_start()),
-                            }],
-                        },
+                        }],
                     },
-                    block: crate::syntax::ast::Block {
-                        span: Span::single(Position::new_start()),
-                        stats: Vec::new(),
-                    },
+                },
+                block: crate::syntax::ast::Block {
+                    span: Span::single(Position::new_start()),
+                    stats: Vec::new(),
                 },
             })),
         })

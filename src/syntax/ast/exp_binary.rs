@@ -8,8 +8,8 @@ use serde::Serialize;
 pub struct ExpBinary {
     pub span: Span,
     pub op: BinOp,
-    pub left: Box<super::exp::Exp>,
-    pub right: Box<super::exp::Exp>,
+    pub left: Box<Exp>,
+    pub right: Box<Exp>,
 }
 
 impl ExpBinary {

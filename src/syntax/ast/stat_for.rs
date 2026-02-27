@@ -18,8 +18,22 @@ pub struct StatForNumeric {
 }
 
 impl StatForNumeric {
-    pub fn new(span: Span, name: Name, start: Exp, end: Exp, step: Option<Exp>, block: Block) -> Stat {
-        Stat::ForNumeric(StatForNumeric { span, name, start, end, step, block })
+    pub fn new(
+        span: Span,
+        name: Name,
+        start: Exp,
+        end: Exp,
+        step: Option<Exp>,
+        block: Block,
+    ) -> Stat {
+        Stat::ForNumeric(StatForNumeric {
+            span,
+            name,
+            start,
+            end,
+            step,
+            block,
+        })
     }
 }
 
@@ -61,7 +75,12 @@ pub struct StatForGeneric {
 
 impl StatForGeneric {
     pub fn new(span: Span, names: Vec<Name>, exprs: Vec<Exp>, block: Block) -> Stat {
-        Stat::ForGeneric(StatForGeneric { span, names, exprs, block })
+        Stat::ForGeneric(StatForGeneric {
+            span,
+            names,
+            exprs,
+            block,
+        })
     }
 }
 

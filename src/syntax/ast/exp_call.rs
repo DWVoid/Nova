@@ -7,7 +7,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExpCall {
     pub span: Span,
-    pub prefix: Box<super::exp::Exp>,
+    pub prefix: Box<Exp>,
     pub args: Args,
 }
 

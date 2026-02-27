@@ -6,8 +6,8 @@ use serde::Serialize;
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExpIndex {
     pub span: Span,
-    pub prefix: Box<super::exp::Exp>,
-    pub index: Box<super::exp::Exp>,
+    pub prefix: Box<Exp>,
+    pub index: Box<Exp>,
 }
 
 impl ExpIndex {

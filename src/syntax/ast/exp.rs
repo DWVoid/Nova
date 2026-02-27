@@ -12,15 +12,14 @@ use super::exp_paren::ExpParen;
 use super::exp_string::ExpString;
 use super::exp_unary::ExpUnary;
 use super::exp_var_decl::{ExpVarDecl, VarDeclKind};
-use super::lambda_expr::LambdaExpr;
 use super::name::Name;
 use super::type_spec::TypeSpec;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol, TokenKind};
+use crate::syntax::ast::{BinOp, UnOp};
 use crate::syntax::parsable::Parsable;
 use crate::syntax::parser::{Assoc, ParseError, Parser};
 use serde::Serialize;
-use crate::syntax::ast::{BinOp, UnOp};
 
 /// A fully unified expression node.
 ///
@@ -197,8 +196,8 @@ impl Exp {
             }
             TokenKind::Symbol(Symbol::LParen) => {
                 if Self::can_start_lambda(p)? {
-                    let lambda = LambdaExpr::parse(p)?;
-                    return Ok(ExpLambda::new(lambda));
+                    let lambda = ExpLambda::parse(p)?;
+                    return Ok(ExpLambda::new_exp(lambda));
                 }
                 let open = p.advance();
                 let inner = Exp::parse(p)?;
@@ -272,33 +271,23 @@ impl Exp {
     }
     fn peek_binop(p: &mut Parser) -> Option<(BinOp, u8, Assoc)> {
         match p.current().kind {
-            TokenKind::Keyword(Keyword::Or) => {
-                Some((BinOp::Or, 1, Assoc::Left))
-            }
-            TokenKind::Keyword(Keyword::And) => {
-                Some((BinOp::And, 2, Assoc::Left))
-            }
+            TokenKind::Keyword(Keyword::Or) => Some((BinOp::Or, 1, Assoc::Left)),
+            TokenKind::Keyword(Keyword::And) => Some((BinOp::And, 2, Assoc::Left)),
             TokenKind::Symbol(Symbol::Less)
             | TokenKind::Symbol(Symbol::LessEq)
             | TokenKind::Symbol(Symbol::Greater)
             | TokenKind::Symbol(Symbol::GreaterEq)
             | TokenKind::Symbol(Symbol::EqEq)
-            | TokenKind::Symbol(Symbol::NotEq) => Some((Self::binop_from_symbol(p)?, 3, Assoc::Left)),
-            TokenKind::Symbol(Symbol::Pipe) => {
-                Some((BinOp::BitOr, 4, Assoc::Left))
+            | TokenKind::Symbol(Symbol::NotEq) => {
+                Some((Self::binop_from_symbol(p)?, 3, Assoc::Left))
             }
-            TokenKind::Symbol(Symbol::Tilde) => {
-                Some((BinOp::BitXor, 5, Assoc::Left))
-            }
-            TokenKind::Symbol(Symbol::Amp) => {
-                Some((BinOp::BitAnd, 6, Assoc::Left))
-            }
+            TokenKind::Symbol(Symbol::Pipe) => Some((BinOp::BitOr, 4, Assoc::Left)),
+            TokenKind::Symbol(Symbol::Tilde) => Some((BinOp::BitXor, 5, Assoc::Left)),
+            TokenKind::Symbol(Symbol::Amp) => Some((BinOp::BitAnd, 6, Assoc::Left)),
             TokenKind::Symbol(Symbol::ShiftLeft) | TokenKind::Symbol(Symbol::ShiftRight) => {
                 Some((Self::binop_from_symbol(p)?, 7, Assoc::Left))
             }
-            TokenKind::Symbol(Symbol::DotDot) => {
-                Some((BinOp::Concat, 8, Assoc::Right))
-            }
+            TokenKind::Symbol(Symbol::DotDot) => Some((BinOp::Concat, 8, Assoc::Right)),
             TokenKind::Symbol(Symbol::Plus) | TokenKind::Symbol(Symbol::Minus) => {
                 Some((Self::binop_from_symbol(p)?, 9, Assoc::Left))
             }
@@ -308,9 +297,7 @@ impl Exp {
             | TokenKind::Symbol(Symbol::Percent) => {
                 Some((Self::binop_from_symbol(p)?, 10, Assoc::Left))
             }
-            TokenKind::Symbol(Symbol::Caret) => {
-                Some((BinOp::Pow, 12, Assoc::Right))
-            }
+            TokenKind::Symbol(Symbol::Caret) => Some((BinOp::Pow, 12, Assoc::Right)),
             _ => None,
         }
     }

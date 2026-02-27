@@ -636,7 +636,7 @@ impl TypeSystem {
             Exp::Nil(_) => TypeCheckResult::Success(NovaType::Unit),
             
             Exp::Lambda(exp_lambda) => {
-                let lambda = &exp_lambda.lambda;
+                let lambda = exp_lambda;
                 // Type check lambda expression
                 let mut param_types = Vec::new();
                 

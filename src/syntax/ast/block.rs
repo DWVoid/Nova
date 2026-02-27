@@ -30,7 +30,6 @@ impl Parsable for Block {
                 break;
             }
         }
-
         let span = Span::new(start, end_pos);
         Ok(Block { span, stats })
     }

@@ -93,7 +93,7 @@ impl Parsable for StatForGeneric {
             names.push(Name::parse(p)?);
         }
         p.expect_keyword(Keyword::In)?;
-        let exprs = p.parse_exp_list()?;
+        let exprs = Vec::<Exp>::parse(p)?;
         p.expect_keyword(Keyword::Do)?;
         let block = Block::parse(p)?;
         let end_kw = p.expect_keyword(Keyword::End)?;

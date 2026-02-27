@@ -18,8 +18,15 @@ use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol, TokenKind};
 use crate::syntax::ast::{BinOp, UnOp};
 use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{Assoc, ParseError, Parser};
+use crate::syntax::parser::{ParseError, Parser};
 use serde::Serialize;
+
+/// Operator associativity, used by the Pratt expression parser.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Assoc {
+    Left,
+    Right,
+}
 
 /// A fully unified expression node.
 ///
@@ -80,6 +87,18 @@ impl Exp {
 impl Parsable for Exp {
     fn parse(p: &mut Parser) -> Result<Self, ParseError> {
         Self::parse_prec(p, 0)
+    }
+}
+
+/// Parse a non-empty comma-separated expression list.
+impl Parsable for Vec<Exp> {
+    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+        let mut exprs = vec![Exp::parse(p)?];
+        while p.is_symbol(Symbol::Comma) {
+            p.advance();
+            exprs.push(Exp::parse(p)?);
+        }
+        Ok(exprs)
     }
 }
 

@@ -23,7 +23,7 @@ impl Parsable for StatReturn {
         let token = p.expect_keyword(Keyword::Return)?;
         let mut exprs = Vec::new();
         if !p.is_block_end() && !p.is_symbol(crate::lexical::Symbol::Semi) {
-            exprs = p.parse_exp_list()?;
+            exprs = Vec::<Exp>::parse(p)?;
         }
         let end_span = exprs.last().map(|e| e.span()).unwrap_or(token.span);
         Ok(StatReturn {

@@ -26,7 +26,7 @@ impl Parsable for Args {
                 let open = p.advance();
                 let mut exprs = Vec::new();
                 if !p.is_symbol(Symbol::RParen) {
-                    exprs = p.parse_exp_list()?;
+                    exprs = Vec::<Exp>::parse(p)?;
                 }
                 let close = p.expect_symbol(Symbol::RParen)?;
                 Ok(Args {

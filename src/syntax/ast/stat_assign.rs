@@ -29,7 +29,7 @@ impl Parsable for StatAssign {
             vars.push(Exp::parse(p)?);
         }
         let eq = p.expect_symbol(Symbol::Assign)?;
-        let exprs = p.parse_exp_list()?;
+        let exprs = Vec::<Exp>::parse(p)?;
         let end_span = exprs.last().map(|e| e.span()).unwrap_or(eq.span);
         let span = vars
             .last()

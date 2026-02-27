@@ -3,9 +3,10 @@ use super::name::Name;
 use super::type_spec::TypeSpec;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EnumMember {
@@ -15,7 +16,7 @@ pub struct EnumMember {
 }
 
 impl Parsable for EnumMember {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let name = Name::parse(p)?;
         p.expect_symbol(Symbol::Assign)?;
         let value = Exp::parse(p)?;
@@ -32,7 +33,7 @@ pub struct EnumDef {
 }
 
 impl Parsable for EnumDef {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let start = p.expect_keyword(Keyword::Enum)?;
         let type_spec = TypeSpec::parse(p)?;
         let mut members = Vec::new();
@@ -55,11 +56,11 @@ impl Parsable for EnumDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

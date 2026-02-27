@@ -17,9 +17,10 @@ use super::type_spec::TypeSpec;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol, TokenKind};
 use crate::syntax::ast::{BinOp, UnOp};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 /// Operator associativity, used by the Pratt expression parser.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,14 +86,14 @@ impl Exp {
 // ── Parsable ──────────────────────────────────────────────────────────────────
 
 impl Parsable for Exp {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         Self::parse_prec(p, 0)
     }
 }
 
 /// Parse a non-empty comma-separated expression list.
 impl Parsable for Vec<Exp> {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let mut exprs = vec![Exp::parse(p)?];
         while p.is_symbol(Symbol::Comma) {
             p.advance();
@@ -105,7 +106,7 @@ impl Parsable for Vec<Exp> {
 impl Exp {
     // ── Pratt driver ─────────────────────────────────────────────────────
 
-    fn parse_prec(p: &mut Parser, min_prec: u8) -> Result<Exp, ParseError> {
+    fn parse_prec(p: &mut Parser, min_prec: u8) -> Result<Exp, SyntaxError> {
         let mut left = Self::parse_unary(p)?;
         loop {
             let Some((op, prec, assoc)) = Self::peek_binop(p) else {
@@ -123,7 +124,7 @@ impl Exp {
         Ok(left)
     }
 
-    fn parse_unary(p: &mut Parser) -> Result<Exp, ParseError> {
+    fn parse_unary(p: &mut Parser) -> Result<Exp, SyntaxError> {
         if let Some(op) = Self::peek_unop(p) {
             let token = p.advance();
             let exp = Self::parse_unary(p)?;
@@ -135,7 +136,7 @@ impl Exp {
 
     // ── Primary + postfix suffix chaining ────────────────────────────────
 
-    fn parse_postfix(p: &mut Parser) -> Result<Exp, ParseError> {
+    fn parse_postfix(p: &mut Parser) -> Result<Exp, SyntaxError> {
         let mut base = Self::parse_primary(p)?;
         loop {
             if p.is_symbol(Symbol::Dot) {
@@ -167,7 +168,7 @@ impl Exp {
         Ok(base)
     }
 
-    fn parse_primary(p: &mut Parser) -> Result<Exp, ParseError> {
+    fn parse_primary(p: &mut Parser) -> Result<Exp, SyntaxError> {
         let token = p.current().clone();
         match token.kind {
             TokenKind::Number(text) => {
@@ -223,7 +224,7 @@ impl Exp {
                 let close = p.expect_symbol(Symbol::RParen)?;
                 Ok(ExpParen::new(open.span.merge(close.span), inner))
             }
-            _ => Err(ParseError {
+            _ => Err(SyntaxError {
                 message: format!("unexpected token in expression: {:?}", token.kind),
                 position: token.span.start,
             }),
@@ -242,7 +243,7 @@ impl Exp {
     //
     // The scan only needs to track paren nesting depth — it never needs to
     // understand the token content.
-    fn can_start_lambda(p: &mut Parser) -> Result<bool, ParseError> {
+    fn can_start_lambda(p: &mut Parser) -> Result<bool, SyntaxError> {
         let checkpoint = p.checkpoint();
         // Must start with `(`
         if !p.is_symbol(Symbol::LParen) {
@@ -345,11 +346,11 @@ impl Exp {
 mod tests {
     use super::super::ops::{BinOp, UnOp};
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

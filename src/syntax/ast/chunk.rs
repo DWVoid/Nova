@@ -2,9 +2,10 @@ use super::name::Name;
 use super::top::TopItem;
 use super::use_decl::UseDecl;
 use crate::lexical::{Keyword, Span, Symbol, Token, TokenKind, Trivia as LexTrivia};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NamespaceDecl {
@@ -13,7 +14,7 @@ pub struct NamespaceDecl {
 }
 
 impl Parsable for NamespaceDecl {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let token = p.expect_keyword(Keyword::Namespace)?;
         let path = p.parse_namespace_path()?;
         let semi = p.expect_symbol(Symbol::Semi)?;
@@ -31,20 +32,20 @@ pub struct Chunk {
     pub items: Vec<TopItem>,
 }
 
-fn expect_eof(p: &mut Parser) -> Result<Token, ParseError> {
+fn expect_eof(p: &mut Parser) -> Result<Token, SyntaxError> {
     let token = p.current().clone();
     if matches!(token.kind, TokenKind::Eof) {
         p.advance();
         return Ok(token);
     }
-    Err(ParseError {
+    Err(SyntaxError {
         message: "expected EOF".to_string(),
         position: token.span.start,
     })
 }
 
 impl Parsable for Chunk {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let trivia = std::mem::take(&mut p.trivia);
 
         let mut uses = Vec::new();
@@ -85,11 +86,11 @@ impl Parsable for Chunk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

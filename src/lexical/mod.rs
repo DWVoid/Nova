@@ -1,9 +1,8 @@
+#![allow(unused)]
+
 mod lexer;
 mod token;
 
-#[allow(unused)]
-pub use lexer::lex;
+pub use lexer::{LexicalError, LexicalResult, transform};
 
-#[allow(unused)]
 pub use token::{Keyword, Position, Span, Symbol, Token, TokenKind, Trivia, TriviaKind};
-

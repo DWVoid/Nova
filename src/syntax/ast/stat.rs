@@ -6,14 +6,15 @@ use super::stat_empty::StatEmpty;
 use super::stat_for::{StatForGeneric, StatForNumeric};
 use super::stat_if::StatIf;
 use super::stat_jump::{StatBreak, StatContinue};
-use super::stat_label::{StatGoto, StatLabel, is_label_start};
+use super::stat_label::{is_label_start, StatGoto, StatLabel};
 use super::stat_repeat::StatRepeat;
 use super::stat_return::StatReturn;
 use super::stat_while::StatWhile;
 use crate::lexical::{Keyword, Symbol, TokenKind};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum Stat {
@@ -55,7 +56,7 @@ impl Stat {
 }
 
 impl Parsable for Stat {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         if p.is_symbol(Symbol::Semi) {
             return Ok(Stat::Empty(StatEmpty::parse(p)?));
         }
@@ -102,7 +103,7 @@ impl Parsable for Stat {
 
         // A bare parenthesised expression is not a valid statement.
         if matches!(exp, Exp::Paren(_)) {
-            return Err(ParseError {
+            return Err(SyntaxError {
                 message: "parenthesized expression cannot start a statement; \
                           expected assignment or call"
                     .to_string(),
@@ -132,7 +133,7 @@ impl Parsable for Stat {
             let span = exp.span();
             Ok(Stat::Call(StatCall { span, call: exp }))
         } else {
-            Err(ParseError {
+            Err(SyntaxError {
                 message: "expression statement must be a function call or assignment".to_string(),
                 position: exp.span().start,
             })
@@ -143,11 +144,11 @@ impl Parsable for Stat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
     fn stat(src: &str) -> Stat {

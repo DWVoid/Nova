@@ -4,9 +4,10 @@ use super::param::Param;
 use super::type_spec::TypeSpec;
 use crate::lexical::Keyword;
 use crate::lexical::Span;
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 /// A lambda expression used as a value: `(params): RetType [const] block end`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -25,7 +26,7 @@ impl ExpLambda {
 }
 
 impl Parsable for ExpLambda {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let start = p.current().span.start;
         let params = p.parse_param_list()?;
         let return_type = TypeSpec::parse(p)?;
@@ -51,11 +52,11 @@ impl Parsable for ExpLambda {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

@@ -1,9 +1,10 @@
 use super::exp::Exp;
 use super::stat::Stat;
 use crate::lexical::{Span, Symbol};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatAssign {
@@ -21,7 +22,7 @@ impl StatAssign {
 }
 
 impl Parsable for StatAssign {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let first = Exp::parse(p)?;
         let mut vars = vec![first];
         while p.is_symbol(Symbol::Comma) {
@@ -42,11 +43,11 @@ impl Parsable for StatAssign {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

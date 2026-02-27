@@ -5,7 +5,7 @@ use icu::properties::CodePointSetData;
 use icu::segmenter::GraphemeClusterSegmenter;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LexError {
+pub struct LexicalError {
     pub message: String,
     pub position: Position,
 }
@@ -15,14 +15,14 @@ pub struct LexError {
 /// source.  Together, `tokens` and `trivia` cover every byte of the input, so
 /// the original source can be reconstructed exactly.
 #[derive(Clone, Debug)]
-pub struct LexResult {
+pub struct LexicalResult {
     pub tokens: Vec<Token>,
     /// All trivia items (whitespace and comments) in source order.
     pub trivia: Vec<Trivia>,
 }
 
 /// Lex a Nova source string into a token stream and a flat comment list.
-pub fn lex(input: &str) -> Result<LexResult, LexError> {
+pub fn transform(input: &str) -> Result<LexicalResult, LexicalError> {
     Lexer::new(input).scan()
 }
 
@@ -45,7 +45,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan(mut self) -> Result<LexResult, LexError> {
+    fn scan(mut self) -> Result<LexicalResult, LexicalError> {
         while !self.is_eof() {
             self.skip_trivia()?;
             if self.is_eof() {
@@ -57,7 +57,7 @@ impl<'a> Lexer<'a> {
 
         let eof_span = Span::single(self.position);
         self.tokens.push(Token::new(TokenKind::Eof, eof_span));
-        Ok(LexResult {
+        Ok(LexicalResult {
             tokens: self.tokens,
             trivia: self.trivia,
         })
@@ -148,7 +148,7 @@ impl<'a> Lexer<'a> {
     /// Skips all whitespace and comments before the next token, collecting
     /// each run as a [`Trivia`] item so that the full source can be
     /// reconstructed from `trivia + tokens`.
-    fn skip_trivia(&mut self) -> Result<(), LexError> {
+    fn skip_trivia(&mut self) -> Result<(), LexicalError> {
         loop {
             // Collect a contiguous run of whitespace (including newlines).
             if self.peek_is_whitespace() {
@@ -199,7 +199,7 @@ impl<'a> Lexer<'a> {
         self.trivia.push(Trivia { kind: TriviaKind::Whitespace, span });
     }
 
-    fn scan_comment_trivia(&mut self) -> Result<(), LexError> {
+    fn scan_comment_trivia(&mut self) -> Result<(), LexicalError> {
         let start_pos = self.position;
         self.advance_by("--");
 
@@ -223,7 +223,7 @@ impl<'a> Lexer<'a> {
         Ok(())
     }
 
-    fn scan_token(&mut self) -> Result<Token, LexError> {
+    fn scan_token(&mut self) -> Result<Token, LexicalError> {
         let start_pos = self.position;
         let token = match self.peek_char() {
             Some(ch) if is_ident_start(ch) => self.scan_word(start_pos)?,
@@ -241,7 +241,7 @@ impl<'a> Lexer<'a> {
             }
             Some(_) => self.scan_symbol(start_pos)?,
             None => {
-                return Err(LexError {
+                return Err(LexicalError {
                     message: "unexpected EOF".to_string(),
                     position: self.position,
                 });
@@ -251,7 +251,7 @@ impl<'a> Lexer<'a> {
         Ok(token)
     }
 
-    fn scan_word(&mut self, start_pos: Position) -> Result<Token, LexError> {
+    fn scan_word(&mut self, start_pos: Position) -> Result<Token, LexicalError> {
         let start_index = self.index;
         self.advance_char();
         while let Some(ch) = self.peek_char() {
@@ -292,7 +292,7 @@ impl<'a> Lexer<'a> {
                     // Compute the position of this cluster within the token span
                     // by advancing from start_pos over the text that precedes it.
                     let cluster_pos = self.advance_position(start_pos, &text[..start]);
-                    return Err(LexError {
+                    return Err(LexicalError {
                         message: format!(
                             "emoji grapheme cluster in identifier: {:?}", cluster
                         ),
@@ -323,7 +323,7 @@ impl<'a> Lexer<'a> {
         Ok(Token::new(kind, Span::new(start_pos, self.position)))
     }
 
-    fn scan_number(&mut self, start_pos: Position) -> Result<Token, LexError> {
+    fn scan_number(&mut self, start_pos: Position) -> Result<Token, LexicalError> {
         let start_index = self.index;
         if self.remaining().starts_with("0x") || self.remaining().starts_with("0X") {
             self.advance_by("0x");
@@ -380,8 +380,8 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan_short_string(&mut self, start_pos: Position) -> Result<Token, LexError> {
-        let quote = self.advance_char().ok_or(LexError {
+    fn scan_short_string(&mut self, start_pos: Position) -> Result<Token, LexicalError> {
+        let quote = self.advance_char().ok_or(LexicalError {
             message: "unexpected EOF in string".to_string(),
             position: self.position,
         })?;
@@ -402,7 +402,7 @@ impl<'a> Lexer<'a> {
             }
 
             if ch == '\n' || ch == '\r' {
-                return Err(LexError {
+                return Err(LexicalError {
                     message: "newline in short string".to_string(),
                     position: self.position,
                 });
@@ -412,7 +412,7 @@ impl<'a> Lexer<'a> {
             content.push(ch);
         }
 
-        Err(LexError {
+        Err(LexicalError {
             message: "unterminated string literal".to_string(),
             position: self.position,
         })
@@ -422,10 +422,10 @@ impl<'a> Lexer<'a> {
     /// already been consumed.  Returns the decoded string fragment (almost
     /// always a single character, but `\uHHHH` may produce a multi-byte
     /// UTF-8 sequence and `\z` produces an empty string).
-    fn decode_escape(&mut self) -> Result<String, LexError> {
+    fn decode_escape(&mut self) -> Result<String, LexicalError> {
         let escape_pos = self.position;
         let Some(esc) = self.advance_char() else {
-            return Err(LexError {
+            return Err(LexicalError {
                 message: "unterminated escape sequence".to_string(),
                 position: escape_pos,
             });
@@ -464,7 +464,7 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 if num > 255 {
-                    return Err(LexError {
+                    return Err(LexicalError {
                         message: format!("decimal escape \\{num} out of range (max 255)"),
                         position: escape_pos,
                     });
@@ -474,12 +474,12 @@ impl<'a> Lexer<'a> {
 
             // \xHH — exactly two hex digits, value 0x00..=0xFF
             'x' => {
-                let hi = self.peek_char().filter(|c| c.is_ascii_hexdigit()).ok_or_else(|| LexError {
+                let hi = self.peek_char().filter(|c| c.is_ascii_hexdigit()).ok_or_else(|| LexicalError {
                     message: "\\x escape requires two hex digits".to_string(),
                     position: self.position,
                 })?;
                 self.advance_char();
-                let lo = self.peek_char().filter(|c| c.is_ascii_hexdigit()).ok_or_else(|| LexError {
+                let lo = self.peek_char().filter(|c| c.is_ascii_hexdigit()).ok_or_else(|| LexicalError {
                     message: "\\x escape requires two hex digits".to_string(),
                     position: self.position,
                 })?;
@@ -491,7 +491,7 @@ impl<'a> Lexer<'a> {
             // \u{HHHH} — one or more hex digits inside braces, Unicode scalar
             'u' => {
                 if self.peek_char() != Some('{') {
-                    return Err(LexError {
+                    return Err(LexicalError {
                         message: "\\u escape requires '{' (e.g. \\u{1F600})".to_string(),
                         position: escape_pos,
                     });
@@ -507,32 +507,32 @@ impl<'a> Lexer<'a> {
                             val = val * 16 + hex_digit(c) as u32;
                             digits += 1;
                             if val > 0x10FFFF {
-                                return Err(LexError {
+                                return Err(LexicalError {
                                     message: "\\u{} Unicode escape value exceeds U+10FFFF".to_string(),
                                     position: escape_pos,
                                 });
                             }
                         }
-                        _ => return Err(LexError {
+                        _ => return Err(LexicalError {
                             message: "unterminated or invalid \\u{} escape".to_string(),
                             position: self.position,
                         }),
                     }
                 }
                 if digits == 0 {
-                    return Err(LexError {
+                    return Err(LexicalError {
                         message: "\\u{} escape must contain at least one hex digit".to_string(),
                         position: escape_pos,
                     });
                 }
-                let ch = char::from_u32(val).ok_or_else(|| LexError {
+                let ch = char::from_u32(val).ok_or_else(|| LexicalError {
                     message: format!("\\u{{}} value U+{val:04X} is not a valid Unicode scalar"),
                     position: escape_pos,
                 })?;
                 Ok(ch.to_string())
             }
 
-            other => Err(LexError {
+            other => Err(LexicalError {
                 message: format!("unknown escape sequence '\\{other}'"),
                 position: escape_pos,
             }),
@@ -560,7 +560,7 @@ impl<'a> Lexer<'a> {
     // Advances past the opening bracket `[=*[`, skips an optional leading newline,
     // then collects characters until the matching closing bracket `]=*]` is found.
     // Returns the collected content string on success.
-    fn scan_long_bracket_body(&mut self, level: usize, what: &str) -> Result<String, LexError> {
+    fn scan_long_bracket_body(&mut self, level: usize, what: &str) -> Result<String, LexicalError> {
         let open = format!("[{}[", "=".repeat(level));
         self.advance_by(&open);
 
@@ -588,14 +588,14 @@ impl<'a> Lexer<'a> {
                 content.push('\n');
                 continue;
             }
-            let ch = self.advance_char().ok_or(LexError {
+            let ch = self.advance_char().ok_or(LexicalError {
                 message: format!("unterminated long {what}"),
                 position: self.position,
             })?;
             content.push(ch);
         }
 
-        Err(LexError {
+        Err(LexicalError {
             message: format!("unterminated long {what}"),
             position: self.position,
         })
@@ -605,20 +605,20 @@ impl<'a> Lexer<'a> {
         &mut self,
         level: usize,
         start_pos: Position,
-    ) -> Result<(), LexError> {
+    ) -> Result<(), LexicalError> {
         self.scan_long_bracket_body(level, "comment")?;
         let span = Span::new(start_pos, self.position);
         self.trivia.push(Trivia { kind: TriviaKind::BlockComment, span });
         Ok(())
     }
 
-    fn scan_long_string(&mut self, start_pos: Position, level: usize) -> Result<Token, LexError> {
+    fn scan_long_string(&mut self, start_pos: Position, level: usize) -> Result<Token, LexicalError> {
         let content = self.scan_long_bracket_body(level, "string")?;
         let span = Span::new(start_pos, self.position);
         Ok(Token::new(TokenKind::StringLiteral(content), span))
     }
 
-    fn scan_symbol(&mut self, start_pos: Position) -> Result<Token, LexError> {
+    fn scan_symbol(&mut self, start_pos: Position) -> Result<Token, LexicalError> {
         let slice = self.remaining();
         let (kind, consume) = if slice.starts_with("..") {
             (TokenKind::Symbol(Symbol::DotDot), "..")
@@ -637,7 +637,7 @@ impl<'a> Lexer<'a> {
         } else if slice.starts_with("//") {
             (TokenKind::Symbol(Symbol::FloorDiv), "//")
         } else {
-            let ch = self.peek_char().ok_or(LexError {
+            let ch = self.peek_char().ok_or(LexicalError {
                 message: "unexpected EOF".to_string(),
                 position: self.position,
             })?;
@@ -667,7 +667,7 @@ impl<'a> Lexer<'a> {
                 '.' => Symbol::Dot,
                 '@' => Symbol::At,
                 _ => {
-                    return Err(LexError {
+                    return Err(LexicalError {
                         message: format!("unexpected character: {ch}"),
                         position: self.position,
                     });
@@ -794,7 +794,7 @@ mod tests {
 
     /// Lex, assert success, return the token kinds (without the trailing Eof).
     fn tokens(input: &str) -> Vec<TokenKind> {
-        let r = lex(input).unwrap_or_else(|e| panic!("lex failed: {}", e.message));
+        let r = transform(input).unwrap_or_else(|e| panic!("lex failed: {}", e.message));
         r.tokens
             .into_iter()
             .filter(|t| !matches!(t.kind, TokenKind::Eof))
@@ -804,7 +804,7 @@ mod tests {
 
     /// Lex, assert success, return all token kinds including Eof.
     fn tokens_with_eof(input: &str) -> Vec<TokenKind> {
-        lex(input)
+        transform(input)
             .unwrap_or_else(|e| panic!("lex failed: {}", e.message))
             .tokens
             .into_iter()
@@ -813,19 +813,19 @@ mod tests {
     }
 
     /// Lex, assert failure, return the error.
-    fn must_fail(input: &str) -> LexError {
-        lex(input).expect_err("expected lex to fail but it succeeded")
+    fn must_fail(input: &str) -> LexicalError {
+        transform(input).expect_err("expected lex to fail but it succeeded")
     }
 
     /// Return only the comment trivia items from a LexResult.
-    fn comments(r: &LexResult) -> Vec<&Trivia> {
+    fn comments(r: &LexicalResult) -> Vec<&Trivia> {
         r.trivia.iter().filter(|t| {
             matches!(t.kind, TriviaKind::LineComment | TriviaKind::BlockComment)
         }).collect()
     }
 
     /// Return only the whitespace trivia items from a LexResult.
-    fn whitespace(r: &LexResult) -> Vec<&Trivia> {
+    fn whitespace(r: &LexicalResult) -> Vec<&Trivia> {
         r.trivia.iter().filter(|t| {
             matches!(t.kind, TriviaKind::Whitespace)
         }).collect()
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn token_span_covers_correct_byte_range() {
-        let r = lex("hi").unwrap();
+        let r = transform("hi").unwrap();
         let tok = &r.tokens[0];
         assert_eq!(tok.span.start.byte(), 0);
         assert_eq!(tok.span.end.byte(), 2);
@@ -926,13 +926,13 @@ mod tests {
     #[test]
     fn token_span_reflects_column_position() {
         // "  x" — x starts at column 2
-        let r = lex("  x").unwrap();
+        let r = transform("  x").unwrap();
         assert_eq!(r.tokens[0].span.start.column(), 2);
     }
 
     #[test]
     fn token_span_on_second_line_has_correct_line() {
-        let r = lex("a\nb").unwrap();
+        let r = transform("a\nb").unwrap();
         assert_eq!(r.tokens[1].span.start.line(), 2);
         assert_eq!(r.tokens[1].span.start.column(), 0);
     }
@@ -1517,7 +1517,7 @@ mod tests {
     #[test]
     fn line_comment_is_collected() {
         let input = "-- hello";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
         assert!(matches!(c[0].kind, TriviaKind::LineComment));
@@ -1533,33 +1533,33 @@ mod tests {
 
     #[test]
     fn line_comment_ends_at_lf() {
-        let r = lex("-- a\n-- b").unwrap();
+        let r = transform("-- a\n-- b").unwrap();
         assert_eq!(comments(&r).len(), 2);
     }
 
     #[test]
     fn line_comment_ends_at_cr() {
-        let r = lex("-- a\r-- b").unwrap();
+        let r = transform("-- a\r-- b").unwrap();
         assert_eq!(comments(&r).len(), 2);
     }
 
     #[test]
     fn line_comment_ends_at_crlf() {
-        let r = lex("-- a\r\n-- b").unwrap();
+        let r = transform("-- a\r\n-- b").unwrap();
         assert_eq!(comments(&r).len(), 2);
     }
 
     #[test]
     fn line_comment_text_includes_dashes() {
         let input = "-- note";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         assert!(trivia_text(input, comments(&r)[0]).starts_with("--"));
     }
 
     #[test]
     fn multiple_line_comments_preserve_order() {
         let input = "-- first\n-- second\n-- third";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 3);
         assert!(trivia_text(input, c[0]).contains("first"));
@@ -1571,7 +1571,7 @@ mod tests {
 
     #[test]
     fn block_comment_level_0_is_collected() {
-        let r = lex("--[[block]]").unwrap();
+        let r = transform("--[[block]]").unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
         assert!(matches!(c[0].kind, TriviaKind::BlockComment));
@@ -1579,7 +1579,7 @@ mod tests {
 
     #[test]
     fn block_comment_level_1_is_collected() {
-        let r = lex("--[=[block]=]").unwrap();
+        let r = transform("--[=[block]=]").unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
         assert!(matches!(c[0].kind, TriviaKind::BlockComment));
@@ -1595,7 +1595,7 @@ mod tests {
     #[test]
     fn block_comment_can_span_multiple_lines() {
         let input = "--[[\nline1\nline2\n]]";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
         assert!(trivia_text(input, c[0]).contains("line1"));
@@ -1605,7 +1605,7 @@ mod tests {
     fn block_comment_does_not_close_on_mismatched_level() {
         // --[[ ... ]=] should not close a level-0 block comment
         let input = "--[[a]=]b]]";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 1);
         assert!(trivia_text(input, c[0]).contains("a]=]b"));
@@ -1614,7 +1614,7 @@ mod tests {
     #[test]
     fn block_comment_text_includes_opening_dashes_and_brackets() {
         let input = "--[[text]]";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         assert!(trivia_text(input, comments(&r)[0]).starts_with("--[["));
     }
 
@@ -1625,7 +1625,7 @@ mod tests {
 
     #[test]
     fn mixed_line_and_block_comments_preserve_order() {
-        let r = lex("-- line\n--[[block]]\n-- line2").unwrap();
+        let r = transform("-- line\n--[[block]]\n-- line2").unwrap();
         let c = comments(&r);
         assert_eq!(c.len(), 3);
         assert!(matches!(c[0].kind, TriviaKind::LineComment));
@@ -1638,7 +1638,7 @@ mod tests {
     #[test]
     fn whitespace_is_collected_as_trivia() {
         let input = "a   b";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
         assert_eq!(trivia_text(input, ws[0]), "   ");
@@ -1648,7 +1648,7 @@ mod tests {
     #[test]
     fn newlines_are_collected_as_whitespace_trivia() {
         let input = "a\nb";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
         assert_eq!(trivia_text(input, ws[0]), "\n");
@@ -1657,7 +1657,7 @@ mod tests {
     #[test]
     fn crlf_is_collected_as_single_whitespace_trivia_item() {
         let input = "a\r\nb";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
         assert_eq!(trivia_text(input, ws[0]), "\r\n");
@@ -1667,7 +1667,7 @@ mod tests {
     fn mixed_whitespace_and_newlines_are_one_trivia_item() {
         // A run of spaces then a newline then spaces is one contiguous whitespace item.
         let input = "a  \n  b";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let ws = whitespace(&r);
         assert_eq!(ws.len(), 1);
         assert_eq!(trivia_text(input, ws[0]), "  \n  ");
@@ -1678,7 +1678,7 @@ mod tests {
         // "a  -- comment\nb" → token "a", whitespace "  ", comment "-- comment",
         // whitespace "\n", token "b".  All source bytes are accounted for.
         let input = "a  -- comment\nb";
-        let r = lex(input).unwrap();
+        let r = transform(input).unwrap();
         let mut reconstructed = String::new();
         // Interleave trivia and tokens in source order by span byte offset.
         let mut all: Vec<(usize, &str)> = Vec::new();
@@ -1736,7 +1736,7 @@ mod tests {
 
     /// Assert that `input` fails and that the error byte-offset equals `byte`.
     fn must_fail_at(input: &str, byte: usize) {
-        let e = lex(input).expect_err("expected lex to fail");
+        let e = transform(input).expect_err("expected lex to fail");
         assert_eq!(
             e.position.byte(),
             byte,
@@ -1831,11 +1831,11 @@ mod tests {
         // error is at the right place and that lexing the prefix succeeds.
         let prefix = "hello ";
         let full = format!("{}\x00tail", prefix);
-        let err = lex(&full).unwrap_err();
+        let err = transform(&full).unwrap_err();
         // error position is right after the 6-byte prefix
         assert_eq!(err.position.byte(), prefix.len());
         // the prefix alone lexes cleanly
-        let r = lex(prefix.trim()).unwrap();
+        let r = transform(prefix.trim()).unwrap();
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "hello"));
     }
 
@@ -1966,7 +1966,7 @@ mod tests {
     fn zwnj_is_valid_identifier_continue_char() {
         // U+200C ZWNJ is in Other_ID_Continue per UAX#31 →
         // it is a valid XID_Continue character, so "ab\u{200C}" is one identifier.
-        let r = lex("ab\u{200C}").unwrap();
+        let r = transform("ab\u{200C}").unwrap();
         assert!(matches!(&r.tokens[0].kind,
             TokenKind::Identifier(s) if s == "ab\u{200C}"));
     }
@@ -1974,7 +1974,7 @@ mod tests {
     #[test]
     fn zwj_is_valid_identifier_continue_char() {
         // U+200D ZWJ is in Other_ID_Continue per UAX#31 → valid XID_Continue.
-        let r = lex("ab\u{200D}").unwrap();
+        let r = transform("ab\u{200D}").unwrap();
         assert!(matches!(&r.tokens[0].kind,
             TokenKind::Identifier(s) if s == "ab\u{200D}"));
     }
@@ -1995,7 +1995,7 @@ mod tests {
         // The lexer must store the NFC form.
         let nfd = "e\u{0301}";
         let nfc = "\u{00E9}"; // é precomposed
-        let r = lex(nfd).unwrap();
+        let r = transform(nfd).unwrap();
         assert!(
             matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == nfc),
             "expected NFC {:?}, got {:?}", nfc, r.tokens[0].kind
@@ -2005,7 +2005,7 @@ mod tests {
     #[test]
     fn identifier_already_nfc_is_unchanged() {
         // Input already in NFC → stored string equals input.
-        let r = lex("café").unwrap();
+        let r = transform("café").unwrap();
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "café"));
     }
 
@@ -2015,8 +2015,8 @@ mod tests {
         // Identifier values — this is the point of normalization.
         let nfd = "cafe\u{0301}"; // 'e' + combining acute
         let nfc = "café";         // precomposed é (U+00E9)
-        let r_nfd = lex(nfd).unwrap();
-        let r_nfc = lex(nfc).unwrap();
+        let r_nfd = transform(nfd).unwrap();
+        let r_nfc = transform(nfc).unwrap();
         assert_eq!(r_nfd.tokens[0].kind, r_nfc.tokens[0].kind);
     }
 
@@ -2026,7 +2026,7 @@ mod tests {
         // the original NFD source bytes so diagnostics remain accurate.
         // NFD "e\u{0301}" is 3 bytes; NFC "é" is 2 bytes.
         let nfd = "e\u{0301}";
-        let r = lex(nfd).unwrap();
+        let r = transform(nfd).unwrap();
         assert_eq!(r.tokens[0].span.start.byte(), 0);
         assert_eq!(r.tokens[0].span.end.byte(), 3); // 3 NFD bytes consumed
     }
@@ -2038,13 +2038,13 @@ mod tests {
 
     #[test]
     fn visible_non_ascii_letter_is_accepted() {
-        let r = lex("é").unwrap();
+        let r = transform("é").unwrap();
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "é"));
     }
 
     #[test]
     fn visible_non_ascii_cjk_is_accepted() {
-        let r = lex("字").unwrap();
+        let r = transform("字").unwrap();
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "字"));
     }
 
@@ -2068,8 +2068,8 @@ mod tests {
     //                    scan_token before scan_word is ever reached.
 
     /// Lex `input`, assert it fails, and return the error.
-    fn must_fail_with_msg(input: &str, fragment: &str) -> LexError {
-        let e = lex(input).expect_err("expected lex to fail");
+    fn must_fail_with_msg(input: &str, fragment: &str) -> LexicalError {
+        let e = transform(input).expect_err("expected lex to fail");
         assert!(
             e.message.contains(fragment),
             "expected message containing {:?}, got: {:?}",
@@ -2081,7 +2081,7 @@ mod tests {
     #[test]
     fn scan_word_accepts_math_bold_letter_not_emoji() {
         // U+1D400 𝐀: XID_Start=true, Emoji=false → valid, not flagged.
-        let r = lex("\u{1D400}").unwrap();
+        let r = transform("\u{1D400}").unwrap();
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(_)));
     }
 
@@ -2089,7 +2089,7 @@ mod tests {
     fn scan_word_accepts_digit_continue_without_vs16() {
         // "a0": '0' is Emoji=true, EmojiPresentation=false, single codepoint
         // → not emoji-rendered, must be accepted as a continue char.
-        let r = lex("a0").unwrap();
+        let r = transform("a0").unwrap();
         assert!(matches!(&r.tokens[0].kind, TokenKind::Identifier(s) if s == "a0"));
     }
 
@@ -2112,7 +2112,7 @@ mod tests {
     #[test]
     fn scan_word_error_message_includes_violating_cluster() {
         // The message must contain the debug-formatted cluster string.
-        let err = lex("a1\u{FE0F}").unwrap_err();
+        let err = transform("a1\u{FE0F}").unwrap_err();
         assert!(err.message.contains("emoji grapheme cluster in identifier"));
         // The cluster "1\u{fe0f}" should appear Debug-formatted in the message.
         assert!(err.message.contains('1'));

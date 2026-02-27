@@ -2,9 +2,10 @@ use super::exp::Exp;
 use super::stat::Stat;
 use crate::lexical::Keyword;
 use crate::lexical::Span;
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatReturn {
@@ -19,7 +20,7 @@ impl StatReturn {
 }
 
 impl Parsable for StatReturn {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let token = p.expect_keyword(Keyword::Return)?;
         let mut exprs = Vec::new();
         if !p.is_block_end() && !p.is_symbol(crate::lexical::Symbol::Semi) {
@@ -36,11 +37,11 @@ impl Parsable for StatReturn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

@@ -1,9 +1,10 @@
 use super::name::Name;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UseItem {
@@ -12,7 +13,7 @@ pub struct UseItem {
 }
 
 impl Parsable for UseItem {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let name = Name::parse(p)?;
         let alias = if p.is_keyword(Keyword::As) {
             p.advance();
@@ -38,7 +39,7 @@ pub struct UseDecl {
 }
 
 impl Parsable for UseDecl {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let token = p.expect_keyword(Keyword::Use)?;
         let mut path = Vec::new();
         path.push(Name::parse(p)?);
@@ -74,11 +75,11 @@ impl Parsable for UseDecl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

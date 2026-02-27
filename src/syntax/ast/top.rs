@@ -1,4 +1,3 @@
-use super::chunk::NamespaceDecl;
 use super::decorator::Decorator;
 use super::def_enum::EnumDef;
 use super::def_struct::StructDef;
@@ -11,9 +10,10 @@ use super::type_spec::{TypeName, TypeSpec};
 use super::visibility::Visibility;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum DefExpr {
@@ -47,7 +47,7 @@ pub struct Definition {
 }
 
 impl Parsable for Definition {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let decorators = Vec::<Decorator>::parse(p)?;
         let visibility = if p.is_keyword(Keyword::Export) {
             Some(Visibility::parse(p)?)
@@ -97,7 +97,7 @@ pub struct Implementation {
 }
 
 impl Parsable for Implementation {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let start = p.expect_keyword(Keyword::Implement)?;
         let trait_type = if p.is_keyword(Keyword::For) {
             None
@@ -137,7 +137,7 @@ impl TopItem {
 }
 
 impl Parsable for TopItem {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         if p.is_keyword(Keyword::Define) || p.is_symbol(Symbol::At) || p.is_keyword(Keyword::Export)
         {
             return Ok(TopItem::Definition(Definition::parse(p)?));
@@ -145,7 +145,7 @@ impl Parsable for TopItem {
         if p.is_keyword(Keyword::Implement) {
             return Ok(TopItem::Implementation(Implementation::parse(p)?));
         }
-        Err(ParseError {
+        Err(SyntaxError {
             message: "expected top-level definition or implementation".to_string(),
             position: p.current().span.start,
         })
@@ -154,7 +154,7 @@ impl Parsable for TopItem {
 
 impl Parser {
     /// Parse a dot-separated identifier path, used by `NamespaceDecl` and type names.
-    pub(super) fn parse_namespace_path(&mut self) -> Result<Vec<Name>, ParseError> {
+    pub(super) fn parse_namespace_path(&mut self) -> Result<Vec<Name>, SyntaxError> {
         let mut parts = Vec::new();
         parts.push(Name::parse(self)?);
         while self.is_symbol(Symbol::Dot) {
@@ -165,7 +165,7 @@ impl Parser {
     }
 
     /// Parse a `(param, …)` parameter list.
-    pub(super) fn parse_param_list(&mut self) -> Result<Vec<Param>, ParseError> {
+    pub(super) fn parse_param_list(&mut self) -> Result<Vec<Param>, SyntaxError> {
         self.expect_symbol(Symbol::LParen)?;
         let mut params = Vec::new();
         if !self.is_symbol(Symbol::RParen) {
@@ -183,11 +183,11 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

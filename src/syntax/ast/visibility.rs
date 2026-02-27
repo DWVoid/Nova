@@ -1,9 +1,10 @@
 use super::name::Name;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Visibility {
@@ -12,7 +13,7 @@ pub struct Visibility {
 }
 
 impl Parsable for Visibility {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let token = p.expect_keyword(Keyword::Export)?;
         let scopes = if p.is_symbol(Symbol::LParen) {
             p.advance();
@@ -39,11 +40,11 @@ impl Parsable for Visibility {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

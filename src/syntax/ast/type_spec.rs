@@ -1,9 +1,10 @@
 use super::name::Name;
 use crate::lexical::Span;
 use crate::lexical::Symbol;
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TypeName {
@@ -12,7 +13,7 @@ pub struct TypeName {
 }
 
 impl Parsable for TypeName {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let parts = p.parse_namespace_path()?;
         let mut span = parts[0].span;
         for name in &parts[1..] {
@@ -29,7 +30,7 @@ pub struct TypeSpec {
 }
 
 impl Parsable for TypeSpec {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let colon = p.expect_symbol(Symbol::Colon)?;
         let ty = TypeName::parse(p)?;
         let span = colon.span.merge(ty.span);
@@ -40,11 +41,11 @@ impl Parsable for TypeSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

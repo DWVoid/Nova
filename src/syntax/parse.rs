@@ -1,17 +1,15 @@
-use super::parsable::Parsable;
-use crate::lexical::{Keyword, Position, Symbol, Token, TokenKind, Trivia as LexTrivia};
+use crate::lexical::{Keyword, Symbol, Token, TokenKind, Trivia as LexTrivia};
 use crate::syntax::ast::{Chunk, Trivia};
+use crate::syntax::syntax::SyntaxError;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParseError {
-    pub message: String,
-    pub position: Position,
-}
-
-pub struct Parser {
+pub(super) struct Parser {
     pub(crate) tokens: Vec<Token>,
     pub(crate) index: usize,
     pub(crate) trivia: Trivia,
+}
+
+pub(super) trait Parsable: Sized {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError>;
 }
 
 impl Parser {
@@ -23,7 +21,7 @@ impl Parser {
         }
     }
 
-    pub fn parse_chunk(mut self) -> Result<Chunk, ParseError> {
+    pub fn parse_chunk(mut self) -> Result<Chunk, SyntaxError> {
         Chunk::parse(&mut self)
     }
 
@@ -50,13 +48,13 @@ impl Parser {
         matches!(self.peek(offset).kind, TokenKind::Symbol(s) if s == symbol)
     }
 
-    pub(crate) fn expect_symbol(&mut self, symbol: Symbol) -> Result<Token, ParseError> {
+    pub(crate) fn expect_symbol(&mut self, symbol: Symbol) -> Result<Token, SyntaxError> {
         let token = self.current().clone();
         if matches!(token.kind, TokenKind::Symbol(s) if s == symbol) {
             self.index += 1;
             return Ok(token);
         }
-        Err(ParseError {
+        Err(SyntaxError {
             message: format!("expected symbol {:?}", symbol),
             position: token.span.start,
         })
@@ -85,13 +83,13 @@ impl Parser {
         )
     }
 
-    pub(crate) fn expect_keyword(&mut self, keyword: Keyword) -> Result<Token, ParseError> {
+    pub(crate) fn expect_keyword(&mut self, keyword: Keyword) -> Result<Token, SyntaxError> {
         let token = self.current().clone();
         if matches!(token.kind, TokenKind::Keyword(k) if k == keyword) {
             self.index += 1;
             return Ok(token);
         }
-        Err(ParseError {
+        Err(SyntaxError {
             message: format!("expected keyword {:?}", keyword),
             position: token.span.start,
         })

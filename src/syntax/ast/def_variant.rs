@@ -2,9 +2,10 @@ use super::name::Name;
 use super::type_spec::TypeSpec;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct VariantMember {
@@ -14,7 +15,7 @@ pub struct VariantMember {
 }
 
 impl Parsable for VariantMember {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let name = Name::parse(p)?;
         let type_spec = TypeSpec::parse(p)?;
         let span = name.span.merge(type_spec.span);
@@ -29,7 +30,7 @@ pub struct VariantDef {
 }
 
 impl Parsable for VariantDef {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let start = p.expect_keyword(Keyword::Variant)?;
         let mut members = Vec::new();
         while !p.is_keyword(Keyword::End) {
@@ -51,11 +52,11 @@ impl Parsable for VariantDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

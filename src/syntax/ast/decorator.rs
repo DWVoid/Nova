@@ -2,9 +2,10 @@ use super::exp::Exp;
 use super::name::Name;
 use crate::lexical::Span;
 use crate::lexical::Symbol;
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Decorator {
@@ -14,7 +15,7 @@ pub struct Decorator {
 }
 
 impl Parsable for Decorator {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let at = p.expect_symbol(Symbol::At)?;
         let name = Name::parse(p)?;
         let mut span = at.span.merge(name.span);
@@ -38,7 +39,7 @@ impl Parsable for Decorator {
 /// Parse a (possibly empty) run of `@name` / `@name(…)` decorator annotations.
 /// Stops as soon as the current token is not `@`.
 impl Parsable for Vec<Decorator> {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let mut decorators = Vec::new();
         while p.is_symbol(Symbol::At) {
             decorators.push(Decorator::parse(p)?);
@@ -50,11 +51,11 @@ impl Parsable for Vec<Decorator> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

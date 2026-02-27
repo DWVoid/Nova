@@ -1,9 +1,10 @@
 use super::exp::Exp;
 use super::stat::Stat;
 use crate::lexical::Span;
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatCall {
@@ -19,13 +20,13 @@ impl StatCall {
 }
 
 impl Parsable for StatCall {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let exp = Exp::parse(p)?;
         if matches!(exp, Exp::Call(_)) {
             let span = exp.span();
             Ok(StatCall { span, call: exp })
         } else {
-            Err(ParseError {
+            Err(SyntaxError {
                 message: "expected function call expression".to_string(),
                 position: exp.span().start,
             })
@@ -36,11 +37,11 @@ impl Parsable for StatCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

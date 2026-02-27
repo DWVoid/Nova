@@ -3,9 +3,10 @@ use super::param::Param;
 use super::type_spec::TypeSpec;
 use crate::lexical::Span;
 use crate::lexical::{Keyword, Symbol};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TraitSig {
@@ -16,7 +17,7 @@ pub struct TraitSig {
 }
 
 impl Parsable for TraitSig {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let name = Name::parse(p)?;
         let params = p.parse_param_list()?;
         let return_type = TypeSpec::parse(p)?;
@@ -32,7 +33,7 @@ pub struct TraitDef {
 }
 
 impl Parsable for TraitDef {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let start = p.expect_keyword(Keyword::Trait)?;
         let mut sigs = Vec::new();
         while !p.is_keyword(Keyword::End) {
@@ -54,11 +55,11 @@ impl Parsable for TraitDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

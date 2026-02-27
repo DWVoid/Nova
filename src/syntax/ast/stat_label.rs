@@ -1,9 +1,10 @@
 use super::name::Name;
 use super::stat::Stat;
 use crate::lexical::{Keyword, Span, Symbol, TokenKind};
-use crate::syntax::parsable::Parsable;
-use crate::syntax::parser::{ParseError, Parser};
+use crate::syntax::parse::Parsable;
+use crate::syntax::parse::Parser;
 use serde::Serialize;
+use crate::syntax::syntax::SyntaxError;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct StatGoto {
@@ -18,7 +19,7 @@ impl StatGoto {
 }
 
 impl Parsable for StatGoto {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let token = p.expect_keyword(Keyword::Goto)?;
         let label = Name::parse(p)?;
         Ok(StatGoto {
@@ -41,7 +42,7 @@ impl StatLabel {
 }
 
 impl Parsable for StatLabel {
-    fn parse(p: &mut Parser) -> Result<Self, ParseError> {
+    fn parse(p: &mut Parser) -> Result<Self, SyntaxError> {
         let start = p.expect_symbol(Symbol::Colon)?;
         p.expect_symbol(Symbol::Colon)?;
         let label = Name::parse(p)?;
@@ -63,11 +64,11 @@ pub(super) fn is_label_start(p: &Parser) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lexical::lex;
-    use crate::syntax::parser::Parser;
+    use crate::lexical::transform;
+    use crate::syntax::parse::Parser;
 
     fn parser(src: &str) -> Parser {
-        let r = lex(src).unwrap();
+        let r = transform(src).unwrap();
         Parser::new(r.tokens, r.trivia)
     }
 

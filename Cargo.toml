@@ -20,3 +20,5 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 toml = "0.8"
 rmp-serde = "1"
 typeid = "1.0.3"
+dashmap = "6"
+futures = "0.3"

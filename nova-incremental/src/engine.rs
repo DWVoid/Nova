@@ -320,20 +320,13 @@ impl IncrementalEngine {
         match v_opt {
             None => Ok(None),
             Some(v) => {
-                let expected_key = self.value_registry
-                    .key_for_type_id(TypeId::of::<T>())
-                    .unwrap_or_else(|| "<unregistered>".to_string());
-                if v.type_key() != expected_key.as_str() {
-                    return Err(EngineError::TypeMismatch {
-                        expected: expected_key,
-                        actual: v.type_key().to_string(),
-                    });
-                }
                 self.value_registry
-                    .downcast_value::<T>(&v, "get_value")
+                    .downcast_value::<T>(&v)
                     .map(Some)
                     .map_err(|e| EngineError::TypeMismatch {
-                        expected: expected_key,
+                        expected: self.value_registry
+                            .key_for_type_id(TypeId::of::<T>())
+                            .unwrap_or_else(|| "<unregistered>".to_string()),
                         actual: v.type_key().to_string(),
                     })
             }

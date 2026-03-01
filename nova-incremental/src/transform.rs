@@ -172,7 +172,8 @@ where
     Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
 {
     async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
-        let typed_in = self.registry.downcast_value::<In>(input, "OneToOne input")?;
+        let typed_in = self.registry.downcast_value::<In>(input)
+            .map_err(|e| TransformError::new(format!("OneToOne input: {}", e.message)))?;
         let typed_out = (self.f)(&typed_in).await?;
         self.registry.make_value(typed_out).map_err(TransformError::from)
     }
@@ -214,7 +215,8 @@ where
 {
     async fn apply(&self, inputs: &[Value]) -> Result<Value, TransformError> {
         let typed_ins: Result<Vec<In>, _> = inputs.iter().enumerate().map(|(i, v)| {
-            self.registry.downcast_value::<In>(v, &format!("ManyToOne input[{i}]"))
+            self.registry.downcast_value::<In>(v)
+                .map_err(|e| TransformError::new(format!("ManyToOne input[{i}]: {}", e.message)))
         }).collect();
         let typed_out = (self.f)(&typed_ins?).await?;
         self.registry.make_value(typed_out).map_err(TransformError::from)
@@ -256,7 +258,8 @@ where
     Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
 {
     async fn apply(&self, input: &Value) -> Result<Vec<Value>, TransformError> {
-        let typed_in = self.registry.downcast_value::<In>(input, "OneToMany input")?;
+        let typed_in = self.registry.downcast_value::<In>(input)
+            .map_err(|e| TransformError::new(format!("OneToMany input: {}", e.message)))?;
         let typed_outs = (self.f)(&typed_in).await?;
         typed_outs.into_iter().map(|v| {
             self.registry.make_value(v).map_err(TransformError::from)
@@ -300,7 +303,8 @@ where
 {
     async fn apply(&self, inputs: &[Value]) -> Result<Vec<Value>, TransformError> {
         let typed_ins: Result<Vec<In>, _> = inputs.iter().enumerate().map(|(i, v)| {
-            self.registry.downcast_value::<In>(v, &format!("ManyToMany input[{i}]"))
+            self.registry.downcast_value::<In>(v)
+                .map_err(|e| TransformError::new(format!("ManyToMany input[{i}]: {}", e.message)))
         }).collect();
         let typed_outs = (self.f)(&typed_ins?).await?;
         typed_outs.into_iter().map(|v| {
@@ -334,7 +338,7 @@ mod tests {
         let input = reg.make_value(5i32).unwrap();
         let out = t.apply(&[input]).await.unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].downcast::<i32>(), Some(&10i32));
+        assert_eq!(reg.downcast_value::<i32>(&out[0]).unwrap(), 10i32);
     }
 
     #[tokio::test]
@@ -351,7 +355,7 @@ mod tests {
         let b = reg.make_value(4i32).unwrap();
         let out = t.apply(&[a, b]).await.unwrap();
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].downcast::<i32>(), Some(&7i32));
+        assert_eq!(reg.downcast_value::<i32>(&out[0]).unwrap(), 7i32);
     }
 
     #[tokio::test]
@@ -367,8 +371,8 @@ mod tests {
         let input = reg.make_value(7i32).unwrap();
         let out = t.apply(&[input]).await.unwrap();
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].downcast::<i32>(), Some(&7i32));
-        assert_eq!(out[1].downcast::<i32>(), Some(&7i32));
+        assert_eq!(reg.downcast_value::<i32>(&out[0]).unwrap(), 7i32);
+        assert_eq!(reg.downcast_value::<i32>(&out[1]).unwrap(), 7i32);
     }
 
     #[tokio::test]

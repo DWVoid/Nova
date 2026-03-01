@@ -348,7 +348,7 @@ mod tests {
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         assert_eq!(report.nodes_evaluated, 1);
         let (v, _) = graph.peek_value(tgt).expect("target should have value");
-        assert_eq!(registry.downcast_value::<i32>(&v, "test").unwrap(), 10i32);
+        assert_eq!(registry.downcast_value::<i32>(&v).unwrap(), 10i32);
     }
 
     #[tokio::test]

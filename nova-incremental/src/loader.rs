@@ -179,7 +179,7 @@ mod tests {
 
         // After cold reload, value must be typed i32, not Vec<u8>.
         assert_eq!(loaded.type_key(), "i32");
-        assert_eq!(registry.downcast_value::<i32>(&loaded, "test").unwrap(), 42i32);
+        assert_eq!(registry.downcast_value::<i32>(&loaded).unwrap(), 42i32);
     }
 
     #[tokio::test]
@@ -210,7 +210,7 @@ mod tests {
         loader.cache_value(id, v);
         let result = loader.get(id).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(registry.downcast_value::<i32>(&result.unwrap(), "test").unwrap(), 42i32);
+        assert_eq!(registry.downcast_value::<i32>(&result.unwrap()).unwrap(), 42i32);
     }
 
     #[tokio::test]

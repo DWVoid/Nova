@@ -60,7 +60,7 @@ impl Value {
         &self.type_key
     }
 
-    pub(crate) fn downcast<T: Any>(&self) -> Option<&T> {
+    fn downcast<T: Any>(&self) -> Option<&T> {
         self.inner.downcast_ref::<T>()
     }
 }
@@ -185,25 +185,21 @@ impl TypeEntry {
         })
     }
 
-    /// Downcast a `Value` to an owned `T`, with context for error messages.
+    /// Downcast a `Value` to an owned `T`.
     fn downcast_value<T: Any + Clone + 'static>(
         &self,
         value: &Value,
-        context: &str,
     ) -> Result<T, RegistryError> {
         if value.type_key() != self.type_key.as_str() {
             return Err(RegistryError::new(format!(
-                "{}: type mismatch – expected `{}` (key {:?}) but value has key {:?}",
-                context,
-                self.type_name,
-                self.type_key,
-                value.type_key()
+                "type mismatch – expected `{}` (key {:?}) but value has key {:?}",
+                self.type_name, self.type_key, value.type_key()
             )));
         }
         value.downcast::<T>().cloned().ok_or_else(|| {
             RegistryError::new(format!(
-                "{}: downcast to `{}` (key {:?}) failed",
-                context, self.type_name, self.type_key
+                "downcast to `{}` (key {:?}) failed",
+                self.type_name, self.type_key
             ))
         })
     }
@@ -339,18 +335,17 @@ impl ValueTypeRegistry {
     }
 
     /// Downcast a `Value` to an owned `T`.
-    pub(crate) fn downcast_value<T>(&self, value: &Value, context: &str) -> Result<T, RegistryError>
+    pub(crate) fn downcast_value<T>(&self, value: &Value) -> Result<T, RegistryError>
     where
         T: Any + Clone + 'static,
     {
         let store = self.store.read().unwrap();
         match store.get_by_type(TypeId::of::<T>()) {
             None => Err(RegistryError::new(format!(
-                "{}: type mismatch – expected type key \"<unregistered>\" but value has {:?}",
-                context,
+                "type mismatch – `<unregistered>` cannot match value with key {:?}",
                 value.type_key()
             ))),
-            Some(entry) => entry.downcast_value::<T>(value, context),
+            Some(entry) => entry.downcast_value::<T>(value),
         }
     }
 
@@ -487,7 +482,7 @@ mod tests {
     fn downcast_value_type_mismatch_returns_error() {
         let r = make_registry();
         let v = r.make_value(42i32).unwrap();
-        let result = r.downcast_value::<i64>(&v, "test");
+        let result = r.downcast_value::<i64>(&v);
         assert!(result.is_err());
         let msg = result.unwrap_err().message;
         assert!(

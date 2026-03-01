@@ -57,8 +57,12 @@ pub struct UpdateReport {
     pub nodes_evaluated: usize,
     /// Number of nodes whose output actually changed (hash mismatch).
     pub nodes_changed: usize,
-    /// Number of nodes skipped because their output hash was unchanged.
+    /// Number of nodes skipped because their output hash was unchanged
+    /// (hash-based early exit).
     pub nodes_skipped: usize,
+    /// Number of nodes left as Dirty because an upstream source was in
+    /// Error state.  These nodes will be retried on the next `update()` call.
+    pub nodes_blocked: usize,
     /// Errors encountered during the update, keyed by node ID.
     pub errors: Vec<(NodeId, TransformError)>,
 }
@@ -123,6 +127,11 @@ impl Scheduler {
                         report.nodes_skipped += 1;
                         let _ = nid;
                     }
+                    Ok(NodeOutcome::Blocked(nid)) => {
+                        // Not evaluated; stays Dirty for the next cycle.
+                        report.nodes_blocked += 1;
+                        let _ = nid;
+                    }
                     Ok(NodeOutcome::InputNode) => {
                         // Input nodes are set externally; not counted as
                         // evaluated by the scheduler.
@@ -173,6 +182,8 @@ enum NodeOutcome {
     Changed(NodeId),
     Unchanged(NodeId),
     InputNode,
+    /// Node was left Dirty because an upstream source was in Error state.
+    Blocked(NodeId),
     Error(NodeId, TransformError),
 }
 async fn evaluate_node(
@@ -198,6 +209,30 @@ async fn evaluate_node(
             ));
         }
     };
+    // Guard: block evaluation if any source is in a state where its value
+    // cannot be trusted:
+    //   - Error state: the source's last transform failed; its value (if any)
+    //     is stale and should not be consumed.
+    //   - Dirty with no value: the source was either also blocked this cycle,
+    //     or has never been computed.  Evaluating now would yield a
+    //     "source has no value" error that misleadingly looks like a real
+    //     transform failure and would poison downstream nodes.
+    //
+    // In both cases we leave `nid` as Dirty so it is retried on the next
+    // update() cycle once all its sources are Clean.
+    for &src in &edge.sources {
+        let src_status = graph.node_status(src);
+        let src_has_value = graph.peek_value(src).is_some()
+            || loader.is_cached(src);
+        let should_block = match src_status {
+            Some(s) if s.is_error() => true,
+            Some(s) if s.is_dirty() && !src_has_value => true,
+            _ => false,
+        };
+        if should_block {
+            return NodeOutcome::Blocked(nid);
+        }
+    }
     // Load all source values.
     let mut inputs: Vec<Value> = Vec::with_capacity(edge.sources.len());
     for &src in &edge.sources {

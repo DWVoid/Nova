@@ -350,6 +350,10 @@ impl Graph {
     /// BFS forward-propagation of the dirty flag starting from `start`.
     ///
     /// Does not re-mark `start` itself (the caller is responsible for that).
+    ///
+    /// Nodes in `NodeStatus::Error` are also re-marked `Dirty` so they are
+    /// retried on the next `update()` call.  Nodes that are already `Dirty`
+    /// short-circuit the BFS (their subtrees are already propagated).
     fn propagate_dirty(&self, start: NodeId) {
         let mut queue: VecDeque<NodeId> = VecDeque::new();
         // Enqueue direct successors.
@@ -371,6 +375,7 @@ impl Graph {
                     // Already dirty – subtree already propagated, skip.
                     continue;
                 }
+                // Mark both Clean and Error nodes dirty so they are retried.
                 n.status = NodeStatus::Dirty;
                 let outgoing = n.outgoing.clone();
                 drop(n);
@@ -393,6 +398,12 @@ impl Graph {
     /// dependents).
     ///
     /// Uses Kahn's algorithm over the subgraph induced by dirty nodes.
+    ///
+    /// Nodes in `NodeStatus::Error` are **not** included in the output (they
+    /// are not re-evaluated until an input change re-marks them `Dirty`), but
+    /// they are treated as ordering predecessors so that downstream `Dirty`
+    /// nodes are not promoted to wave 0 and incorrectly evaluated before the
+    /// error is resolved.
     pub fn dirty_nodes_topo(&self) -> Vec<NodeId> {
         // Collect all dirty node IDs.
         let dirty: HashSet<NodeId> = self.nodes.iter()
@@ -402,31 +413,42 @@ impl Graph {
 
         if dirty.is_empty() { return vec![]; }
 
-        // Build an in-degree map restricted to the dirty subgraph.
-        // An edge contributes to in-degree only if both the source and the
-        // target are dirty.
-        let mut in_degree: HashMap<NodeId, usize> = dirty.iter().map(|&id| (id, 0)).collect();
+        // Also collect error nodes so they can act as in-degree contributors.
+        let errored: HashSet<NodeId> = self.nodes.iter()
+            .filter(|e| e.status.is_error())
+            .map(|e| *e.key())
+            .collect();
 
-        // Adjacency within dirty subgraph.
+        // Build an in-degree map restricted to the dirty subgraph.
+        // An edge contributes to in-degree if:
+        //   - the target is dirty, AND
+        //   - at least one source is dirty OR errored
+        //     (meaning the target depends on something that is not yet clean)
+        let mut in_degree: HashMap<NodeId, usize> = dirty.iter().map(|&id| (id, 0)).collect();
         let mut adj: HashMap<NodeId, Vec<NodeId>> = dirty.iter().map(|&id| (id, vec![])).collect();
 
         for entry in self.edges.iter() {
             let edge = entry.value();
-            // Filter: only edges where all sources and targets are dirty.
-            let sources_dirty = edge.sources.iter().all(|s| dirty.contains(s));
             let targets_dirty = edge.targets.iter().any(|t| dirty.contains(t));
-            if !sources_dirty || !targets_dirty { continue; }
+            if !targets_dirty { continue; }
+
+            // A source contributes an ordering edge if it is dirty or errored.
             for &s in &edge.sources {
+                if !dirty.contains(&s) && !errored.contains(&s) { continue; }
                 for &t in &edge.targets {
                     if dirty.contains(&t) {
                         *in_degree.entry(t).or_default() += 1;
-                        adj.entry(s).or_default().push(t);
+                        if dirty.contains(&s) {
+                            // Only add real adjacency for dirty→dirty edges
+                            // (errored nodes are excluded from the output).
+                            adj.entry(s).or_default().push(t);
+                        }
                     }
                 }
             }
         }
 
-        // Kahn's BFS topological sort.
+        // Kahn's BFS topological sort over dirty nodes only.
         let mut queue: VecDeque<NodeId> = in_degree.iter()
             .filter(|(_, d)| **d == 0)
             .map(|(&id, _)| id)
@@ -445,7 +467,6 @@ impl Graph {
                 }
             }
         }
-
         result
     }
 

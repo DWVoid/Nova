@@ -50,6 +50,14 @@ impl LazyLoader {
         }
     }
 
+    /// Return `true` if `id` is present in the in-memory cache.
+    ///
+    /// This is a fast synchronous check used by the scheduler to determine
+    /// whether a source node has a usable value without awaiting storage.
+    pub fn is_cached(&self, id: NodeId) -> bool {
+        self.cache.contains_key(&id)
+    }
+
     /// Retrieve the value for `id` from the in-memory cache, falling back to
     /// storage.
     ///

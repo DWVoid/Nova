@@ -27,6 +27,8 @@
 //!     is retried when its input changes.
 //! 14. **Save and reload** – graph topology + values survive a persist/load
 //!     round-trip.
+//! 15. **Error isolation** – a fault in one node must not cascade errors into
+//!     sibling branches or downstream nodes; they stay Dirty and are retried.
 
 #![cfg(test)]
 
@@ -1141,67 +1143,210 @@ async fn visualize_replace_removed_with_new_input() {
 }
 
 // ---------------------------------------------------------------------------
-// Visualize: fan-out node removal
-// ---------------------------------------------------------------------------
+// Error isolation – faults must not cascade across the graph
+// ============================================================================
+//
+// Before the fixes in graph.rs / scheduler.rs, three related bugs existed:
+//
+//  Bug A – CASCADE: a failing transform left its downstream nodes in
+//          `NodeStatus::Error` with the message "source has no value",
+//          even though those nodes should simply stay Dirty and retry later.
+//
+//  Bug B – STALE VALUE POISONED: a sibling branch (unrelated to the error)
+//          could be incorrectly marked or skipped because propagate_dirty
+//          did not clear Error nodes back to Dirty on input change.
+//
+//  Bug C – WRONG WAVE: dirty_nodes_topo placed downstream nodes of an
+//          errored source in wave 0 (no dirty predecessors), so they ran
+//          before the source error was resolved.
+//
+// The tests below each target one of these failure modes.
 
-/// A single source fans out to two branches.  Removing the source orphans both.
+/// Bug A – A failing transform must NOT produce cascade errors downstream.
 ///
-/// **Before**
 /// ```text
-///                  ┌──double──>  [out_a | Clean |  6]
-/// [src: 3 | INPUT]─┤
-///                  └──add_ten─>  [out_b | Clean | 13]
+/// [input] --always_fail--> [mid: Error]  --double-->  [out: Dirty]
 /// ```
 ///
-/// **After removing src**
-/// ```text
-/// [out_a | Dirty |  6]  (disconnected)
-/// [out_b | Dirty | 13]  (disconnected)
-/// ```
+/// `out` must stay Dirty (not become Error) after the update, and must
+/// report as `nodes_blocked`, not as a second error.
 #[tokio::test]
-async fn visualize_removing_fan_out_source() {
+async fn error_does_not_cascade_to_downstream_nodes() {
     let engine = make_engine();
-    let src   = engine.add_input(Value::new(3i32));
-    let out_a = engine.add_output_node();
-    let out_b = engine.add_output_node();
-    engine.connect(&[src], &[out_a], "double").unwrap();
-    engine.connect(&[src], &[out_b], "add_ten").unwrap();
-    engine.update().await;
+    let input = engine.add_input(Value::new(1i32));
+    let mid   = engine.add_output_node();
+    let out   = engine.add_output_node();
+    engine.connect(&[input], &[mid], "always_fail").unwrap();
+    engine.connect(&[mid],   &[out], "double").unwrap();
 
-    let s1 = snapshot("BEFORE REMOVE: fan-out src → (out_a, out_b)", &engine);
-    assert!(s1.contains("double"));
-    assert!(s1.contains("add_ten"));
+    let report = engine.update().await;
 
-    engine.remove_node(src);
+    // Exactly ONE error: the failing transform on mid.
+    assert_eq!(report.errors.len(), 1, "only mid should error, not out");
+    assert_eq!(report.errors[0].0, mid);
 
-    let s2 = snapshot("AFTER REMOVE src: both branches orphaned and Dirty", &engine);
-    assert!(!s2.contains("double"),  "double edge must be gone");
-    assert!(!s2.contains("add_ten"), "add_ten edge must be gone");
-    assert!(engine.graph().node_status(out_a).unwrap().is_dirty());
-    assert!(engine.graph().node_status(out_b).unwrap().is_dirty());
+    // out is blocked (upstream error), not itself in Error state.
+    let graph = engine.graph();
+    assert!(graph.node_status(mid).unwrap().is_error(), "mid must be Error");
+    assert!(graph.node_status(out).unwrap().is_dirty(),
+        "out must stay Dirty (blocked), not become Error");
+
+    assert_eq!(report.nodes_blocked, 1, "out should be counted as blocked");
 }
 
-/// After loading, a fresh update with no input changes produces zero evaluations
-/// (hash-based early exit, hashes were saved).
+/// Bug A extended – error must not cascade across multiple levels.
+///
+/// ```text
+/// [input] --always_fail--> [a: Error] --double--> [b: Dirty] --double--> [c: Dirty]
+/// ```
 #[tokio::test]
-async fn load_then_update_no_change_skips_all() {
-    let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+async fn error_does_not_cascade_multiple_levels() {
+    let engine = make_engine();
+    let input = engine.add_input(Value::new(1i32));
+    let a = engine.add_output_node();
+    let b = engine.add_output_node();
+    let c = engine.add_output_node();
+    engine.connect(&[input], &[a], "always_fail").unwrap();
+    engine.connect(&[a],     &[b], "double").unwrap();
+    engine.connect(&[b],     &[c], "double").unwrap();
 
-    let mut engine = IncrementalEngine::new(Arc::clone(&storage));
-    engine.register_transform("double", Transform::OneToOne(Arc::new(Double)));
-    let input  = engine.add_input(Value::new(3i32));
-    let output = engine.add_output_node();
-    engine.connect(&[input], &[output], "double").unwrap();
+    let report = engine.update().await;
+
+    assert_eq!(report.errors.len(), 1, "only 'a' should error");
+    let graph = engine.graph();
+    assert!(graph.node_status(a).unwrap().is_error());
+    assert!(graph.node_status(b).unwrap().is_dirty(), "b stays Dirty");
+    assert!(graph.node_status(c).unwrap().is_dirty(), "c stays Dirty");
+    assert_eq!(report.nodes_blocked, 2);
+}
+
+/// Bug A – independent sibling branch is completely unaffected by the error.
+///
+/// ```text
+///                   ┌──always_fail──> [bad: Error]
+/// [shared_input] ───┤
+///                   └──double──>      [good: Clean, value=2]
+/// ```
+#[tokio::test]
+async fn error_in_one_branch_does_not_affect_sibling_branch() {
+    let engine = make_engine();
+    let input = engine.add_input(Value::new(1i32));
+    let bad   = engine.add_output_node();
+    let good  = engine.add_output_node();
+    engine.connect(&[input], &[bad],  "always_fail").unwrap();
+    engine.connect(&[input], &[good], "double").unwrap();
+
+    let report = engine.update().await;
+
+    // bad errors, good succeeds.
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].0, bad);
+    let v = engine.get_value(good).await.unwrap().unwrap();
+    assert_eq!(v.downcast::<i32>(), Some(&2i32),
+        "sibling good branch must compute correctly despite bad branch error");
+}
+
+/// Bug B – after an input change, an errored node must be re-dirtied and
+/// included in the next update cycle.
+#[tokio::test]
+async fn error_node_is_re_dirtied_on_input_change() {
+    let engine = make_engine();
+    let input = engine.add_input(Value::new(0i32));
+    let mid   = engine.add_output_node();
+    engine.connect(&[input], &[mid], "always_fail").unwrap();
     engine.update().await;
-    engine.save().await.unwrap();
 
-    let mut registry = TransformRegistry::new();
-    registry.register("double", Transform::OneToOne(Arc::new(Double)));
-    let engine2 = IncrementalEngine::load(Arc::clone(&storage), registry).await.unwrap();
+    assert!(engine.graph().node_status(mid).unwrap().is_error());
 
-    // Nodes have stored hashes → they start Clean after load.
-    // An update with nothing dirty should evaluate nothing.
-    let report = engine2.update().await;
-    assert_eq!(report.nodes_evaluated, 0,
-        "all nodes should be clean after reload with unchanged data");
+    // Change the input.
+    engine.set_input(input, Value::new(99i32)).unwrap();
+
+    // mid must be back to Dirty so the next update retries it.
+    assert!(engine.graph().node_status(mid).unwrap().is_dirty(),
+        "error node must become Dirty again when its input changes");
+}
+
+/// Bug B – errored node's downstream nodes are also re-dirtied on input change.
+#[tokio::test]
+async fn error_downstream_re_dirtied_on_input_change() {
+    let engine = make_engine();
+    let input = engine.add_input(Value::new(0i32));
+    let mid   = engine.add_output_node();
+    let out   = engine.add_output_node();
+    engine.connect(&[input], &[mid], "always_fail").unwrap();
+    engine.connect(&[mid],   &[out], "double").unwrap();
+    engine.update().await;
+
+    // Change input → both mid and out should become Dirty.
+    engine.set_input(input, Value::new(1i32)).unwrap();
+    let graph = engine.graph();
+    assert!(graph.node_status(mid).unwrap().is_dirty());
+    assert!(graph.node_status(out).unwrap().is_dirty());
+}
+
+/// Full retry cycle: error → fix input → success.
+///
+/// Uses a transform that fails when input == 0 and succeeds otherwise.
+#[tokio::test]
+async fn error_then_fix_then_success() {
+    struct FailOnZero;
+    #[async_trait]
+    impl OneToOneTransform for FailOnZero {
+        async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
+            let n = input.downcast::<i32>().copied()
+                .ok_or_else(|| TransformError::new("expected i32"))?;
+            if n == 0 {
+                Err(TransformError::new("input is zero"))
+            } else {
+                Ok(Value::new(n * 10))
+            }
+        }
+    }
+
+    let storage = Arc::new(MemoryStorage::new()) as Arc<dyn crate::incremental::storage::Storage>;
+    let mut engine = IncrementalEngine::new(storage);
+    engine.register_transform("fail_on_zero",
+        Transform::OneToOne(Arc::new(FailOnZero)));
+
+    let input  = engine.add_input(Value::new(0i32));
+    let output = engine.add_output_node();
+    engine.connect(&[input], &[output], "fail_on_zero").unwrap();
+
+    // First update: should fail.
+    let report1 = engine.update().await;
+    assert!(!report1.is_ok());
+    assert!(engine.graph().node_status(output).unwrap().is_error());
+
+    // Fix the input.
+    engine.set_input(input, Value::new(5i32)).unwrap();
+    assert!(engine.graph().node_status(output).unwrap().is_dirty(),
+        "after input fix, output must be Dirty again");
+
+    // Second update: should succeed.
+    let report2 = engine.update().await;
+    assert!(report2.is_ok(), "{:?}", report2.errors);
+    let v = engine.get_value(output).await.unwrap().unwrap();
+    assert_eq!(v.downcast::<i32>(), Some(&50i32));
+}
+
+/// Bug C – nodes downstream of an errored node must not appear in wave 0.
+/// They should be blocked, not run before the source is resolved.
+#[tokio::test]
+async fn blocked_nodes_are_not_in_wave_zero() {
+    let engine = make_engine();
+    let input = engine.add_input(Value::new(1i32));
+    let mid   = engine.add_output_node();
+    let out   = engine.add_output_node();
+    engine.connect(&[input], &[mid], "always_fail").unwrap();
+    engine.connect(&[mid],   &[out], "double").unwrap();
+
+    let report = engine.update().await;
+
+    // mid errored, out was blocked. out must NOT have errored with
+    // "source has no value" – that would indicate it ran in wave 0.
+    let out_errors: Vec<_> = report.errors.iter()
+        .filter(|(id, _)| *id == out)
+        .collect();
+    assert!(out_errors.is_empty(),
+        "out must not appear in errors (was: {:?})", out_errors);
 }

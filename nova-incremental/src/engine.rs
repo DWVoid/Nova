@@ -329,10 +329,13 @@ impl IncrementalEngine {
                         actual: v.type_key().to_string(),
                     });
                 }
-                v.downcast::<T>().cloned().ok_or_else(|| EngineError::TypeMismatch {
-                    expected: expected_key,
-                    actual: v.type_key().to_string(),
-                }).map(Some)
+                self.value_registry
+                    .downcast_value::<T>(&v, "get_value")
+                    .map(Some)
+                    .map_err(|e| EngineError::TypeMismatch {
+                        expected: expected_key,
+                        actual: v.type_key().to_string(),
+                    })
             }
         }
     }
@@ -358,7 +361,7 @@ impl IncrementalEngine {
         for nid in node_ids {
             if let Some((value, _)) = self.graph.peek_value(nid) {
                 let is_input = self.graph.is_input(nid);
-                let bytes = value.to_bytes();
+                let bytes = self.value_registry.serialize_value(&value);
                 let hash = hash_bytes(&bytes);
                 let _ = self.graph.store_value(nid, value.clone(), hash);
                 self.loader.persist(nid, value, hash, is_input).await?;

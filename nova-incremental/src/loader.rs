@@ -45,6 +45,11 @@ impl LazyLoader {
         self.cache.contains_key(&id)
     }
 
+    /// Return a reference to the value type registry.
+    pub fn registry(&self) -> &ValueTypeRegistry {
+        &self.registry
+    }
+
     /// Retrieve the value for `id` from the in-memory cache, falling back to
     /// storage.
     ///
@@ -99,7 +104,7 @@ impl LazyLoader {
         is_input: bool,
     ) -> Result<(), StorageError> {
         let type_key = value.type_key().to_string();
-        let value_bytes = value.to_bytes();
+        let value_bytes = self.registry.serialize_value(&value);
 
         // Update in-memory cache.
         self.cache.insert(id, value);
@@ -164,7 +169,7 @@ mod tests {
         let id = NodeId::new();
 
         let v = registry.make_value(42i32).unwrap();
-        let bytes = v.to_bytes();
+        let bytes = registry.serialize_value(&v);
         let hash = hash_bytes(&bytes);
         loader.persist(id, v, hash, false).await.unwrap();
 
@@ -174,7 +179,7 @@ mod tests {
 
         // After cold reload, value must be typed i32, not Vec<u8>.
         assert_eq!(loaded.type_key(), "i32");
-        assert_eq!(loaded.downcast::<i32>(), Some(&42i32));
+        assert_eq!(registry.downcast_value::<i32>(&loaded, "test").unwrap(), 42i32);
     }
 
     #[tokio::test]
@@ -185,7 +190,7 @@ mod tests {
         let id = NodeId::new();
 
         let v = registry.make_value(99u64).unwrap();
-        let bytes = v.to_bytes();
+        let bytes = registry.serialize_value(&v);
         let hash = hash_bytes(&bytes);
         loader.persist(id, v, hash, false).await.unwrap();
 
@@ -205,7 +210,7 @@ mod tests {
         loader.cache_value(id, v);
         let result = loader.get(id).await.unwrap();
         assert!(result.is_some());
-        assert_eq!(result.unwrap().downcast::<i32>(), Some(&42i32));
+        assert_eq!(registry.downcast_value::<i32>(&result.unwrap(), "test").unwrap(), 42i32);
     }
 
     #[tokio::test]
@@ -219,11 +224,11 @@ mod tests {
     }
 
     #[test]
-    fn to_bytes_produces_consistent_hash() {
+    fn serialize_produces_consistent_hash() {
         let registry = make_registry();
         let v = registry.make_value(42u32).unwrap();
-        let h1 = hash_bytes(&v.to_bytes());
-        let h2 = hash_bytes(&v.to_bytes());
+        let h1 = hash_bytes(&registry.serialize_value(&v));
+        let h2 = hash_bytes(&registry.serialize_value(&v));
         assert_eq!(h1, h2);
     }
 }

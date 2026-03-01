@@ -280,7 +280,7 @@ async fn evaluate_node(
         // closure captured at construction time, two logically-equal values
         // produced by separate transform invocations will produce the same
         // hash, correctly skipping downstream recomputation.
-        let new_hash = hash_bytes(&output.to_bytes());
+        let new_hash = hash_bytes(&loader.registry().serialize_value(&output));
         let prev_hash = graph.last_hash(tid);
         if prev_hash == Some(new_hash) {
             // Hash unchanged – skip persist and downstream dirty.
@@ -348,7 +348,7 @@ mod tests {
         assert!(report.is_ok(), "errors: {:?}", report.errors);
         assert_eq!(report.nodes_evaluated, 1);
         let (v, _) = graph.peek_value(tgt).expect("target should have value");
-        assert_eq!(v.downcast::<i32>(), Some(&10i32));
+        assert_eq!(registry.downcast_value::<i32>(&v, "test").unwrap(), 10i32);
     }
 
     #[tokio::test]

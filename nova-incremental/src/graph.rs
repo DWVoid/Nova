@@ -711,7 +711,7 @@ mod tests {
         g.store_value(a, val(42), 99).unwrap();
         assert_eq!(g.node_status(a), Some(NodeStatus::Clean));
         let (v, h) = g.peek_value(a).unwrap();
-        assert_eq!(v.downcast::<i32>(), Some(&42i32));
+        assert_eq!(make_registry().downcast_value::<i32>(&v, "test").unwrap(), 42i32);
         assert_eq!(h, 99);
     }
 }

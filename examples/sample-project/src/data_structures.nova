@@ -1,18 +1,18 @@
 namespace SampleProject.DataStructures;
 
 @doc("A simple list data structure")
-export struct List
-    items: array<string>,
-    private size: integer
+export define List struct
+    items: array;
+    size: integer;
 end
 
 @doc("Trait for displayable data structures")
-export trait Displayable
-    method display(self): unit;
+export define Displayable trait
+    display(self): unit;
 end
 
-impl List for Displayable
-    method display(self): unit
+implement List for Displayable
+    define display(self): unit
         println("List contents:")
         for item in self.items do
             println("  - " + item)
@@ -24,8 +24,8 @@ end
 @doc("Create a new empty list")
 export define create_list(): List
     return List {
-        items: array<string>(),
-        size: 0
+        items = array(),
+        size = 0
     }
 end
 
@@ -56,7 +56,7 @@ export define clear_list(list: List): unit
     list.size = 0
 end
 
-@deprecated("Use get_item_at instead", since: "0.2.0")
+@deprecated("Use get_item_at instead", "0.2.0")
 export define get_item(list: List, index: integer): string
     return get_item_at(list, index)
 end
@@ -64,7 +64,7 @@ end
 @doc("Get item at specific index")
 export define get_item_at(list: List, index: integer): string
     if index < 0 or index >= list.size then
-        throw "Index out of bounds"
+        throw("Index out of bounds")
     end
     return list.items[index]
 end
@@ -76,7 +76,7 @@ define test_list_operations(): unit
     assert(get_size(list) == 0)
     
     add_item(list, "first")
-    assert(!is_empty(list))
+    assert(not is_empty(list))
     assert(get_size(list) == 1)
     
     add_item(list, "second")

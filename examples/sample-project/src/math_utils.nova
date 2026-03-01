@@ -1,9 +1,9 @@
 namespace SampleProject.MathUtils;
 
 @doc("Mathematical utility functions for the sample project")
-export struct MathConstants
-    pi: float,
-    e: float
+export define MathConstants struct
+    pi: float;
+    e: float;
 end
 
 @doc("Calculate factorial of a number")
@@ -16,7 +16,7 @@ export define factorial(n: integer): integer
 end
 
 @doc("Calculate fibonacci number at position n")
-@profile  // Enable profiling for performance testing
+@profile  -- Enable profiling for performance testing
 export define calculate_fibonacci(n: integer): integer
     if n <= 1 then
         return n
@@ -25,7 +25,7 @@ export define calculate_fibonacci(n: integer): integer
     var a: integer = 0
     var b: integer = 1
     
-    for i = 2 to n do
+    for i = 2, n do
         val temp = a + b
         a = b
         b = temp
@@ -83,8 +83,8 @@ end
 
 @test("Prime number detection")
 define test_is_prime(): unit
-    assert(!is_prime(1))
+    assert(not is_prime(1))
     assert(is_prime(2))
     assert(is_prime(17))
-    assert(!is_prime(25))
+    assert(not is_prime(25))
 end

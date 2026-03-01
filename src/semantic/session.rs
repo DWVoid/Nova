@@ -50,6 +50,10 @@ use crate::semantic::file_access::FileAccess;
 use crate::semantic::file_content::FileContent;
 use crate::semantic::file_stat::FileStat;
 use crate::semantic::load_transform::LoadFile;
+use crate::semantic::lex_transform::LexFile;
+use crate::semantic::parse_transform::ParseFile;
+use crate::lexical::LexicalResult;
+use crate::syntax::SyntaxResult;
 
 // ---------------------------------------------------------------------------
 // Namespace UUID for file stat node IDs (UUID v5)
@@ -76,6 +80,16 @@ pub fn content_node_id(path: &str) -> NodeId {
     NodeId::named(FILE_NODE_NS, &format!("{path}\x00content"))
 }
 
+/// Derive a stable [`NodeId`] for the lex-result node of `path`.
+pub fn lex_node_id(path: &str) -> NodeId {
+    NodeId::named(FILE_NODE_NS, &format!("{path}\x00lex"))
+}
+
+/// Derive a stable [`NodeId`] for the parse/syntax-result node of `path`.
+pub fn parse_node_id(path: &str) -> NodeId {
+    NodeId::named(FILE_NODE_NS, &format!("{path}\x00parse"))
+}
+
 // ---------------------------------------------------------------------------
 // Per-file bookkeeping
 // ---------------------------------------------------------------------------
@@ -87,6 +101,10 @@ pub struct FileNodes {
     pub stat_node: NodeId,
     /// Computed output node carrying the [`FileContent`].
     pub content_node: NodeId,
+    /// Computed output node carrying the [`LexicalResult`].
+    pub lex_node: NodeId,
+    /// Computed output node carrying the [`SyntaxResult`].
+    pub parse_node: NodeId,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,35 +203,38 @@ impl SemanticSession {
         // Derive stable node IDs from the path.
         let stat_node    = stat_node_id(path);
         let content_node = content_node_id(path);
+        let lex_node     = lex_node_id(path);
+        let parse_node   = parse_node_id(path);
 
-        // Register the load transform under its per-file key.
-        let key = LoadFile::registry_key(path);
-        let transform = Transform::OneToOne(Arc::new(
-            LoadFile::new(path, Arc::clone(&self.fs))
-        ));
+        // Register the three per-file transforms.
+        let load_key  = LoadFile::registry_key(path);
+        let lex_key   = LexFile::registry_key(path);
+        let parse_key = ParseFile::registry_key(path);
 
-        // We need mutable access to the engine only for transform registration;
-        // all other operations take &self.
-        // SAFETY: register_transform_dynamic is &mut self, so we call it here
-        // before any graph mutations.
-        self.engine.register_transform(key.clone(), transform);
+        self.engine.register_transform(load_key.clone(),
+            Transform::OneToOne(Arc::new(LoadFile::new(path, Arc::clone(&self.fs)))));
+        self.engine.register_transform(lex_key.clone(),
+            Transform::OneToOne(Arc::new(LexFile)));
+        self.engine.register_transform(parse_key.clone(),
+            Transform::OneToOne(Arc::new(ParseFile::new(path))));
 
-        // Add the stat input node with a pre-assigned ID.
+        // Add nodes with pre-assigned IDs.
         self.engine.graph().add_input_node_with_id(stat_node);
         self.engine.graph().set_input(stat_node, Value::new(stat))
             .map_err(EngineError::Graph)?;
-
-        // Add the content computed node.
         self.engine.graph().add_computed_node_with_id(content_node);
+        self.engine.graph().add_computed_node_with_id(lex_node);
+        self.engine.graph().add_computed_node_with_id(parse_node);
 
-        // Connect: stat_node → LoadFile → content_node.
-        self.engine.connect_by_key(
-            &[stat_node],
-            &[content_node],
-            &key,
-        )?;
+        // Wire the pipeline:
+        //   stat → load → content → lex → lex_result → parse → syntax_result
+        self.engine.connect_by_key(&[stat_node],    &[content_node], &load_key)?;
+        self.engine.connect_by_key(&[content_node], &[lex_node],     &lex_key)?;
+        self.engine.connect_by_key(&[lex_node],     &[parse_node],   &parse_key)?;
 
-        self.files.insert(path.to_string(), FileNodes { stat_node, content_node });
+        self.files.insert(path.to_string(), FileNodes {
+            stat_node, content_node, lex_node, parse_node,
+        });
         Ok(())
     }
 
@@ -258,6 +279,34 @@ impl SemanticSession {
         }
     }
 
+    /// Retrieve the [`LexicalResult`] for `path`.
+    ///
+    /// Returns `Ok(None)` if the file has not been lexed yet.
+    pub async fn get_lex_result(&self, path: &str) -> Result<Option<LexicalResult>, EngineError> {
+        let nodes = match self.files.get(path) {
+            Some(n) => n,
+            None    => return Ok(None),
+        };
+        match self.engine.get_value(nodes.lex_node).await? {
+            Some(v) => Ok(v.downcast::<LexicalResult>().cloned()),
+            None    => Ok(None),
+        }
+    }
+
+    /// Retrieve the [`SyntaxResult`] (parsed AST) for `path`.
+    ///
+    /// Returns `Ok(None)` if the file has not been parsed yet.
+    pub async fn get_syntax_result(&self, path: &str) -> Result<Option<SyntaxResult>, EngineError> {
+        let nodes = match self.files.get(path) {
+            Some(n) => n,
+            None    => return Ok(None),
+        };
+        match self.engine.get_value(nodes.parse_node).await? {
+            Some(v) => Ok(v.downcast::<SyntaxResult>().cloned()),
+            None    => Ok(None),
+        }
+    }
+
     /// Return the [`FileNodes`] for `path`, if tracked.
     pub fn file_nodes(&self, path: &str) -> Option<&FileNodes> {
         self.files.get(path)
@@ -294,11 +343,12 @@ impl SemanticSession {
         // Re-build the registry for all known paths.
         let mut registry = TransformRegistry::new();
         for path in known_paths {
-            let key = LoadFile::registry_key(path);
-            let transform = Transform::OneToOne(Arc::new(
-                LoadFile::new(*path, Arc::clone(&fs))
-            ));
-            registry.register(key, transform);
+            registry.register(LoadFile::registry_key(path),
+                Transform::OneToOne(Arc::new(LoadFile::new(*path, Arc::clone(&fs)))));
+            registry.register(LexFile::registry_key(path),
+                Transform::OneToOne(Arc::new(LexFile)));
+            registry.register(ParseFile::registry_key(path),
+                Transform::OneToOne(Arc::new(ParseFile::new(*path))));
         }
 
         let engine = IncrementalEngine::load(Arc::clone(&storage), registry).await?;
@@ -308,8 +358,12 @@ impl SemanticSession {
         for path in known_paths {
             let stat_node    = stat_node_id(path);
             let content_node = content_node_id(path);
+            let lex_node     = lex_node_id(path);
+            let parse_node   = parse_node_id(path);
             if engine.graph().contains_node(stat_node) {
-                files.insert(path.to_string(), FileNodes { stat_node, content_node });
+                files.insert(path.to_string(), FileNodes {
+                    stat_node, content_node, lex_node, parse_node,
+                });
             }
         }
 
@@ -367,34 +421,36 @@ mod tests {
 
     #[tokio::test]
     async fn single_file_is_loaded() {
-        let mut session = make_session(&[("main.nova", "val x = 1;")]);
-        let stat = FileStat::new("main.nova", 10, 1000);
+        let src = "namespace main;";
+        let mut session = make_session(&[("main.nova", src)]);
+        let stat = FileStat::new("main.nova", src.len() as u64, 1000);
         session.update_files(vec![stat]).unwrap();
         let report = session.run().await;
         assert!(report.is_ok(), "{:?}", report.errors);
 
         let content = session.get_content("main.nova").await.unwrap().unwrap();
-        assert_eq!(content.as_str().unwrap(), "val x = 1;");
+        assert_eq!(content.as_str().unwrap(), src);
     }
 
     #[tokio::test]
     async fn multiple_files_loaded_in_parallel() {
         let mut session = make_session(&[
-            ("a.nova", "-- a"),
-            ("b.nova", "-- b"),
-            ("c.nova", "-- c"),
+            ("a.nova", "namespace a;"),
+            ("b.nova", "namespace b;"),
+            ("c.nova", "namespace c;"),
         ]);
         let stats = vec![
-            FileStat::new("a.nova", 4, 100),
-            FileStat::new("b.nova", 4, 200),
-            FileStat::new("c.nova", 4, 300),
+            FileStat::new("a.nova", 12, 100),
+            FileStat::new("b.nova", 12, 200),
+            FileStat::new("c.nova", 12, 300),
         ];
         session.update_files(stats).unwrap();
-        session.run().await;
+        let report = session.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
 
-        assert_eq!(session.get_content("a.nova").await.unwrap().unwrap().as_str().unwrap(), "-- a");
-        assert_eq!(session.get_content("b.nova").await.unwrap().unwrap().as_str().unwrap(), "-- b");
-        assert_eq!(session.get_content("c.nova").await.unwrap().unwrap().as_str().unwrap(), "-- c");
+        assert_eq!(session.get_content("a.nova").await.unwrap().unwrap().as_str().unwrap(), "namespace a;");
+        assert_eq!(session.get_content("b.nova").await.unwrap().unwrap().as_str().unwrap(), "namespace b;");
+        assert_eq!(session.get_content("c.nova").await.unwrap().unwrap().as_str().unwrap(), "namespace c;");
     }
 
     // -----------------------------------------------------------------------
@@ -403,8 +459,9 @@ mod tests {
 
     #[tokio::test]
     async fn unchanged_stat_skips_reload() {
-        let mut session = make_session(&[("x.nova", "-- original")]);
-        let stat = FileStat::new("x.nova", 11, 500);
+        let src = "namespace original;";
+        let mut session = make_session(&[("x.nova", src)]);
+        let stat = FileStat::new("x.nova", src.len() as u64, 500);
         session.update_files(vec![stat.clone()]).unwrap();
         session.run().await;
 
@@ -419,34 +476,34 @@ mod tests {
     async fn changed_mtime_triggers_reload() {
         // The FS has updated content under the same path.
         let mut mock = MockFileAccess::new();
-        mock.add("f.nova", b"-- v1".to_vec());
+        mock.add("f.nova", b"namespace v1;".to_vec());
         let fs: Arc<dyn FileAccess> = Arc::new(mock);
 
         let storage = Arc::new(MemoryStorage::new()) as Arc<dyn Storage>;
         let mut session = SemanticSession::new(Arc::clone(&storage), Arc::clone(&fs));
 
-        let stat_v1 = FileStat::new("f.nova", 5, 1000);
+        let stat_v1 = FileStat::new("f.nova", 13, 1000);
         session.update_files(vec![stat_v1]).unwrap();
         session.run().await;
         assert_eq!(
             session.get_content("f.nova").await.unwrap().unwrap().as_str().unwrap(),
-            "-- v1"
+            "namespace v1;"
         );
 
         // Simulate file content change on disk: update mock and change stat.
-        // We must rebuild the session with updated mock content.
         let mut mock2 = MockFileAccess::new();
-        mock2.add("f.nova", b"-- v2".to_vec());
+        mock2.add("f.nova", b"namespace v2;".to_vec());
         let fs2: Arc<dyn FileAccess> = Arc::new(mock2);
         let mut session2 = SemanticSession::new(Arc::new(MemoryStorage::new()), fs2);
 
-        let stat_v2 = FileStat::new("f.nova", 5, 2000); // mtime changed
+        let stat_v2 = FileStat::new("f.nova", 13, 2000); // mtime changed
         session2.update_files(vec![stat_v2]).unwrap();
         let report = session2.run().await;
-        assert_eq!(report.nodes_evaluated, 1);
+        // content + lex + parse = 3 computed nodes re-evaluated
+        assert_eq!(report.nodes_evaluated, 3);
         assert_eq!(
             session2.get_content("f.nova").await.unwrap().unwrap().as_str().unwrap(),
-            "-- v2"
+            "namespace v2;"
         );
     }
 
@@ -457,26 +514,24 @@ mod tests {
     #[tokio::test]
     async fn adding_file_mid_session() {
         let mut session = make_session(&[
-            ("existing.nova", "-- exists"),
-            ("new.nova",      "-- new"),
+            ("existing.nova", "namespace existing;"),
+            ("new.nova",      "namespace new_mod;"),
         ]);
 
         // First run: only one file.
-        session.update_files(vec![FileStat::new("existing.nova", 9, 0)]).unwrap();
+        session.update_files(vec![FileStat::new("existing.nova", 19, 0)]).unwrap();
         session.run().await;
 
         // Second run: add a new file.
         session.update_files(vec![
-            FileStat::new("existing.nova", 9, 0), // unchanged
-            FileStat::new("new.nova", 5, 1),      // new
+            FileStat::new("existing.nova", 19, 0),    // unchanged
+            FileStat::new("new.nova", 17, 1),         // new
         ]).unwrap();
         let report = session.run().await;
 
         assert!(report.is_ok(), "{:?}", report.errors);
-        assert_eq!(
-            session.get_content("new.nova").await.unwrap().unwrap().as_str().unwrap(),
-            "-- new"
-        );
+        let content = session.get_content("new.nova").await.unwrap().unwrap();
+        assert_eq!(content.as_str().unwrap(), "namespace new_mod;");
     }
 
     // -----------------------------------------------------------------------
@@ -486,18 +541,18 @@ mod tests {
     #[tokio::test]
     async fn removing_file_mid_session() {
         let mut session = make_session(&[
-            ("keep.nova",   "-- keep"),
-            ("remove.nova", "-- remove"),
+            ("keep.nova",   "namespace keep;"),
+            ("remove.nova", "namespace remove_me;"),
         ]);
 
         session.update_files(vec![
-            FileStat::new("keep.nova",   4, 0),
-            FileStat::new("remove.nova", 8, 0),
+            FileStat::new("keep.nova",   15, 0),
+            FileStat::new("remove.nova", 20, 0),
         ]).unwrap();
         session.run().await;
 
         // Second snapshot: remove.nova is gone.
-        session.update_files(vec![FileStat::new("keep.nova", 4, 0)]).unwrap();
+        session.update_files(vec![FileStat::new("keep.nova", 15, 0)]).unwrap();
         session.run().await;
 
         assert!(session.file_nodes("remove.nova").is_none(),
@@ -506,7 +561,7 @@ mod tests {
             "content for removed file must not be accessible");
         // keep.nova must still be accessible.
         let kept = session.get_content("keep.nova").await.unwrap().unwrap();
-        assert_eq!(kept.as_str().unwrap(), "-- keep");
+        assert_eq!(kept.as_str().unwrap(), "namespace keep;");
     }
 
     // -----------------------------------------------------------------------
@@ -551,10 +606,10 @@ mod tests {
     #[tokio::test]
     async fn save_and_reload_preserves_node_ids() {
         let storage: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
-        let fs = make_fs(&[("lib.nova", "-- lib")]);
+        let fs = make_fs(&[("lib.nova", "namespace lib;")]);
 
         let mut session = SemanticSession::new(Arc::clone(&storage), Arc::clone(&fs));
-        session.update_files(vec![FileStat::new("lib.nova", 6, 42)]).unwrap();
+        session.update_files(vec![FileStat::new("lib.nova", 14, 42)]).unwrap();
         session.run().await;
         session.save().await.unwrap();
 
@@ -567,5 +622,153 @@ mod tests {
         let expected_content = content_node_id("lib.nova");
         assert!(session2.engine.graph().contains_node(expected_stat));
         assert!(session2.engine.graph().contains_node(expected_content));
+    }
+
+    // -----------------------------------------------------------------------
+    // Node ID uniqueness across all four kinds
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn all_four_node_ids_are_distinct() {
+        let path = "src/main.nova";
+        let ids = [
+            stat_node_id(path),
+            content_node_id(path),
+            lex_node_id(path),
+            parse_node_id(path),
+        ];
+        for i in 0..ids.len() {
+            for j in (i+1)..ids.len() {
+                assert_ne!(ids[i], ids[j],
+                    "node IDs at positions {i} and {j} must differ");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Lex result access
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn lex_result_is_available_after_run() {
+        let src = "namespace test;";
+        let mut session = make_session(&[("t.nova", src)]);
+        session.update_files(vec![FileStat::new("t.nova", src.len() as u64, 0)]).unwrap();
+        session.run().await;
+
+        let lex = session.get_lex_result("t.nova").await.unwrap().unwrap();
+        // At minimum: Namespace, identifier, semicolon, EOF
+        assert!(lex.tokens.len() >= 3,
+            "expected at least 3 tokens, got {}", lex.tokens.len());
+    }
+
+    #[tokio::test]
+    async fn lex_result_for_unknown_path_is_none() {
+        let session = make_session(&[]);
+        let result = session.get_lex_result("no-such.nova").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Parse (syntax) result access
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn syntax_result_is_available_after_run() {
+        let src = "namespace my_module;";
+        let mut session = make_session(&[("m.nova", src)]);
+        session.update_files(vec![FileStat::new("m.nova", src.len() as u64, 0)]).unwrap();
+        let report = session.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+
+        let sr = session.get_syntax_result("m.nova").await.unwrap().unwrap();
+        // The namespace path should contain one segment: "my_module".
+        assert_eq!(sr.chunk.namespace.path.len(), 1);
+        assert_eq!(sr.chunk.namespace.path[0].value, "my_module");
+    }
+
+    #[tokio::test]
+    async fn syntax_result_for_unknown_path_is_none() {
+        let session = make_session(&[]);
+        let result = session.get_syntax_result("no-such.nova").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    /// A lex error stops the pipeline: lex_node and parse_node are both blocked.
+    #[tokio::test]
+    async fn lex_error_blocks_parse_stage() {
+        // Null byte causes a lex error.
+        let mut mock = MockFileAccess::new();
+        mock.add("bad.nova", vec![0x00]);
+        let storage = Arc::new(crate::incremental::storage::MemoryStorage::new())
+            as Arc<dyn Storage>;
+        let mut session = SemanticSession::new(storage, Arc::new(mock));
+        session.update_files(vec![FileStat::new("bad.nova", 1, 0)]).unwrap();
+
+        let report = session.run().await;
+
+        // Exactly one error: the lex node.  The parse node must be blocked.
+        assert_eq!(report.errors.len(), 1,
+            "only lex should error, parse should be blocked: {:?}", report.errors);
+        assert!(session.get_syntax_result("bad.nova").await.unwrap().is_none(),
+            "parse result must not be available when lex errored");
+    }
+
+    /// A syntax error is reported but does not affect other files.
+    #[tokio::test]
+    async fn syntax_error_is_isolated_to_one_file() {
+        // "val x = 1;" is valid Nova tokens but not valid top-level syntax
+        // (missing namespace declaration).
+        let bad_src  = "val x = 1;";
+        let good_src = "namespace ok;";
+        let mut session = make_session(&[
+            ("bad.nova",  bad_src),
+            ("good.nova", good_src),
+        ]);
+        session.update_files(vec![
+            FileStat::new("bad.nova",  bad_src.len()  as u64, 0),
+            FileStat::new("good.nova", good_src.len() as u64, 0),
+        ]).unwrap();
+
+        let report = session.run().await;
+
+        // good.nova must parse successfully.
+        let sr = session.get_syntax_result("good.nova").await.unwrap().unwrap();
+        assert_eq!(sr.chunk.namespace.path[0].value, "ok");
+
+        // bad.nova's parse node must have errored.
+        assert!(report.errors.iter().any(|(_, e)| e.message.contains("bad.nova")),
+            "expected a parse error mentioning bad.nova: {:?}", report.errors);
+    }
+
+    /// Changing a file re-runs all three stages (content, lex, parse).
+    #[tokio::test]
+    async fn changing_file_reruns_full_pipeline() {
+        // First version: valid.
+        let mut mock = MockFileAccess::new();
+        mock.add("f.nova", b"namespace v1;".to_vec());
+        let storage = Arc::new(crate::incremental::storage::MemoryStorage::new())
+            as Arc<dyn Storage>;
+        let mut session = SemanticSession::new(storage, Arc::new(mock));
+
+        session.update_files(vec![FileStat::new("f.nova", 13, 100)]).unwrap();
+        session.run().await;
+        let sr1 = session.get_syntax_result("f.nova").await.unwrap().unwrap();
+        assert_eq!(sr1.chunk.namespace.path[0].value, "v1");
+
+        // Second version: different content, different mtime.
+        let mut mock2 = MockFileAccess::new();
+        mock2.add("f.nova", b"namespace v2;".to_vec());
+        let storage2 = Arc::new(crate::incremental::storage::MemoryStorage::new())
+            as Arc<dyn Storage>;
+        let mut session2 = SemanticSession::new(storage2, Arc::new(mock2));
+
+        session2.update_files(vec![FileStat::new("f.nova", 13, 200)]).unwrap();
+        let report = session2.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        assert_eq!(report.nodes_evaluated, 3, "all three pipeline stages must run");
+
+        let sr2 = session2.get_syntax_result("f.nova").await.unwrap().unwrap();
+        assert_eq!(sr2.chunk.namespace.path[0].value, "v2");
     }
 }

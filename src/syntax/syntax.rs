@@ -2,6 +2,7 @@ use crate::lexical::{Position, Token, Trivia};
 use crate::lexical::LexicalResult;
 use crate::syntax::ast::Chunk;
 use crate::syntax::parse::Parser;
+use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyntaxError {
@@ -9,7 +10,7 @@ pub struct SyntaxError {
     pub position: Position,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyntaxResult {
     pub chunk: Chunk,
 }

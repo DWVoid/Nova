@@ -3,6 +3,7 @@ use icu::normalizer::ComposingNormalizerBorrowed;
 use icu::properties::props::{Emoji, EmojiPresentation, PatternSyntax, PatternWhiteSpace, XidContinue, XidStart};
 use icu::properties::CodePointSetData;
 use icu::segmenter::GraphemeClusterSegmenter;
+use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LexicalError {
@@ -14,7 +15,7 @@ pub struct LexicalError {
 /// ordered list of every trivia item (whitespace and comments) found in the
 /// source.  Together, `tokens` and `trivia` cover every byte of the input, so
 /// the original source can be reconstructed exactly.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LexicalResult {
     pub tokens: Vec<Token>,
     /// All trivia items (whitespace and comments) in source order.

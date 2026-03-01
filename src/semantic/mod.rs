@@ -58,10 +58,14 @@ pub mod file_access;
 pub mod file_content;
 pub mod file_stat;
 pub mod load_transform;
+pub mod lex_transform;
+pub mod parse_transform;
 pub mod session;
 
 // Top-level re-exports.
 pub use file_stat::FileStat;
 pub use file_content::FileContent;
 pub use file_access::{FileAccess, FileAccessError, MockFileAccess};
-pub use session::{SemanticSession, FileNodes, stat_node_id, content_node_id};
+pub use lex_transform::LexFile;
+pub use parse_transform::ParseFile;
+pub use session::{SemanticSession, FileNodes, stat_node_id, content_node_id, lex_node_id, parse_node_id};

@@ -6,15 +6,14 @@
 //!
 //! ## Design: Type Erasure with Registry-Backed Serde
 //!
-//! Every `Value` carries a `type_key` that maps it back to a concrete
-//! deserializer in the engine-private [`ValueTypeRegistry`].  This makes
-//! persistence fully typed: bytes stored on disk always carry their type key,
-//! and reload reconstitutes the original concrete value without `Vec<u8>`
-//! wrapping.
+//! Every `Value` carries a `type_idx` — a stable integer index into the
+//! engine-private [`ValueTypeRegistry`]'s entry vec.  All type-related
+//! operations (serialize, deserialize, downcast, key lookup) are routed
+//! through the registry, which resolves the index in O(1).
 //!
 //! ## Design: Content Hash
 //!
-//! [`hash_bytes`] applies [`DefaultHasher`] over the serialised bytes.
+//! [`hash_bytes`] applies [`DefaultHasher`] over the serialized bytes.
 //! Hashing the canonical byte representation means two logically-equal values
 //! produced by separate transform invocations will produce the same hash and
 //! trigger the early-exit optimisation.
@@ -29,6 +28,8 @@ use std::sync::Arc;
 // Value
 // ---------------------------------------------------------------------------
 
+type ValueBox = Arc<dyn Any + Send + Sync + 'static>;
+
 /// A type-erased, cheaply-cloneable, serde-safe node value.
 ///
 /// **This is an internal type.**  Users interact with the engine through the
@@ -36,38 +37,23 @@ use std::sync::Arc;
 /// directly.
 #[derive(Clone)]
 pub(crate) struct Value {
-    inner: Arc<dyn Any + Send + Sync + 'static>,
-    /// Stable registry key that identifies the concrete type.
-    type_key: String,
+    data: ValueBox,
+    type_idx: usize,
 }
 
 impl Value {
-    /// Construct a `Value` from a concrete typed value and its registry key.
-    ///
-    /// This is `pub(crate)`; only [`ValueTypeRegistry`] and engine internals
-    /// should call this.
-    pub(crate) fn new_with_key<T>(v: T, type_key: impl Into<String>) -> Self
-    where
-        T: Any + Send + Sync + 'static,
-    {
-        Self {
-            inner: Arc::new(v),
-            type_key: type_key.into(),
-        }
-    }
-
-    pub(crate) fn type_key(&self) -> &str {
-        &self.type_key
+    fn new(inner: ValueBox, type_idx: usize) -> Self {
+        Self { data: inner, type_idx }
     }
 
     fn downcast<T: Any>(&self) -> Option<&T> {
-        self.inner.downcast_ref::<T>()
+        self.data.downcast_ref::<T>()
     }
 }
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Value(type_key={:?})", self.type_key)
+        write!(f, "Value(type_idx={})", self.type_idx)
     }
 }
 
@@ -79,9 +65,6 @@ impl fmt::Debug for Value {
 pub type ValueHash = u64;
 
 /// Compute a [`ValueHash`] by hashing the **serialised bytes** of a value.
-///
-/// Two values that are logically equal will produce the same bytes (via serde)
-/// and therefore the same hash, enabling the early-exit optimisation.
 pub(crate) fn hash_bytes(bytes: &[u8]) -> ValueHash {
     let mut h = DefaultHasher::new();
     bytes.hash(&mut h);
@@ -114,14 +97,16 @@ impl fmt::Display for RegistryError {
 
 impl std::error::Error for RegistryError {}
 
-/// Internal entry for a single registered concrete type.
+// ---------------------------------------------------------------------------
+// TypeEntry
+// ---------------------------------------------------------------------------
+
 struct TypeEntry {
     type_id: TypeId,
     type_name: &'static str,
     type_key: String,
-    serialize: fn(&Value) -> Result<Vec<u8>, rmp_serde::encode::Error>,
-    deserialize:
-        fn(&[u8]) -> Result<Arc<dyn Any + Send + Sync + 'static>, rmp_serde::decode::Error>,
+    serialize: fn(&ValueBox) -> Result<Vec<u8>, rmp_serde::encode::Error>,
+    deserialize: fn(&[u8]) -> Result<ValueBox, rmp_serde::decode::Error>,
 }
 
 impl TypeEntry {
@@ -129,88 +114,73 @@ impl TypeEntry {
     where
         T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
     {
+        fn serialize_fn<T: Serialize + Any + Send + Sync + 'static>(
+            value: &ValueBox,
+        ) -> Result<Vec<u8>, rmp_serde::encode::Error> {
+            rmp_serde::to_vec(
+                value
+                    .downcast_ref::<T>()
+                    .expect("TypeEntry::serialize_fn: type_idx mismatch"),
+            )
+        }
+
+        fn deserialize_fn<T: DeserializeOwned + Any + Send + Sync + 'static>(
+            bytes: &[u8],
+        ) -> Result<ValueBox, rmp_serde::decode::Error> {
+            Ok(Arc::new(rmp_serde::from_slice::<T>(bytes)?))
+        }
+
         Self {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
             type_key,
-            serialize: Self::serialize_fn::<T>,
-            deserialize: Self::deserialize_fn::<T>,
+            serialize: serialize_fn::<T>,
+            deserialize: deserialize_fn::<T>,
         }
     }
 
-    /// Wrap a concrete `T` in a `Value` tagged with this entry's key.
-    fn make_value<T: Any + Send + Sync + 'static>(&self, v: T) -> Value {
-        Value::new_with_key(v, self.type_key.clone())
+    /// Wrap a concrete `T` in a `Value` using `idx` as the type identifier.
+    fn make_value<T: Any + Send + Sync + 'static>(&self, v: T, idx: usize) -> Value {
+        Value::new(Arc::new(v), idx)
     }
 
-    fn serialize_fn<T: Serialize + Any + Send + Sync + 'static>(
-        value: &Value,
-    ) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        let typed = value
-            .downcast::<T>()
-            .expect("TypeEntry::serialize_fn: downcast must match registered type");
-        rmp_serde::to_vec(typed)
-    }
-
-    /// Serialise `value` to bytes, attaching diagnostic context on failure.
+    /// Serialise `value` to bytes.
     fn serialize(&self, value: &Value) -> Vec<u8> {
-        (self.serialize)(value).unwrap_or_else(|e| {
+        (self.serialize)(&value.data).unwrap_or_else(|e| {
             panic!(
-                "TypeEntry::serialize: failed to serialise type `{}` (key {:?}): {}",
+                "TypeEntry::serialize: failed to serialise `{}` (key {:?}): {}",
                 self.type_name, self.type_key, e
             )
         })
     }
 
-    fn deserialize_fn<T: DeserializeOwned + Any + Send + Sync + 'static>(
-        bytes: &[u8],
-    ) -> Result<Arc<dyn Any + Send + Sync + 'static>, rmp_serde::decode::Error> {
-        let v: T = rmp_serde::from_slice(bytes)?;
-        Ok(Arc::new(v))
+    /// Deserialize `bytes` into a `Value` tagged with `idx`.
+    fn deserialize(&self, bytes: &[u8], idx: usize) -> Result<Value, RegistryError> {
+        (self.deserialize)(bytes)
+            .map(|inner| Value::new(inner, idx))
+            .map_err(|e| {
+                RegistryError::new(format!(
+                    "failed to deserialize `{}` (key {:?}): {}",
+                    self.type_name, self.type_key, e
+                ))
+            })
     }
 
-    /// Deserialize `bytes` into a `Value`, attaching diagnostic context on failure.
-    fn deserialize(&self, bytes: &[u8]) -> Result<Value, RegistryError> {
-        let boxed = (self.deserialize)(bytes).map_err(|e| {
-            RegistryError::new(format!(
-                "failed to deserialize type `{}` (key {:?}): {}",
-                self.type_name, self.type_key, e
-            ))
-        })?;
-        // Downcast the Box<dyn Any> back to T and wrap in Value.
-        // SAFETY: deserialize_fn::<T> always boxes a T, so this cast is sound.
-        Ok(Value {
-            inner: boxed,
-            type_key: self.type_key.clone(),
-        })
-    }
-
-    /// Downcast a `Value` to an owned `T`.
-    fn downcast_value<T: Any + Clone + 'static>(
-        &self,
-        value: &Value,
-    ) -> Result<T, RegistryError> {
-        if value.type_key() != self.type_key.as_str() {
-            return Err(RegistryError::new(format!(
-                "type mismatch – expected `{}` (key {:?}) but value has key {:?}",
-                self.type_name, self.type_key, value.type_key()
-            )));
-        }
+    /// Downcast `value` to an owned `T`.
+    fn downcast_value<T: Any + Clone + 'static>(&self, value: &Value) -> Result<T, RegistryError> {
         value.downcast::<T>().cloned().ok_or_else(|| {
             RegistryError::new(format!(
-                "downcast to `{}` (key {:?}) failed",
+                "type mismatch – expected `{}` (key {:?})",
                 self.type_name, self.type_key
             ))
         })
     }
 }
 
-/// The inner mutable state of [`ValueTypeRegistry`], held under a single
-/// `RwLock`.
-///
-/// `entries` is the canonical store; `by_key` and `by_type` are integer
-/// indices into it.  Because entries are never removed, indices are stable
-/// for the lifetime of the registry.
+// ---------------------------------------------------------------------------
+// RegistryStore
+// ---------------------------------------------------------------------------
+
 #[derive(Default)]
 struct RegistryStore {
     entries: Vec<TypeEntry>,
@@ -219,21 +189,18 @@ struct RegistryStore {
 }
 
 impl RegistryStore {
-    fn get_by_key(&self, key: &str) -> Option<&TypeEntry> {
-        self.by_key.get(key).map(|&i| &self.entries[i])
+    fn get_by_key(&self, key: &str) -> Option<(usize, &TypeEntry)> {
+        self.by_key.get(key).map(|&i| (i, &self.entries[i]))
     }
-    fn get_by_type(&self, tid: TypeId) -> Option<&TypeEntry> {
-        self.by_type.get(&tid).map(|&i| &self.entries[i])
+    fn get_by_type(&self, tid: TypeId) -> Option<(usize, &TypeEntry)> {
+        self.by_type.get(&tid).map(|&i| (i, &self.entries[i]))
+    }
+    fn get_by_idx(&self, idx: usize) -> &TypeEntry {
+        &self.entries[idx]
     }
 
-    /// Insert `entry` if no conflict exists, otherwise validate idempotency.
-    ///
-    /// - Same `(type_id, type_key)` already present → no-op, `Ok(())`.
-    /// - `type_id` mapped to a different key, or key mapped to a different
-    ///   type → `Err`.
-    /// - Not present → push to `entries` and update both indices.
     fn insert(&mut self, entry: TypeEntry) -> Result<(), RegistryError> {
-        if let Some(existing) = self.get_by_type(entry.type_id) {
+        if let Some((_, existing)) = self.get_by_type(entry.type_id) {
             if existing.type_key != entry.type_key {
                 return Err(RegistryError::new(format!(
                     "type `{}` is already registered under key {:?}, \
@@ -241,9 +208,9 @@ impl RegistryStore {
                     entry.type_name, existing.type_key, entry.type_key
                 )));
             }
-            return Ok(()); // idempotent
+            return Ok(());
         }
-        if let Some(existing) = self.get_by_key(&entry.type_key) {
+        if let Some((_, existing)) = self.get_by_key(&entry.type_key) {
             if existing.type_id != entry.type_id {
                 return Err(RegistryError::new(format!(
                     "key {:?} is already registered for type `{}`, \
@@ -251,7 +218,7 @@ impl RegistryStore {
                     entry.type_key, existing.type_name, entry.type_name
                 )));
             }
-            return Ok(()); // idempotent
+            return Ok(());
         }
         let idx = self.entries.len();
         self.by_key.insert(entry.type_key.clone(), idx);
@@ -261,21 +228,16 @@ impl RegistryStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ValueTypeRegistry
+// ---------------------------------------------------------------------------
+
 /// Engine-private registry that enforces a strict one-to-one mapping between
 /// stable string keys and concrete Rust types.
 ///
-/// # One-to-one invariant
-/// - Same `(T, key)` pair: idempotent.
-/// - Different `T` for same key: error.
-/// - Different key for same `T`: error.
-///
-/// Internally, [`TypeEntry`] objects live in a `Vec` (the canonical store).
-/// Two `HashMap<_, usize>` indices map from key string / `TypeId` to the
-/// entry's position in that vec.  This means:
-/// - Read-hot paths (serialize, deserialize, downcast) do one lock
-///   acquisition and one bounds-checked vec index — no extra indirection.
-/// - Registration (write path) is infrequent and holds the single lock for
-///   the entire insert.
+/// `Value` objects hold a `type_idx` — a stable index into the internal
+/// `Vec<TypeEntry>` — rather than a heap-allocated key string.  All
+/// type-related operations on a `Value` are routed through this registry.
 pub(crate) struct ValueTypeRegistry {
     store: std::sync::RwLock<RegistryStore>,
 }
@@ -298,7 +260,10 @@ impl ValueTypeRegistry {
     where
         T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
     {
-        self.store.write().unwrap().insert(TypeEntry::new::<T>(type_key.into()))
+        self.store
+            .write()
+            .unwrap()
+            .insert(TypeEntry::new::<T>(type_key.into()))
     }
 
     /// Create a `Value` for a concrete `T`.  Fails if `T` is not registered.
@@ -307,31 +272,31 @@ impl ValueTypeRegistry {
         T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
     {
         let store = self.store.read().unwrap();
-        let entry = store.get_by_type(TypeId::of::<T>()).ok_or_else(|| {
+        let (idx, entry) = store.get_by_type(TypeId::of::<T>()).ok_or_else(|| {
             RegistryError::new(format!(
                 "type `{}` is not registered; call \
                  engine.register_value_type::<{0}>() first",
                 std::any::type_name::<T>(),
             ))
         })?;
-        Ok(entry.make_value(v))
+        Ok(entry.make_value(v, idx))
     }
 
-    /// Deserialize raw bytes into a typed `Value` using the registered deserializer for `type_key`.
+    /// Deserialize raw bytes into a typed `Value`.
     pub(crate) fn deserialize_value(
         &self,
         type_key: &str,
         bytes: &[u8],
     ) -> Result<Value, RegistryError> {
         let store = self.store.read().unwrap();
-        let entry = store.get_by_key(type_key).ok_or_else(|| {
+        let (idx, entry) = store.get_by_key(type_key).ok_or_else(|| {
             RegistryError::new(format!(
                 "unknown type key {:?}; register the type with \
                  engine.register_value_type::<T>() before loading",
                 type_key
             ))
         })?;
-        entry.deserialize(bytes)
+        entry.deserialize(bytes, idx)
     }
 
     /// Downcast a `Value` to an owned `T`.
@@ -340,13 +305,19 @@ impl ValueTypeRegistry {
         T: Any + Clone + 'static,
     {
         let store = self.store.read().unwrap();
-        match store.get_by_type(TypeId::of::<T>()) {
-            None => Err(RegistryError::new(format!(
-                "type mismatch – `<unregistered>` cannot match value with key {:?}",
-                value.type_key()
-            ))),
-            Some(entry) => entry.downcast_value::<T>(value),
+        let (idx, entry) = store.get_by_type(TypeId::of::<T>()).ok_or_else(|| {
+            RegistryError::new(format!(
+                "type mismatch – `<unregistered T>` cannot match value at index {}",
+                value.type_idx
+            ))
+        })?;
+        if value.type_idx != idx {
+            return Err(RegistryError::new(format!(
+                "type mismatch – expected `{}` (idx {}) but value has idx {}",
+                entry.type_name, idx, value.type_idx
+            )));
         }
+        entry.downcast_value::<T>(value)
     }
 
     /// Return `true` if `type_key` is registered.
@@ -354,22 +325,40 @@ impl ValueTypeRegistry {
         self.store.read().unwrap().get_by_key(type_key).is_some()
     }
 
-    /// Serialise a `Value` to bytes using its registered type's serde impl.
+    /// Serialise a `Value` to bytes.
     pub(crate) fn serialize_value(&self, value: &Value) -> Vec<u8> {
-        let store = self.store.read().unwrap();
-        let entry = store
-            .get_by_key(value.type_key())
-            .expect("serialize_value: type key not registered; this is a bug");
-        entry.serialize(value)
+        self.store
+            .read()
+            .unwrap()
+            .get_by_idx(value.type_idx)
+            .serialize(value)
     }
 
-    /// Return the registered type key for `T`, or `None` if unregistered.
+    /// Return the registered string key for a `Value`.
+    pub(crate) fn type_key_of<'a>(
+        &'a self,
+        value: &Value,
+    ) -> impl std::ops::Deref<Target = str> + 'a {
+        // We need to return a ref into the locked store.  Use a guard-carrying
+        // wrapper so the lock is held for the lifetime of the returned value.
+        struct KeyGuard<'g>(std::sync::RwLockReadGuard<'g, RegistryStore>, usize);
+        impl std::ops::Deref for KeyGuard<'_> {
+            type Target = str;
+            fn deref(&self) -> &str {
+                &self.0.entries[self.1].type_key
+            }
+        }
+        let idx = value.type_idx;
+        KeyGuard(self.store.read().unwrap(), idx)
+    }
+
+    /// Return the registered type key string for `T`, or `None` if unregistered.
     pub(crate) fn key_for_type_id(&self, tid: TypeId) -> Option<String> {
         self.store
             .read()
             .unwrap()
             .get_by_type(tid)
-            .map(|e| e.type_key.clone())
+            .map(|(_, e)| e.type_key.clone())
     }
 
     /// Register all primitive types and `String` with their canonical keys.
@@ -406,8 +395,8 @@ mod tests {
     fn make_value_succeeds_for_registered_type() {
         let r = make_registry();
         let v = r.make_value(42u32).unwrap();
-        assert_eq!(v.type_key(), "u32");
-        assert_eq!(v.downcast::<u32>(), Some(&42u32));
+        assert_eq!(&*r.type_key_of(&v), "u32");
+        assert_eq!(r.downcast_value::<u32>(&v).unwrap(), 42u32);
     }
 
     #[test]
@@ -415,8 +404,7 @@ mod tests {
         let r = make_registry();
         #[derive(Clone, serde::Serialize, serde::Deserialize)]
         struct Custom(i32);
-        let result = r.make_value(Custom(1));
-        assert!(result.is_err());
+        assert!(r.make_value(Custom(1)).is_err());
     }
 
     #[test]
@@ -430,16 +418,14 @@ mod tests {
     fn register_rejects_same_key_different_type() {
         let r = ValueTypeRegistry::new();
         r.register::<i32>("my_key").unwrap();
-        let result = r.register::<i64>("my_key");
-        assert!(result.is_err());
+        assert!(r.register::<i64>("my_key").is_err());
     }
 
     #[test]
     fn register_rejects_same_type_different_key() {
         let r = ValueTypeRegistry::new();
         r.register::<i32>("key_a").unwrap();
-        let result = r.register::<i32>("key_b");
-        assert!(result.is_err());
+        assert!(r.register::<i32>("key_b").is_err());
     }
 
     #[test]
@@ -448,23 +434,23 @@ mod tests {
         let v = r.make_value(99i64).unwrap();
         let bytes = r.serialize_value(&v);
         let v2 = r.deserialize_value("i64", &bytes).unwrap();
-        assert_eq!(v2.downcast::<i64>(), Some(&99i64));
+        assert_eq!(r.downcast_value::<i64>(&v2).unwrap(), 99i64);
     }
 
     #[test]
     fn deserialize_fails_for_unknown_key() {
         let r = make_registry();
-        let result = r.deserialize_value("nonexistent", &[]);
-        assert!(result.is_err());
+        assert!(r.deserialize_value("nonexistent", &[]).is_err());
     }
 
     #[test]
     fn hash_bytes_is_deterministic() {
         let r = make_registry();
         let v = r.make_value(String::from("hello")).unwrap();
-        let h1 = hash_bytes(&r.serialize_value(&v));
-        let h2 = hash_bytes(&r.serialize_value(&v));
-        assert_eq!(h1, h2);
+        assert_eq!(
+            hash_bytes(&r.serialize_value(&v)),
+            hash_bytes(&r.serialize_value(&v))
+        );
     }
 
     #[test]
@@ -484,11 +470,7 @@ mod tests {
         let v = r.make_value(42i32).unwrap();
         let result = r.downcast_value::<i64>(&v);
         assert!(result.is_err());
-        let msg = result.unwrap_err().message;
-        assert!(
-            msg.contains("type mismatch"),
-            "expected type mismatch in: {msg}"
-        );
+        assert!(result.unwrap_err().message.contains("type mismatch"));
     }
 
     #[test]

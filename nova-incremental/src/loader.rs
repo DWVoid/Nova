@@ -103,7 +103,7 @@ impl LazyLoader {
         hash: ValueHash,
         is_input: bool,
     ) -> Result<(), StorageError> {
-        let type_key = value.type_key().to_string();
+        let type_key = self.registry.type_key_of(&value).to_string();
         let value_bytes = self.registry.serialize_value(&value);
 
         // Update in-memory cache.
@@ -178,7 +178,7 @@ mod tests {
         let loaded = loader.get(id).await.unwrap().expect("should be present");
 
         // After cold reload, value must be typed i32, not Vec<u8>.
-        assert_eq!(loaded.type_key(), "i32");
+        assert_eq!(&*registry.type_key_of(&loaded), "i32");
         assert_eq!(registry.downcast_value::<i32>(&loaded).unwrap(), 42i32);
     }
 

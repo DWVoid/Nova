@@ -323,11 +323,11 @@ impl IncrementalEngine {
                 self.value_registry
                     .downcast_value::<T>(&v)
                     .map(Some)
-                    .map_err(|e| EngineError::TypeMismatch {
+                    .map_err(|_| EngineError::TypeMismatch {
                         expected: self.value_registry
                             .key_for_type_id(TypeId::of::<T>())
                             .unwrap_or_else(|| "<unregistered>".to_string()),
-                        actual: v.type_key().to_string(),
+                        actual: self.value_registry.type_key_of(&v).to_string(),
                     })
             }
         }

@@ -1,55 +1,39 @@
-//! Top-level [`IncrementalEngine`] facade.
+//! Top-level [`IncrementalEngine`] facade – the sole public entry point.
 //!
-//! ## Design: Single Entry Point
+//! ## Public API
 //!
-//! Users of the incremental system only need to interact with
-//! `IncrementalEngine`.  All other types (`Graph`, `Scheduler`, `LazyLoader`,
-//! `TransformRegistry`) are created and wired together internally.
-//!
-//! This façade pattern:
-//! - Reduces the API surface users need to understand.
-//! - Enforces invariants (e.g. transforms must be registered before edges are
-//!   added that reference them).
-//! - Makes it easy to swap internal implementations without breaking callers.
+//! All value types and transforms are accessed through typed methods only.
+//! [`Value`] and [`Transform`] are `pub(crate)` implementation details.
 //!
 //! ## Example
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use nova_incremental::{
-//!     IncrementalEngine,
-//!     value::Value,
-//!     transform::{Transform, OneToOneTransform, TransformError},
-//!     storage::MemoryStorage,
-//!     registry::TransformRegistry,
-//! };
-//! use async_trait::async_trait;
-//!
-//! struct Double;
-//! #[async_trait]
-//! impl OneToOneTransform for Double {
-//!     async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
-//!         let n = *input.downcast::<i32>().unwrap();
-//!         Ok(Value::new(n * 2))
-//!     }
-//! }
+//! use nova_incremental::{IncrementalEngine, transform::TransformError, storage::MemoryStorage};
 //!
 //! #[tokio::main]
 //! async fn main() {
 //!     let storage = Arc::new(MemoryStorage::new());
 //!     let mut engine = IncrementalEngine::new(storage);
-//!     engine.register_transform("double", Transform::OneToOne(Arc::new(Double)));
+//!     engine.register_value_type::<i32>("i32").unwrap();
+//!     engine.register_one_to_one::<i32, i32, _, _>("double",
+//!         |n: &i32| { let n = *n; async move { Ok(n * 2) } }).unwrap();
 //!
-//!     let input = engine.add_input(Value::new(21i32));
+//!     let input  = engine.add_input(21i32).unwrap();
 //!     let output = engine.add_output_node();
 //!     engine.connect(&[input], &[output], "double").unwrap();
 //!
-//!     let report = engine.update().await;
-//!     let v = engine.get_value(output).await.unwrap().unwrap();
-//!     assert_eq!(v.downcast::<i32>(), Some(&42i32));
+//!     engine.update().await;
+//!     let v: i32 = engine.get_value(output).await.unwrap().unwrap();
+//!     assert_eq!(v, 42);
 //! }
 //! ```
+
+use std::any::{Any, TypeId};
+use std::future::Future;
 use std::sync::Arc;
+use serde::{Serialize, de::DeserializeOwned};
+
 use crate::graph::{Graph, NodeEntry};
 use crate::loader::LazyLoader;
 use crate::node_id::NodeId;
@@ -59,183 +43,305 @@ use crate::storage::{
     Storage, StorageKey, StorageValue, StorageError,
     PersistedGraphMeta, PersistedEdge, encode, decode,
 };
-use crate::transform::Transform;
-use crate::value::{Value, hash_bytes};
+use crate::transform::{
+    Transform, TransformError,
+    TypedOneToOne, TypedManyToOne, TypedOneToMany, TypedManyToMany,
+};
+use crate::value::{Value, ValueTypeRegistry, RegistryError, hash_bytes};
+
+// ---------------------------------------------------------------------------
+// EngineError
+// ---------------------------------------------------------------------------
+
 /// Error returned by [`IncrementalEngine`] operations.
 #[derive(Debug)]
 pub enum EngineError {
     Graph(crate::graph::GraphError),
     Storage(StorageError),
     UnknownTransform(String),
+    UnknownValueType(String),
+    TypeMismatch { expected: String, actual: String },
+    UnregisteredType(String),
     Other(String),
 }
+
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EngineError::Graph(e) => write!(f, "graph error: {e}"),
             EngineError::Storage(e) => write!(f, "storage error: {e}"),
             EngineError::UnknownTransform(k) => write!(f, "unknown transform key: {k}"),
+            EngineError::UnknownValueType(k) => write!(f, "unknown value type key: {k}"),
+            EngineError::TypeMismatch { expected, actual } =>
+                write!(f, "type mismatch: expected {expected:?}, got {actual:?}"),
+            EngineError::UnregisteredType(t) => write!(f, "unregistered type: {t}"),
             EngineError::Other(s) => write!(f, "{s}"),
         }
     }
 }
+
 impl std::error::Error for EngineError {}
+
 impl From<crate::graph::GraphError> for EngineError {
     fn from(e: crate::graph::GraphError) -> Self { EngineError::Graph(e) }
 }
+
 impl From<StorageError> for EngineError {
     fn from(e: StorageError) -> Self { EngineError::Storage(e) }
 }
+
+impl From<RegistryError> for EngineError {
+    fn from(e: RegistryError) -> Self { EngineError::UnregisteredType(e.message) }
+}
+
+// ---------------------------------------------------------------------------
+// IncrementalEngine
+// ---------------------------------------------------------------------------
+
 /// The top-level incremental computation engine.
 ///
-/// Create one with [`IncrementalEngine::new`], register transforms, build the
-/// graph, feed inputs, and call [`update`](Self::update) whenever inputs
-/// change.
+/// All value types and transform functions must be registered here before use.
+/// Primitive types (`bool`, all integer widths, `f32`, `f64`, `String`) are
+/// pre-registered automatically on construction.
 pub struct IncrementalEngine {
     graph: Arc<Graph>,
     loader: Arc<LazyLoader>,
     scheduler: Scheduler,
-    registry: TransformRegistry,
+    transforms: TransformRegistry,
+    value_registry: Arc<ValueTypeRegistry>,
     storage: Arc<dyn Storage>,
 }
+
 impl IncrementalEngine {
     /// Create a new engine backed by the given storage.
-    pub fn new(storage: Arc<dyn Storage>) -> Self {
-        let graph = Arc::new(Graph::new());
-        let loader = Arc::new(LazyLoader::new(Arc::clone(&storage)));
-        let scheduler = Scheduler::new(Arc::clone(&graph), Arc::clone(&loader));
-        Self {
-            graph,
-            loader,
-            scheduler,
-            registry: TransformRegistry::new(),
-            storage,
-        }
-    }
-    // -----------------------------------------------------------------------
-    // Transform registration
-    // -----------------------------------------------------------------------
-    /// Register a transform under a stable string key.
     ///
-    /// The key must match the `transform_key` used when calling [`connect`](Self::connect)
-    /// and must be re-registered in the same way when restoring a persisted
-    /// graph.
-    pub fn register_transform(&mut self, key: impl Into<String>, transform: Transform) {
-        self.registry.register(key, transform);
+    /// Primitive types are registered automatically.
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
+        let vr = ValueTypeRegistry::new();
+        vr.register_primitives().expect("primitive registration must not fail");
+        let value_registry = Arc::new(vr);
+        let graph = Arc::new(Graph::new());
+        let loader = Arc::new(LazyLoader::new(Arc::clone(&storage), Arc::clone(&value_registry)));
+        let scheduler = Scheduler::new(Arc::clone(&graph), Arc::clone(&loader));
+        Self { graph, loader, scheduler, transforms: TransformRegistry::new(), value_registry, storage }
     }
+
+    // -----------------------------------------------------------------------
+    // Type registration
+    // -----------------------------------------------------------------------
+
+    /// Register a value type `T` under a stable string `key`.
+    ///
+    /// - Idempotent if the same `(T, key)` pair is registered again.
+    /// - Returns an error if `key` maps to a different type or vice-versa.
+    /// - Primitives (`i32`, `u64`, `String`, …) are pre-registered; calling
+    ///   this for them with the same key is a no-op.
+    pub fn register_value_type<T>(&mut self, key: &str) -> Result<(), EngineError>
+    where
+        T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+    {
+        self.value_registry.register::<T>(key).map_err(EngineError::from)
+    }
+
+    // -----------------------------------------------------------------------
+    // Transform registration (typed, closure-friendly)
+    // -----------------------------------------------------------------------
+
+    /// Register a 1→1 transform.  `In` and `Out` must already be registered
+    /// as value types.
+    pub fn register_one_to_one<In, Out, F, Fut>(
+        &mut self,
+        key: &str,
+        f: F,
+    ) -> Result<(), EngineError>
+    where
+        In:  Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+        Out: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+        F:   Fn(&In) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
+    {
+        self.check_type_registered::<In>()?;
+        self.check_type_registered::<Out>()?;
+        let adapter = TypedOneToOne::new(f, Arc::clone(&self.value_registry));
+        self.transforms.register(key, Transform::OneToOne(Arc::new(adapter)));
+        Ok(())
+    }
+
+    /// Register a N→1 transform.
+    pub fn register_many_to_one<In, Out, F, Fut>(
+        &mut self,
+        key: &str,
+        f: F,
+    ) -> Result<(), EngineError>
+    where
+        In:  Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+        Out: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+        F:   Fn(&[In]) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
+    {
+        self.check_type_registered::<In>()?;
+        self.check_type_registered::<Out>()?;
+        let adapter = TypedManyToOne::new(f, Arc::clone(&self.value_registry));
+        self.transforms.register(key, Transform::ManyToOne(Arc::new(adapter)));
+        Ok(())
+    }
+
+    /// Register a 1→N transform.
+    pub fn register_one_to_many<In, Out, F, Fut>(
+        &mut self,
+        key: &str,
+        f: F,
+    ) -> Result<(), EngineError>
+    where
+        In:  Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+        Out: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+        F:   Fn(&In) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
+    {
+        self.check_type_registered::<In>()?;
+        self.check_type_registered::<Out>()?;
+        let adapter = TypedOneToMany::new(f, Arc::clone(&self.value_registry));
+        self.transforms.register(key, Transform::OneToMany(Arc::new(adapter)));
+        Ok(())
+    }
+
+    /// Register a N→M transform.
+    pub fn register_many_to_many<In, Out, F, Fut>(
+        &mut self,
+        key: &str,
+        f: F,
+    ) -> Result<(), EngineError>
+    where
+        In:  Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+        Out: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+        F:   Fn(&[In]) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
+    {
+        self.check_type_registered::<In>()?;
+        self.check_type_registered::<Out>()?;
+        let adapter = TypedManyToMany::new(f, Arc::clone(&self.value_registry));
+        self.transforms.register(key, Transform::ManyToMany(Arc::new(adapter)));
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Graph construction
     // -----------------------------------------------------------------------
-    /// Add an input node with an initial value and return its ID.
+
+    /// Add an input node with an initial typed value and return its ID.
     ///
-    /// The node is immediately marked dirty so the first call to
-    /// [`update`](Self::update) will propagate its value.
-    pub fn add_input(&self, value: Value) -> NodeId {
+    /// `T` must be registered. Fails with [`EngineError::UnregisteredType`]
+    /// otherwise.
+    pub fn add_input<T>(&self, value: T) -> Result<NodeId, EngineError>
+    where
+        T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+    {
+        let v = self.value_registry.make_value(value)?;
         let id = self.graph.add_input_node();
-        self.graph.set_input(id, value).expect("node was just created");
-        id
+        self.loader.cache_value(id, v.clone());
+        self.graph.set_input(id, v).expect("node was just created");
+        Ok(id)
     }
+
     /// Add a computed output node (no initial value; computed by a transform).
     pub fn add_output_node(&self) -> NodeId {
         self.graph.add_computed_node()
     }
+
     /// Connect `sources` to `targets` via the transform registered under
     /// `transform_key`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EngineError::UnknownTransform`] if `transform_key` is not
-    /// registered.  Returns [`EngineError::Graph`] if any node ID is unknown.
     pub fn connect(
         &self,
         sources: &[NodeId],
         targets: &[NodeId],
         transform_key: &str,
     ) -> Result<(), EngineError> {
-        let transform = self.registry.get(transform_key)
+        let transform = self.transforms.get(transform_key)
             .ok_or_else(|| EngineError::UnknownTransform(transform_key.to_string()))?
             .clone();
-        self.graph.add_transform(
-            sources.to_vec(),
-            targets.to_vec(),
-            transform,
-            transform_key,
-        )?;
+        self.graph.add_transform(sources.to_vec(), targets.to_vec(), transform, transform_key)?;
         Ok(())
     }
 
-    /// Alias for [`connect`](Self::connect).
-    ///
-    /// Provided so call sites that deal with pre-assigned node IDs can use a
-    /// more explicit name, making it clear that no new IDs are allocated.
-    pub fn connect_by_key(
-        &self,
-        sources: &[NodeId],
-        targets: &[NodeId],
-        transform_key: &str,
-    ) -> Result<(), EngineError> {
-        self.connect(sources, targets, transform_key)
-    }
     // -----------------------------------------------------------------------
     // Input updates
     // -----------------------------------------------------------------------
-    /// Update the value of an input node and mark it (and all dependents) dirty.
-    ///
-    /// Call [`update`](Self::update) afterwards to propagate the change.
-    pub fn set_input(&self, id: NodeId, value: Value) -> Result<(), EngineError> {
-        // Keep loader cache in sync.
-        self.loader.cache_value(id, value.clone());
-        self.graph.set_input(id, value)?;
+
+    /// Update the value of an input node and mark it (and all dependents)
+    /// dirty.  `T` must be registered.
+    pub fn set_input<T>(&self, id: NodeId, value: T) -> Result<(), EngineError>
+    where
+        T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+    {
+        let v = self.value_registry.make_value(value)?;
+        self.loader.cache_value(id, v.clone());
+        self.graph.set_input(id, v)?;
         Ok(())
     }
 
     /// Remove a node (and all edges that touch it) from the graph.
-    ///
-    /// Any nodes that previously depended on `id` are marked dirty so the
-    /// next [`update`](Self::update) call will attempt to recompute them
-    /// (which will fail unless the missing input is replaced or those
-    /// downstream nodes are also removed).
-    ///
-    /// The value is also evicted from the loader's in-memory cache.
-    ///
-    /// Returns `true` if the node existed, `false` if it was already absent.
     pub fn remove_node(&self, id: NodeId) -> bool {
         self.loader.evict(id);
         self.graph.remove_node(id)
     }
+
     // -----------------------------------------------------------------------
     // Update cycle
     // -----------------------------------------------------------------------
-    /// Run one incremental update cycle, recomputing all dirty nodes in
-    /// parallel waves.
-    ///
-    /// Returns an [`UpdateReport`] with statistics and any errors.
+
+    /// Run one incremental update cycle, recomputing all dirty nodes.
     pub async fn update(&self) -> UpdateReport {
         self.scheduler.run_update().await
     }
+
     // -----------------------------------------------------------------------
-    // Value access
+    // Value access (typed, read-only)
     // -----------------------------------------------------------------------
-    /// Lazily load the current value of `id`.
+
+    /// Lazily load and return the current value of `id` as `T`.
     ///
-    /// Returns `Ok(None)` if the node has never been computed or its value
-    /// was evicted.
-    pub async fn get_value(&self, id: NodeId) -> Result<Option<Value>, EngineError> {
-        // Check in-graph cache first (fastest path).
-        if let Some((v, _)) = self.graph.peek_value(id) {
-            return Ok(Some(v));
+    /// - Returns `Ok(None)` if the node has never been computed.
+    /// - Returns `Err(EngineError::TypeMismatch)` if the stored type key does
+    ///   not match `T`.
+    /// - Returns `Err(EngineError::Storage)` if a storage read fails.
+    /// - **Does not mutate** graph or node status.
+    pub async fn get_value<T>(&self, id: NodeId) -> Result<Option<T>, EngineError>
+    where
+        T: Any + Clone + Serialize + DeserializeOwned + 'static,
+    {
+        // Prefer in-graph cache (fastest, no await).
+        let v_opt: Option<Value> = if let Some((v, _)) = self.graph.peek_value(id) {
+            Some(v)
+        } else {
+            // Fall back to loader (in-memory cache then storage).
+            self.loader.get(id).await.map_err(EngineError::Storage)?
+        };
+
+        match v_opt {
+            None => Ok(None),
+            Some(v) => {
+                let expected_key = self.value_registry
+                    .key_for_type_id(TypeId::of::<T>())
+                    .unwrap_or_else(|| "<unregistered>".to_string());
+                if v.type_key() != expected_key.as_str() {
+                    return Err(EngineError::TypeMismatch {
+                        expected: expected_key,
+                        actual: v.type_key().to_string(),
+                    });
+                }
+                v.downcast::<T>().cloned().ok_or_else(|| EngineError::TypeMismatch {
+                    expected: expected_key,
+                    actual: v.type_key().to_string(),
+                }).map(Some)
+            }
         }
-        // Fall back to loader (checks memory cache, then storage).
-        Ok(self.loader.get(id).await?)
     }
+
     // -----------------------------------------------------------------------
     // Persistence
     // -----------------------------------------------------------------------
-    /// Persist the full graph topology and all in-memory node values to
-    /// storage.
-    ///
-    /// Node values that are not in the in-memory cache are skipped (they are
-    /// already in storage from a previous persist call).
+
+    /// Persist full graph topology and all in-memory node values to storage.
     pub async fn save(&self) -> Result<(), EngineError> {
         // Persist graph metadata (topology).
         let edges: Vec<PersistedEdge> = self.graph.all_edges().iter().map(|e| PersistedEdge {
@@ -247,38 +353,39 @@ impl IncrementalEngine {
         let meta = PersistedGraphMeta { edges, node_ids: node_ids.clone() };
         let meta_bytes = encode(&meta)?;
         self.storage.set(&StorageKey::graph_meta(), StorageValue::new(meta_bytes)).await?;
+
         // Persist each node that has an in-graph value.
-        //
-        // Value::to_bytes() uses the serde closure captured at Value::new time,
-        // so the stored bytes are always a valid MessagePack encoding – never
-        // a raw memory representation.  The hash is computed from those same
-        // bytes so it is value-level (two logically-equal values → same hash).
         for nid in node_ids {
-            if let Some((value, _old_hash)) = self.graph.peek_value(nid) {
+            if let Some((value, _)) = self.graph.peek_value(nid) {
                 let is_input = self.graph.is_input(nid);
                 let bytes = value.to_bytes();
                 let hash = hash_bytes(&bytes);
-                // Update the graph's stored hash to the byte-based one.
                 let _ = self.graph.store_value(nid, value.clone(), hash);
                 self.loader.persist(nid, value, hash, is_input).await?;
             }
         }
         Ok(())
     }
-    /// Restore an engine from storage, re-associating transforms from
-    /// `registry`.
+
+    /// Restore an engine from storage.
     ///
-    /// Any transform key found in storage that is absent from `registry` will
-    /// cause an error.
+    /// The caller must supply a pre-configured engine (with all value types and
+    /// transforms registered) so the loader can reconstruct typed values from
+    /// the persisted bytes.
     pub async fn load(
         storage: Arc<dyn Storage>,
-        registry: TransformRegistry,
+        mut engine: IncrementalEngine,
     ) -> Result<Self, EngineError> {
         let meta_bytes = storage.get(&StorageKey::graph_meta()).await?
             .ok_or_else(|| EngineError::Other("no graph metadata in storage".to_string()))?;
         let meta: PersistedGraphMeta = decode(meta_bytes.as_bytes())?;
+
         let graph = Arc::new(Graph::new());
-        let loader = Arc::new(LazyLoader::new(Arc::clone(&storage)));
+        let loader = Arc::new(LazyLoader::new(
+            Arc::clone(&storage),
+            Arc::clone(&engine.value_registry),
+        ));
+
         // Restore all nodes.
         for nid in &meta.node_ids {
             let node_data = loader.load_node_data(*nid).await?;
@@ -289,21 +396,28 @@ impl IncrementalEngine {
                 NodeEntry::new_computed(*nid)
             };
             graph.register_node(entry);
-            // Restore last-known hash for change detection.
+
+            // Restore typed value and last-known hash.
             if let Some(d) = node_data {
-                if d.value_hash != 0 {
-                    // Store a sentinel empty value with the known hash so
-                    // hash-based early exit works after reload.
-                    let _ = graph.store_value(*nid, Value::new(d.value_bytes), d.value_hash);
+                if !d.value_bytes.is_empty() && d.value_hash != 0 {
+                    // Validate the type key is registered before loading.
+                    if !engine.value_registry.contains_key(&d.type_key) {
+                        return Err(EngineError::UnknownValueType(d.type_key.clone()));
+                    }
+                    let value = engine.value_registry
+                        .deserialize_value(&d.type_key, &d.value_bytes)
+                        .map_err(|e| EngineError::Other(e.message))?;
+                    let _ = graph.store_value(*nid, value.clone(), d.value_hash);
+                    loader.cache_value(*nid, value);
                 }
             }
         }
+
         // Restore edges.
         for pe in &meta.edges {
-            let transform = registry.get(&pe.transform_key)
+            let transform = engine.transforms.get(&pe.transform_key)
                 .ok_or_else(|| EngineError::UnknownTransform(pe.transform_key.clone()))?
                 .clone();
-            // Build an EdgeEntry directly (edge IDs are local-only).
             use crate::graph::EdgeEntry;
             let eid = {
                 use std::sync::atomic::{AtomicU64, Ordering};
@@ -318,7 +432,6 @@ impl IncrementalEngine {
                 transform_key: pe.transform_key.clone(),
             };
             graph.register_edge(entry);
-            // Update adjacency lists manually (register_edge doesn't do it).
             for &s in &pe.sources {
                 if let Some(mut n) = graph.nodes_mut(s) { n.outgoing.push(eid); }
             }
@@ -326,49 +439,72 @@ impl IncrementalEngine {
                 if let Some(mut n) = graph.nodes_mut(t) { n.incoming.push(eid); }
             }
         }
+
         let scheduler = Scheduler::new(Arc::clone(&graph), Arc::clone(&loader));
-        Ok(Self { graph, loader, scheduler, registry, storage })
+        Ok(Self {
+            graph,
+            loader,
+            scheduler,
+            transforms: engine.transforms,
+            value_registry: engine.value_registry,
+            storage,
+        })
     }
+
     // -----------------------------------------------------------------------
     // Accessors (for testing / introspection)
     // -----------------------------------------------------------------------
+
     /// Return a clone of the `Arc<Graph>` (for advanced use / testing).
     pub fn graph(&self) -> Arc<Graph> { Arc::clone(&self.graph) }
+
     /// Return a clone of the `Arc<LazyLoader>`.
     pub fn loader(&self) -> Arc<LazyLoader> { Arc::clone(&self.loader) }
+
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    fn check_type_registered<T: Any + 'static>(&self) -> Result<(), EngineError> {
+        if self.value_registry.key_for_type_id(TypeId::of::<T>()).is_none() {
+            return Err(EngineError::UnregisteredType(format!(
+                "type `{}` is not registered; call register_value_type::<{0}>() first",
+                std::any::type_name::<T>()
+            )));
+        }
+        Ok(())
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::MemoryStorage;
-    use crate::transform::{Transform, OneToOneTransform, TransformError};
-    use async_trait::async_trait;
     use std::sync::Arc;
-    struct Double;
-    #[async_trait]
-    impl OneToOneTransform for Double {
-        async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
-            let n = input.downcast::<i32>().copied().ok_or_else(|| TransformError::new("i32"))?;
-            Ok(Value::new(n * 2))
-        }
-    }
+
     fn make_engine() -> IncrementalEngine {
         let storage = Arc::new(MemoryStorage::new());
         let mut engine = IncrementalEngine::new(storage);
-        engine.register_transform("double", Transform::OneToOne(Arc::new(Double)));
+        engine.register_one_to_one::<i32, i32, _, _>("double",
+            |n: &i32| { let n = *n; async move { Ok(n * 2) } }).unwrap();
         engine
     }
+
     #[tokio::test]
     async fn basic_one_to_one_pipeline() {
         let engine = make_engine();
-        let input = engine.add_input(Value::new(21i32));
+        let input  = engine.add_input(21i32).unwrap();
         let output = engine.add_output_node();
         engine.connect(&[input], &[output], "double").unwrap();
         let report = engine.update().await;
         assert!(report.is_ok(), "{:?}", report.errors);
-        let v = engine.get_value(output).await.unwrap().unwrap();
-        assert_eq!(v.downcast::<i32>(), Some(&42i32));
+        let v: i32 = engine.get_value(output).await.unwrap().unwrap();
+        assert_eq!(v, 42);
     }
+
     #[tokio::test]
     async fn unknown_transform_returns_error() {
         let engine = make_engine();
@@ -377,37 +513,62 @@ mod tests {
         let result = engine.connect(&[a], &[b], "nonexistent");
         assert!(matches!(result, Err(EngineError::UnknownTransform(_))));
     }
+
     #[tokio::test]
     async fn set_input_propagates_dirty() {
         let engine = make_engine();
-        let input = engine.add_input(Value::new(1i32));
+        let input  = engine.add_input(1i32).unwrap();
         let output = engine.add_output_node();
         engine.connect(&[input], &[output], "double").unwrap();
         engine.update().await;
-        // Change input.
-        engine.set_input(input, Value::new(5i32)).unwrap();
+        engine.set_input(input, 5i32).unwrap();
         let report = engine.update().await;
         assert!(report.is_ok());
-        let v = engine.get_value(output).await.unwrap().unwrap();
-        assert_eq!(v.downcast::<i32>(), Some(&10i32));
+        let v: i32 = engine.get_value(output).await.unwrap().unwrap();
+        assert_eq!(v, 10);
     }
+
     #[tokio::test]
-    async fn save_and_reload() {
-        let storage = Arc::new(MemoryStorage::new());
-        let mut engine = IncrementalEngine::new(Arc::clone(&storage) as Arc<dyn Storage>);
-        engine.register_transform("double", Transform::OneToOne(Arc::new(Double)));
-        let input = engine.add_input(Value::new(7i32));
+    async fn get_value_type_mismatch_returns_error() {
+        let engine = make_engine();
+        let input = engine.add_input(42i32).unwrap();
+        // Try to read as u64 – should produce TypeMismatch.
+        let result = engine.get_value::<u64>(input).await;
+        assert!(matches!(result, Err(EngineError::TypeMismatch { .. })));
+    }
+
+    #[tokio::test]
+    async fn unregistered_type_fails_on_add_input() {
+        let engine = make_engine();
+        #[derive(Clone, serde::Serialize, serde::Deserialize)]
+        struct Custom(i32);
+        let result = engine.add_input(Custom(1));
+        assert!(matches!(result, Err(EngineError::UnregisteredType(_))));
+    }
+
+    #[tokio::test]
+    async fn save_and_reload_typed_values() {
+        let storage = Arc::new(MemoryStorage::new()) as Arc<dyn Storage>;
+        let mut engine = IncrementalEngine::new(Arc::clone(&storage));
+        engine.register_one_to_one::<i32, i32, _, _>("double",
+            |n: &i32| { let n = *n; async move { Ok(n * 2) } }).unwrap();
+
+        let input  = engine.add_input(7i32).unwrap();
         let output = engine.add_output_node();
         engine.connect(&[input], &[output], "double").unwrap();
         engine.update().await;
         engine.save().await.unwrap();
-        // Reload.
-        let mut registry = TransformRegistry::new();
-        registry.register("double", Transform::OneToOne(Arc::new(Double)));
-        let engine2 = IncrementalEngine::load(Arc::clone(&storage) as Arc<dyn Storage>, registry)
-            .await.unwrap();
-        // Graph topology should be restored.
+
+        // Reload with a fresh engine (same transforms registered).
+        let mut engine2 = IncrementalEngine::new(Arc::clone(&storage));
+        engine2.register_one_to_one::<i32, i32, _, _>("double",
+            |n: &i32| { let n = *n; async move { Ok(n * 2) } }).unwrap();
+        let engine2 = IncrementalEngine::load(Arc::clone(&storage), engine2).await.unwrap();
+
         assert!(engine2.graph.contains_node(input));
         assert!(engine2.graph.contains_node(output));
+        // Value should be fully typed after reload.
+        let v: i32 = engine2.get_value(output).await.unwrap().unwrap();
+        assert_eq!(v, 14);
     }
 }

@@ -66,6 +66,5 @@ pub mod session;
 pub use file_stat::FileStat;
 pub use file_content::FileContent;
 pub use file_access::{FileAccess, FileAccessError, MockFileAccess};
-pub use lex_transform::LexFile;
-pub use parse_transform::ParseFile;
+pub use load_transform::{LexOutput, LOAD_KEY, LEX_KEY, PARSE_KEY, make_load_fn, make_lex_fn, make_parse_fn};
 pub use session::{SemanticSession, FileNodes, stat_node_id, content_node_id, lex_node_id, parse_node_id};

@@ -309,33 +309,40 @@ mod tests {
     use crate::graph::Graph;
     use crate::loader::LazyLoader;
     use crate::storage::MemoryStorage;
-    use crate::transform::{Transform, OneToOneTransform, TransformError};
-    use crate::value::Value;
-    use async_trait::async_trait;
+    use crate::transform::{Transform, TypedOneToOne};
+    use crate::value::ValueTypeRegistry;
     use std::sync::Arc;
-    struct Double;
-    #[async_trait]
-    impl OneToOneTransform for Double {
-        async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
-            let n = input.downcast::<i32>().copied().ok_or_else(|| TransformError::new("expected i32"))?;
-            Ok(Value::new(n * 2))
-        }
+
+    fn make_registry() -> Arc<ValueTypeRegistry> {
+        let mut r = ValueTypeRegistry::new();
+        r.register_primitives().unwrap();
+        Arc::new(r)
     }
-    fn make_graph_with_double() -> (Arc<Graph>, NodeId, NodeId) {
+
+    fn make_double_transform(registry: Arc<ValueTypeRegistry>) -> Transform {
+        Transform::OneToOne(Arc::new(TypedOneToOne::new(
+            |n: &i32| { let n = *n; async move { Ok(n * 2) } },
+            registry,
+        )))
+    }
+
+    fn make_graph_with_double(registry: Arc<ValueTypeRegistry>) -> (Arc<Graph>, NodeId, NodeId) {
         let g = Arc::new(Graph::new());
         let src = g.add_input_node();
         let tgt = g.add_computed_node();
-        g.add_transform(vec![src], vec![tgt], Transform::OneToOne(Arc::new(Double)), "double").unwrap();
+        g.add_transform(vec![src], vec![tgt], make_double_transform(registry), "double").unwrap();
         (g, src, tgt)
     }
+
     #[tokio::test]
     async fn scheduler_evaluates_dirty_node() {
-        let (graph, src, tgt) = make_graph_with_double();
-        graph.set_input(src, Value::new(5i32)).unwrap();
+        let registry = make_registry();
+        let (graph, src, tgt) = make_graph_with_double(Arc::clone(&registry));
+        let v = registry.make_value(5i32).unwrap();
+        graph.set_input(src, v.clone()).unwrap();
         let storage = Arc::new(MemoryStorage::new());
-        let loader = Arc::new(LazyLoader::new(storage));
-        // Pre-populate loader cache with source value.
-        loader.cache_value(src, Value::new(5i32));
+        let loader = Arc::new(LazyLoader::new(storage, Arc::clone(&registry)));
+        loader.cache_value(src, v);
         let scheduler = Scheduler::new(Arc::clone(&graph), Arc::clone(&loader));
         let report = scheduler.run_update().await;
         assert!(report.is_ok(), "errors: {:?}", report.errors);
@@ -343,27 +350,30 @@ mod tests {
         let (v, _) = graph.peek_value(tgt).expect("target should have value");
         assert_eq!(v.downcast::<i32>(), Some(&10i32));
     }
+
     #[tokio::test]
     async fn empty_graph_returns_empty_report() {
+        let registry = make_registry();
         let graph = Arc::new(Graph::new());
         let storage = Arc::new(MemoryStorage::new());
-        let loader = Arc::new(LazyLoader::new(storage));
+        let loader = Arc::new(LazyLoader::new(storage, registry));
         let scheduler = Scheduler::new(graph, loader);
         let report = scheduler.run_update().await;
         assert_eq!(report.nodes_evaluated, 0);
     }
+
     #[test]
     fn compute_waves_single_chain() {
+        let registry = make_registry();
         let g = Arc::new(Graph::new());
         let a = g.add_input_node();
         let b = g.add_computed_node();
         let c = g.add_computed_node();
-        g.add_transform(vec![a], vec![b], Transform::OneToOne(Arc::new(Double)), "ab").unwrap();
-        g.add_transform(vec![b], vec![c], Transform::OneToOne(Arc::new(Double)), "bc").unwrap();
+        g.add_transform(vec![a], vec![b], make_double_transform(Arc::clone(&registry)), "ab").unwrap();
+        g.add_transform(vec![b], vec![c], make_double_transform(Arc::clone(&registry)), "bc").unwrap();
         let topo = g.dirty_nodes_topo();
         let waves = compute_waves(&topo, &g);
         assert!(waves.len() >= 2, "chain should have at least 2 waves");
-        // a must appear before b before c
         let wave0_ids: HashSet<_> = waves[0].iter().copied().collect();
         assert!(wave0_ids.contains(&a));
     }

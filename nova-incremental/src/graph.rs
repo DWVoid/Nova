@@ -617,20 +617,26 @@ impl Default for Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transform::{Transform, OneToOneTransform};
-    use async_trait::async_trait;
+    use crate::transform::{Transform, TypedOneToOne};
+    use crate::value::{Value, ValueTypeRegistry};
     use std::sync::Arc;
 
-    struct Identity;
-    #[async_trait]
-    impl OneToOneTransform for Identity {
-        async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
-            Ok(input.clone())
-        }
+    fn make_registry() -> Arc<ValueTypeRegistry> {
+        let mut r = ValueTypeRegistry::new();
+        r.register_primitives().unwrap();
+        Arc::new(r)
+    }
+
+    fn val(n: i32) -> Value {
+        let r = make_registry();
+        r.make_value(n).unwrap()
     }
 
     fn make_transform() -> Transform {
-        Transform::OneToOne(Arc::new(Identity))
+        Transform::OneToOne(Arc::new(TypedOneToOne::new(
+            |n: &i32| { let n = *n; async move { Ok(n) } },
+            make_registry(),
+        )))
     }
 
     #[test]
@@ -675,11 +681,11 @@ mod tests {
 
         // Initially all dirty (new nodes start dirty).
         // Mark b and c clean first.
-        g.store_value(b, Value::new(0i32), 0).unwrap();
-        g.store_value(c, Value::new(0i32), 0).unwrap();
+        g.store_value(b, val(0), 0).unwrap();
+        g.store_value(c, val(0), 0).unwrap();
 
         // Now set input on a → should propagate to b and c.
-        g.set_input(a, Value::new(1i32)).unwrap();
+        g.set_input(a, val(1)).unwrap();
         assert!(g.node_status(b).unwrap().is_dirty());
         assert!(g.node_status(c).unwrap().is_dirty());
     }
@@ -702,7 +708,7 @@ mod tests {
     fn store_value_clears_dirty() {
         let g = Graph::new();
         let a = g.add_input_node();
-        g.store_value(a, Value::new(42i32), 99).unwrap();
+        g.store_value(a, val(42), 99).unwrap();
         assert_eq!(g.node_status(a), Some(NodeStatus::Clean));
         let (v, h) = g.peek_value(a).unwrap();
         assert_eq!(v.downcast::<i32>(), Some(&42i32));

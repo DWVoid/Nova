@@ -166,11 +166,54 @@ async fn main() {
     });
 
     // ── 5. Build the semantic session ─────────────────────────────────────
+    //
+    // If a prior run has already written graph metadata to storage we restore
+    // from it so that the incremental engine can skip nodes whose input hashes
+    // have not changed since the last invocation.  If no prior state exists
+    // (first run, or cache was deleted) we start fresh.
     let fs = Arc::new(RealFileAccess);
-    let mut session = SemanticSession::new(storage, fs);
 
-    // Register all source files as inputs.  New files are added; files whose
-    // stat matches the persisted value are skipped by the incremental engine.
+    // Collect the canonical path strings that `SemanticSession::load` needs
+    // in order to reconstruct the per-file transform registry.
+    let known_paths: Vec<&str> = stats.iter().map(|s| s.path.as_str()).collect();
+
+    let mut session = {
+        use nova_incremental::storage::{Storage as _, StorageKey};
+        let has_prior_state = storage
+            .contains(&StorageKey::graph_meta())
+            .await
+            .unwrap_or(false);
+
+        if has_prior_state {
+            println!("nvc: restoring incremental state from cache …");
+            match SemanticSession::load(
+                Arc::clone(&storage) as Arc<dyn nova_incremental::storage::Storage>,
+                Arc::clone(&fs) as Arc<dyn nova_analyze::semantic::file_access::FileAccess>,
+                &known_paths,
+            ).await {
+                Ok(s) => {
+                    println!("     restored successfully");
+                    s
+                }
+                Err(e) => {
+                    eprintln!("warning: could not restore incremental state ({e}), starting fresh");
+                    SemanticSession::new(
+                        Arc::clone(&storage) as Arc<dyn nova_incremental::storage::Storage>,
+                        Arc::clone(&fs) as Arc<dyn nova_analyze::semantic::file_access::FileAccess>,
+                    )
+                }
+            }
+        } else {
+            SemanticSession::new(
+                Arc::clone(&storage) as Arc<dyn nova_incremental::storage::Storage>,
+                Arc::clone(&fs) as Arc<dyn nova_analyze::semantic::file_access::FileAccess>,
+            )
+        }
+    };
+
+    // Register / update / remove files based on the current stat snapshot.
+    // For a restored session this marks only changed files as dirty; for a
+    // fresh session every file is new and will be fully processed.
     session.update_files(stats).unwrap_or_else(|e| {
         eprintln!("error: failed to register source files: {e:?}");
         process::exit(1);
@@ -193,4 +236,17 @@ async fn main() {
         }
         process::exit(1);
     }
+
+    // ── 8. Persist graph topology and computed hashes ─────────────────────
+    //
+    // `session.run()` computes values but does NOT write them to storage on
+    // its own — the engine separates computation from persistence so that
+    // callers can decide when (and whether) to commit.  Without this call
+    // every run would appear as a cold start and recompute everything from
+    // scratch.
+    session.save().await.unwrap_or_else(|e| {
+        eprintln!("warning: failed to persist incremental state: {e}");
+        // Non-fatal: the compilation result is still correct, we just lose
+        // the ability to skip unchanged work on the next invocation.
+    });
 }

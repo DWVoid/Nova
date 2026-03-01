@@ -4,40 +4,6 @@
 //! system** for transforming a set of input values into a set of output values
 //! through a directed acyclic graph (DAG) of typed transform functions.
 //!
-//! ## Quick Start
-//!
-//! ```no_run
-//! use std::sync::Arc;
-//! use nova_incremental::{IncrementalEngine, value::Value,
-//!     transform::{Transform, OneToOneTransform, TransformError},
-//!     storage::MemoryStorage};
-//! use async_trait::async_trait;
-//!
-//! struct Double;
-//! #[async_trait]
-//! impl OneToOneTransform for Double {
-//!     async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
-//!         let n = *input.downcast::<i32>().unwrap();
-//!         Ok(Value::new(n * 2))
-//!     }
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() {
-//!     let storage = Arc::new(MemoryStorage::new());
-//!     let mut engine = IncrementalEngine::new(storage);
-//!     engine.register_transform("double", Transform::OneToOne(Arc::new(Double)));
-//!
-//!     let input  = engine.add_input(Value::new(21i32));
-//!     let output = engine.add_output_node();
-//!     engine.connect(&[input], &[output], "double").unwrap();
-//!
-//!     engine.update().await;
-//!     let v = engine.get_value(output).await.unwrap().unwrap();
-//!     assert_eq!(v.downcast::<i32>(), Some(&42i32));
-//! }
-//! ```
-//!
 //! ## Architecture Overview
 //!
 //! ```text
@@ -98,13 +64,10 @@ pub mod value;
 mod tests;
 
 // Top-level re-exports for convenience.
-#[allow(unused_imports)]
 pub use engine::{IncrementalEngine, EngineError};
-#[allow(unused_imports)]
 pub use node_id::NodeId;
-#[allow(unused_imports)]
 pub use scheduler::UpdateReport;
-#[allow(unused_imports)]
 pub use storage::MemoryStorage;
-#[allow(unused_imports)]
-pub use registry::TransformRegistry;
+// Value, Transform, and TransformRegistry are pub(crate) implementation details.
+// TransformError remains public so users can construct/inspect it in transform closures.
+pub use transform::TransformError;

@@ -152,11 +152,16 @@ pub struct PersistedEdge {
 /// `value_bytes` is the MessagePack encoding of the concrete value produced
 /// by the node's transform (or supplied directly for input nodes).
 ///
+/// `type_key` identifies which registered type the bytes encode, enabling
+/// full typed reconstruction on reload via [`crate::value::ValueTypeRegistry`].
+///
 /// `value_hash` is the hash at the time of last successful computation; used
 /// after reload to decide whether an input has changed since the last run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedNodeData {
     pub node_id: NodeId,
+    /// Stable type key registered in the engine's [`ValueTypeRegistry`].
+    pub type_key: String,
     /// MessagePack-encoded concrete value, or empty if never computed.
     pub value_bytes: Vec<u8>,
     /// Hash of the value at last persist time.  Zero if never persisted.

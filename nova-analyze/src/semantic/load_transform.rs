@@ -1,108 +1,156 @@
-//! [`LoadFile`] – the incremental transform that reads a source file.
+//! Shared stateless transforms for the semantic pipeline.
 //!
-//! ## Design: One Transform Instance Per File
+//! ## Design: Three Stateless Shared Transforms
 //!
-//! Each source file gets its own `LoadFile` transform node in the graph.
-//! The transform is keyed in the [`TransformRegistry`] under the path string
-//! (prefixed with `"load:"`) so that it can be restored from persistence.
+//! Instead of registering one transform closure per file, all files share
+//! three transforms registered once under fixed keys `"load"`, `"lex"`,
+//! and `"parse"`.  The **path travels with the value** through the graph:
 //!
-//! An alternative design would be a single "load dispatcher" transform that
-//! reads the path from the input stat and dispatches to the VFS.  We reject
-//! this because:
-//! - It couples all file loads into one node, preventing parallel execution.
-//! - A single error would poison all file loads instead of just one.
-//! - Per-file nodes give independent dirty flags, hash caches, and error
-//!   states.
+//! ```text
+//! FileStat (path, size, mtime)
+//!   └─[load]→ FileContent (path, bytes)
+//!               └─[lex]→ LexOutput (path, tokens)
+//!                          └─[parse]→ SyntaxResult
+//! ```
 //!
-//! ## Design: Path Captured at Construction, Not Read from Input
+//! - `FileStat.path` tells the load transform which file to read.
+//! - `FileContent.path` is forwarded into `LexOutput` for error context.
+//! - `LexOutput.path` is used by the parse transform for error messages.
 //!
-//! `LoadFile` captures the `path` string at construction time.  It receives
-//! the `FileStat` as its input value only to participate in the dirty-flag
-//! and hash-based early-exit machinery.  If the stat hash is unchanged the
-//! load is skipped entirely without ever calling `FileAccess::read_file`.
-//!
-//! The path is re-derived from the stat at runtime as a sanity check (the
-//! stat's path must match the captured path).
+//! This keeps the graph metadata simple: the edge set is fixed and never
+//! grows as files are added.
 
 use std::sync::Arc;
-use async_trait::async_trait;
-
-use nova_incremental::{
-    value::Value,
-    transform::{OneToOneTransform, TransformError},
-};
+use serde::{Serialize, Deserialize};
+use nova_incremental::transform::TransformError;
 use crate::semantic::file_access::FileAccess;
 use crate::semantic::file_stat::FileStat;
 use crate::semantic::file_content::FileContent;
+use crate::lexical::LexicalResult;
 
-/// A 1→1 incremental transform that loads a single source file.
+// ---------------------------------------------------------------------------
+// Fixed transform keys
+// ---------------------------------------------------------------------------
+
+/// Registry key for the file-load transform.
+pub const LOAD_KEY: &str = "load";
+/// Registry key for the lex transform.
+pub const LEX_KEY: &str = "lex";
+/// Registry key for the parse transform.
+pub const PARSE_KEY: &str = "parse";
+
+// ---------------------------------------------------------------------------
+// LexOutput – carries path through the graph from lex stage to parse stage
+// ---------------------------------------------------------------------------
+
+/// The output of the lex stage: a token stream bundled with its source path.
 ///
-/// **Input**: a [`Value`] wrapping a [`FileStat`].  
-/// **Output**: a [`Value`] wrapping a [`FileContent`].
-///
-/// The transform is constructed with an `Arc<dyn FileAccess>` that it calls
-/// to fetch the bytes.  Because the transform is registered in the engine's
-/// [`TransformRegistry`] under a per-file key, a single `Arc<dyn FileAccess>`
-/// is shared across all per-file load transforms cheaply.
-pub struct LoadFile {
-    /// Captured path – must match `stat.path` at runtime.
+/// The source path is not part of `LexicalResult` itself (which is a pure
+/// lexer output type), so we carry it here so the parse transform can include
+/// it in error messages without any extra bookkeeping.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LexOutput {
+    /// The canonical path this lex result was produced from.
     pub path: String,
-    /// Shared VFS instance provided by the user.
-    pub fs: Arc<dyn FileAccess>,
+    /// The lexer output.
+    pub lex: LexicalResult,
 }
 
-impl LoadFile {
-    /// Create a transform for the file at `path` using the given `FileAccess`.
-    pub fn new(path: impl Into<String>, fs: Arc<dyn FileAccess>) -> Self {
-        Self { path: path.into(), fs }
-    }
-
-    /// Return the registry key used for this file's load transform.
-    ///
-    /// The key is `"load:<path>"`.  It is stable as long as the path is
-    /// stable, which is required for persistence across restarts.
-    pub fn registry_key(path: &str) -> String {
-        format!("load:{path}")
+impl LexOutput {
+    pub fn new(path: impl Into<String>, lex: LexicalResult) -> Self {
+        Self { path: path.into(), lex }
     }
 }
 
-#[async_trait]
-impl OneToOneTransform for LoadFile {
-    /// Load the file and return its content.
-    ///
-    /// # Errors
-    ///
-    /// - If the input value is not a [`FileStat`], returns a type-mismatch error.
-    /// - If the stat path does not match the transform's captured path, returns
-    ///   a consistency error.
-    /// - If [`FileAccess::read_file`] fails, wraps the error as a
-    ///   [`TransformError`].
-    async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
-        // Downcast to FileStat.
-        let stat = input.downcast::<FileStat>().ok_or_else(|| {
-            TransformError::new(format!(
-                "LoadFile({}): input is not a FileStat", self.path
-            ))
-        })?;
+// ---------------------------------------------------------------------------
+// Load transform (FileStat → FileContent)
+// ---------------------------------------------------------------------------
 
-        // Sanity-check that the stat refers to the same file this transform
-        // was built for.  A mismatch would indicate a wiring bug.
-        if stat.path != self.path {
-            return Err(TransformError::new(format!(
-                "LoadFile({}): stat path mismatch – got '{}'",
-                self.path, stat.path
-            )));
-        }
+/// Builds the shared `"load"` transform closure.
+///
+/// The closure reads the path from `FileStat.path` at runtime, so a single
+/// closure instance serves every file.
+pub fn make_load_fn(
+    fs: Arc<dyn FileAccess>,
+) -> impl Fn(&FileStat)
+        -> std::pin::Pin<Box<dyn std::future::Future<
+            Output = Result<FileContent, TransformError>
+        > + Send>>
+       + Send + Sync + 'static
+{
+    move |stat: &FileStat| {
+        let path  = stat.path.clone();
+        let my_fs = Arc::clone(&fs);
+        Box::pin(async move {
+            let bytes = my_fs.read_file(&path).await.map_err(|e| {
+                TransformError::with_source(
+                    format!("load({}): read failed", path),
+                    e.to_string(),
+                )
+            })?;
+            Ok(FileContent::new(path, bytes))
+        })
+    }
+}
 
-        // Delegate to the VFS.
-        let bytes = self.fs.read_file(&self.path).await.map_err(|e| {
-            TransformError::with_source(
-                format!("LoadFile({}): read failed", self.path),
+// ---------------------------------------------------------------------------
+// Lex transform (FileContent → LexOutput)
+// ---------------------------------------------------------------------------
+
+/// The shared `"lex"` transform closure.  Path is read from `FileContent`.
+pub fn make_lex_fn()
+-> impl Fn(&FileContent)
+        -> std::pin::Pin<Box<dyn std::future::Future<
+            Output = Result<LexOutput, TransformError>
+        > + Send>>
+       + Send + Sync + 'static
+{
+    move |content: &FileContent| {
+        let path  = content.path.clone();
+        let src_result = std::str::from_utf8(&content.bytes)
+            .map(|s| s.to_string())
+            .map_err(|e| TransformError::with_source(
+                format!("lex({}): file is not valid UTF-8", path),
                 e.to_string(),
-            )
-        })?;
+            ));
+        Box::pin(async move {
+            let src = src_result?;
+            let lex = crate::lexical::transform(&src).map_err(|e| {
+                TransformError::with_source(
+                    format!("lex({}): lexical error at {}:{}", path,
+                        e.position.line(), e.position.column()),
+                    e.message.clone(),
+                )
+            })?;
+            Ok(LexOutput::new(path, lex))
+        })
+    }
+}
 
-        Ok(Value::new(FileContent::new(self.path.clone(), bytes)))
+// ---------------------------------------------------------------------------
+// Parse transform (LexOutput → SyntaxResult)
+// ---------------------------------------------------------------------------
+
+/// The shared `"parse"` transform closure.  Path is read from `LexOutput`.
+pub fn make_parse_fn()
+-> impl Fn(&LexOutput)
+        -> std::pin::Pin<Box<dyn Future<
+            Output = Result<crate::syntax::SyntaxResult, TransformError>
+        > + Send>>
+       + Send + Sync + 'static
+{
+    move |lo: &LexOutput| {
+        let path      = lo.path.clone();
+        let lex_clone = lo.lex.clone();
+        Box::pin(async move {
+            crate::syntax::transform(lex_clone).map_err(|e| {
+                TransformError::with_source(
+                    format!("parse({}): syntax error at {}:{}", path,
+                        e.position.line(), e.position.column()),
+                    e.message.clone(),
+                )
+            })
+        })
     }
 }
 
@@ -110,7 +158,6 @@ impl OneToOneTransform for LoadFile {
 mod tests {
     use super::*;
     use crate::semantic::file_access::MockFileAccess;
-    use nova_incremental::transform::OneToOneTransform;
 
     fn make_fs(path: &str, content: &[u8]) -> Arc<dyn FileAccess> {
         let mut mock = MockFileAccess::new();
@@ -119,47 +166,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loads_file_content() {
+    async fn load_fn_loads_file_content() {
         let fs = make_fs("src/main.nova", b"val x = 1;");
-        let t  = LoadFile::new("src/main.nova", fs);
+        let f  = make_load_fn(fs);
         let stat = FileStat::new("src/main.nova", 10, 0);
-        let out = t.apply(&Value::new(stat)).await.unwrap();
-        let content = out.downcast::<FileContent>().unwrap();
+        let content = f(&stat).await.unwrap();
         assert_eq!(content.bytes, b"val x = 1;");
         assert_eq!(content.path, "src/main.nova");
     }
 
     #[tokio::test]
-    async fn wrong_input_type_is_error() {
-        let fs = make_fs("f.nova", b"x");
-        let t  = LoadFile::new("f.nova", fs);
-        let result = t.apply(&Value::new(42i32)).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("not a FileStat"));
-    }
-
-    #[tokio::test]
-    async fn path_mismatch_is_error() {
-        let fs = make_fs("a.nova", b"x");
-        let t  = LoadFile::new("a.nova", fs);
-        let stat = FileStat::new("b.nova", 1, 0); // different path
-        let result = t.apply(&Value::new(stat)).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("mismatch"));
-    }
-
-    #[tokio::test]
-    async fn missing_file_is_error() {
-        let fs = Arc::new(MockFileAccess::new()); // empty FS
-        let t  = LoadFile::new("missing.nova", fs);
+    async fn load_fn_missing_file_is_error() {
+        let fs = Arc::new(MockFileAccess::new()) as Arc<dyn FileAccess>;
+        let f  = make_load_fn(fs);
         let stat = FileStat::new("missing.nova", 0, 0);
-        let result = t.apply(&Value::new(stat)).await;
+        let result = f(&stat).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message.contains("read failed"));
     }
 
+    #[tokio::test]
+    async fn load_fn_error_includes_path() {
+        let fs = Arc::new(MockFileAccess::new()) as Arc<dyn FileAccess>;
+        let f  = make_load_fn(fs);
+        let stat = FileStat::new("some/deep/path.nova", 0, 0);
+        let err = f(&stat).await.unwrap_err();
+        assert!(err.message.contains("some/deep/path.nova"));
+    }
+
+    #[tokio::test]
+    async fn lex_fn_lexes_valid_source() {
+        let f = make_lex_fn();
+        let content = FileContent::new("test.nova", b"namespace test;".to_vec());
+        let out = f(&content).await.unwrap();
+        assert_eq!(out.path, "test.nova");
+        assert!(out.lex.tokens.len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn lex_fn_invalid_utf8_is_error() {
+        let f = make_lex_fn();
+        let content = FileContent::new("bad.nova", vec![0xFF, 0xFE]);
+        let result = f(&content).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message.contains("not valid UTF-8"));
+    }
+
+    #[tokio::test]
+    async fn lex_fn_error_includes_path() {
+        let f = make_lex_fn();
+        // null byte causes lex error
+        let content = FileContent::new("src/x.nova", vec![0x00]);
+        let err = f(&content).await.unwrap_err();
+        assert!(err.message.contains("src/x.nova"));
+    }
+
+    #[tokio::test]
+    async fn parse_fn_parses_valid_source() {
+        let lex_out = LexOutput::new(
+            "test.nova",
+            crate::lexical::transform("namespace test;").unwrap(),
+        );
+        let f  = make_parse_fn();
+        let sr = f(&lex_out).await.unwrap();
+        assert_eq!(sr.chunk.namespace.path.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn parse_fn_error_includes_path() {
+        let lex_out = LexOutput::new(
+            "src/bad.nova",
+            crate::lexical::transform("val x = 1;").unwrap(),
+        );
+        let f   = make_parse_fn();
+        let err = f(&lex_out).await.unwrap_err();
+        assert!(err.message.contains("src/bad.nova"),
+            "error must mention the path: {}", err.message);
+    }
+
     #[test]
-    fn registry_key_format() {
-        assert_eq!(LoadFile::registry_key("src/foo.nova"), "load:src/foo.nova");
+    fn lex_output_round_trips_path() {
+        let lo = LexOutput::new("foo.nova", crate::lexical::transform("namespace x;").unwrap());
+        assert_eq!(lo.path, "foo.nova");
     }
 }

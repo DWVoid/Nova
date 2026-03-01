@@ -36,7 +36,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 
-use crate::incremental::{
+use crate::{
     IncrementalEngine, MemoryStorage, TransformRegistry,
     graph::NodeStatus,
     storage::Storage,
@@ -679,7 +679,7 @@ async fn removing_input_marks_downstream_dirty() {
 #[tokio::test]
 async fn removing_absent_node_returns_false() {
     let engine = make_engine();
-    let phantom = crate::incremental::NodeId::new();
+    let phantom = crate::NodeId::new();
     assert!(!engine.remove_node(phantom));
 }
 
@@ -834,7 +834,7 @@ async fn save_and_load_preserves_topology_and_values() {
 ///
 /// Leaf output nodes (no outgoing edges) are listed separately at the end.
 fn snapshot(label: &str, engine: &IncrementalEngine) -> String {
-    use crate::incremental::graph::NodeStatus;
+    use crate::graph::NodeStatus;
     let graph = engine.graph();
 
     // Gather all node IDs.
@@ -843,7 +843,7 @@ fn snapshot(label: &str, engine: &IncrementalEngine) -> String {
     all_ids.sort_by_key(|id| id.to_string());
 
     // Build a helper that formats a single node as a bracketed string.
-    let fmt_node = |id: crate::incremental::NodeId| -> String {
+    let fmt_node = |id: crate::NodeId| -> String {
         let short = &id.to_string()[..8]; // first 8 hex chars of UUID
         let kind   = if graph.is_input(id) { "INPUT   " } else { "computed" };
         let status = match graph.node_status(id) {
@@ -873,9 +873,9 @@ fn snapshot(label: &str, engine: &IncrementalEngine) -> String {
     }
 
     // One line per edge.
-    let mut printed_targets: std::collections::HashSet<crate::incremental::NodeId> =
+    let mut printed_targets: std::collections::HashSet<crate::NodeId> =
         std::collections::HashSet::new();
-    let mut printed_sources: std::collections::HashSet<crate::incremental::NodeId> =
+    let mut printed_sources: std::collections::HashSet<crate::NodeId> =
         std::collections::HashSet::new();
 
     // Sort edges for stable output.
@@ -1303,7 +1303,7 @@ async fn error_then_fix_then_success() {
         }
     }
 
-    let storage = Arc::new(MemoryStorage::new()) as Arc<dyn crate::incremental::storage::Storage>;
+    let storage = Arc::new(MemoryStorage::new()) as Arc<dyn crate::storage::Storage>;
     let mut engine = IncrementalEngine::new(storage);
     engine.register_transform("fail_on_zero",
         Transform::OneToOne(Arc::new(FailOnZero)));

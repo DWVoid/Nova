@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::incremental::{
+use nova_incremental::{
     IncrementalEngine, EngineError, TransformRegistry, UpdateReport,
     NodeId,
     storage::Storage,
@@ -374,7 +374,7 @@ impl SemanticSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::incremental::storage::MemoryStorage;
+    use nova_incremental::storage::MemoryStorage;
     use crate::semantic::file_access::MockFileAccess;
 
     fn make_fs(files: &[(&str, &str)]) -> Arc<dyn FileAccess> {
@@ -700,7 +700,7 @@ mod tests {
         // Null byte causes a lex error.
         let mut mock = MockFileAccess::new();
         mock.add("bad.nova", vec![0x00]);
-        let storage = Arc::new(crate::incremental::storage::MemoryStorage::new())
+        let storage = Arc::new(nova_incremental::storage::MemoryStorage::new())
             as Arc<dyn Storage>;
         let mut session = SemanticSession::new(storage, Arc::new(mock));
         session.update_files(vec![FileStat::new("bad.nova", 1, 0)]).unwrap();
@@ -747,7 +747,7 @@ mod tests {
         // First version: valid.
         let mut mock = MockFileAccess::new();
         mock.add("f.nova", b"namespace v1;".to_vec());
-        let storage = Arc::new(crate::incremental::storage::MemoryStorage::new())
+        let storage = Arc::new(nova_incremental::storage::MemoryStorage::new())
             as Arc<dyn Storage>;
         let mut session = SemanticSession::new(storage, Arc::new(mock));
 
@@ -759,7 +759,7 @@ mod tests {
         // Second version: different content, different mtime.
         let mut mock2 = MockFileAccess::new();
         mock2.add("f.nova", b"namespace v2;".to_vec());
-        let storage2 = Arc::new(crate::incremental::storage::MemoryStorage::new())
+        let storage2 = Arc::new(nova_incremental::storage::MemoryStorage::new())
             as Arc<dyn Storage>;
         let mut session2 = SemanticSession::new(storage2, Arc::new(mock2));
 

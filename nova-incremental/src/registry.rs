@@ -8,7 +8,7 @@
 //! calling [`TransformRegistry::register`] with the same key strings that were
 //! used when the graph was first built.
 use std::collections::HashMap;
-use crate::incremental::transform::Transform;
+use crate::transform::Transform;
 /// A named registry of [`Transform`] instances.
 #[derive(Default, Clone)]
 pub struct TransformRegistry {
@@ -36,8 +36,8 @@ impl TransformRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::incremental::transform::{Transform, OneToOneTransform, TransformError};
-    use crate::incremental::value::Value;
+    use crate::transform::{Transform, OneToOneTransform, TransformError};
+    use crate::value::Value;
     use async_trait::async_trait;
     use std::sync::Arc;
     struct Noop;

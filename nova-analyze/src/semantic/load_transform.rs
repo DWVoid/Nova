@@ -27,7 +27,7 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 
-use crate::incremental::{
+use nova_incremental::{
     value::Value,
     transform::{OneToOneTransform, TransformError},
 };
@@ -110,7 +110,7 @@ impl OneToOneTransform for LoadFile {
 mod tests {
     use super::*;
     use crate::semantic::file_access::MockFileAccess;
-    use crate::incremental::transform::OneToOneTransform;
+    use nova_incremental::transform::OneToOneTransform;
 
     fn make_fs(path: &str, content: &[u8]) -> Arc<dyn FileAccess> {
         let mut mock = MockFileAccess::new();

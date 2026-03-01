@@ -4,7 +4,7 @@
 //!
 //! `Graph` is a **pure in-memory data structure**.  It does not read from or
 //! write to any storage backend.  All persistence is handled by
-//! [`crate::incremental::loader::LazyLoader`].  This separation keeps the
+//! [`crate::loader::LazyLoader`].  This separation keeps the
 //! graph's logic simple and fully synchronous, while storage operations
 //! remain async.
 //!
@@ -40,10 +40,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use dashmap::DashMap;
-use crate::incremental::node_id::NodeId;
-use crate::incremental::transform::Transform;
-use crate::incremental::value::{Value, ValueHash};
-use crate::incremental::transform::TransformError;
+use crate::node_id::NodeId;
+use crate::transform::Transform;
+use crate::value::{Value, ValueHash};
+use crate::transform::TransformError;
 
 // ---------------------------------------------------------------------------
 // Edge identity
@@ -617,7 +617,7 @@ impl Default for Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::incremental::transform::{Transform, OneToOneTransform};
+    use crate::transform::{Transform, OneToOneTransform};
     use async_trait::async_trait;
     use std::sync::Arc;
 

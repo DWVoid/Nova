@@ -54,7 +54,7 @@ impl std::error::Error for FileAccessError {}
 ///
 /// ```no_run
 /// use async_trait::async_trait;
-/// use nova::semantic::file_access::{FileAccess, FileAccessError};
+/// use nova_analyze::semantic::file_access::{FileAccess, FileAccessError};
 ///
 /// pub struct RealFs;
 ///

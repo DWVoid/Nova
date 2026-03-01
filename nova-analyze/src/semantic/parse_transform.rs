@@ -16,7 +16,7 @@
 //! This follows the same approach as [`LoadFile`]: one transform instance per
 //! file, registered under `"parse:<path>"`.
 use async_trait::async_trait;
-use crate::incremental::{
+use nova_incremental::{
     value::Value,
     transform::{OneToOneTransform, TransformError},
 };
@@ -63,7 +63,7 @@ impl OneToOneTransform for ParseFile {
 mod tests {
     use super::*;
     use crate::syntax::SyntaxResult;
-    use crate::incremental::transform::OneToOneTransform;
+    use nova_incremental::transform::OneToOneTransform;
     fn lex(src: &str) -> LexicalResult {
         crate::lexical::transform(src).expect("lex failed")
     }

@@ -8,7 +8,7 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use nova::incremental::{IncrementalEngine, value::Value,
+//! use nova_incremental::{IncrementalEngine, value::Value,
 //!     transform::{Transform, OneToOneTransform, TransformError},
 //!     storage::MemoryStorage};
 //! use async_trait::async_trait;

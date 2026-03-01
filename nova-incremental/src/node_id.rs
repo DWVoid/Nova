@@ -41,7 +41,7 @@ impl NodeId {
     ///
     /// # Example
     /// ```
-    /// use nova::incremental::NodeId;
+    /// use nova_incremental::NodeId;
     /// use uuid::Uuid;
     ///
     /// let ns = Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap();

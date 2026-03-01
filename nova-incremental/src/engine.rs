@@ -16,7 +16,7 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use nova::incremental::{
+//! use nova_incremental::{
 //!     IncrementalEngine,
 //!     value::Value,
 //!     transform::{Transform, OneToOneTransform, TransformError},
@@ -50,21 +50,21 @@
 //! }
 //! ```
 use std::sync::Arc;
-use crate::incremental::graph::{Graph, NodeEntry};
-use crate::incremental::loader::LazyLoader;
-use crate::incremental::node_id::NodeId;
-use crate::incremental::registry::TransformRegistry;
-use crate::incremental::scheduler::{Scheduler, UpdateReport};
-use crate::incremental::storage::{
+use crate::graph::{Graph, NodeEntry};
+use crate::loader::LazyLoader;
+use crate::node_id::NodeId;
+use crate::registry::TransformRegistry;
+use crate::scheduler::{Scheduler, UpdateReport};
+use crate::storage::{
     Storage, StorageKey, StorageValue, StorageError,
     PersistedGraphMeta, PersistedEdge, encode, decode,
 };
-use crate::incremental::transform::Transform;
-use crate::incremental::value::{Value, hash_bytes};
+use crate::transform::Transform;
+use crate::value::{Value, hash_bytes};
 /// Error returned by [`IncrementalEngine`] operations.
 #[derive(Debug)]
 pub enum EngineError {
-    Graph(crate::incremental::graph::GraphError),
+    Graph(crate::graph::GraphError),
     Storage(StorageError),
     UnknownTransform(String),
     Other(String),
@@ -80,8 +80,8 @@ impl std::fmt::Display for EngineError {
     }
 }
 impl std::error::Error for EngineError {}
-impl From<crate::incremental::graph::GraphError> for EngineError {
-    fn from(e: crate::incremental::graph::GraphError) -> Self { EngineError::Graph(e) }
+impl From<crate::graph::GraphError> for EngineError {
+    fn from(e: crate::graph::GraphError) -> Self { EngineError::Graph(e) }
 }
 impl From<StorageError> for EngineError {
     fn from(e: StorageError) -> Self { EngineError::Storage(e) }
@@ -304,11 +304,11 @@ impl IncrementalEngine {
                 .ok_or_else(|| EngineError::UnknownTransform(pe.transform_key.clone()))?
                 .clone();
             // Build an EdgeEntry directly (edge IDs are local-only).
-            use crate::incremental::graph::EdgeEntry;
+            use crate::graph::EdgeEntry;
             let eid = {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static RELOAD_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
-                crate::incremental::graph::EdgeId(RELOAD_COUNTER.fetch_add(1, Ordering::Relaxed))
+                crate::graph::EdgeId(RELOAD_COUNTER.fetch_add(1, Ordering::Relaxed))
             };
             let entry = EdgeEntry {
                 id: eid,
@@ -340,8 +340,8 @@ impl IncrementalEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::incremental::storage::MemoryStorage;
-    use crate::incremental::transform::{Transform, OneToOneTransform, TransformError};
+    use crate::storage::MemoryStorage;
+    use crate::transform::{Transform, OneToOneTransform, TransformError};
     use async_trait::async_trait;
     use std::sync::Arc;
     struct Double;

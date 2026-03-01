@@ -27,7 +27,7 @@
 
 use async_trait::async_trait;
 
-use crate::incremental::{
+use nova_incremental::{
     value::Value,
     transform::{OneToOneTransform, TransformError},
 };
@@ -79,7 +79,7 @@ mod tests {
     use super::*;
     use crate::semantic::file_content::FileContent;
     use crate::lexical::LexicalResult;
-    use crate::incremental::transform::OneToOneTransform;
+    use nova_incremental::transform::OneToOneTransform;
 
     #[tokio::test]
     async fn lexes_valid_source() {

@@ -42,11 +42,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use futures::future::join_all;
-use crate::incremental::graph::Graph;
-use crate::incremental::loader::LazyLoader;
-use crate::incremental::node_id::NodeId;
-use crate::incremental::transform::TransformError;
-use crate::incremental::value::{Value, hash_bytes};
+use crate::graph::Graph;
+use crate::loader::LazyLoader;
+use crate::node_id::NodeId;
+use crate::transform::TransformError;
+use crate::value::{Value, hash_bytes};
 // ---------------------------------------------------------------------------
 // Update report
 // ---------------------------------------------------------------------------
@@ -306,11 +306,11 @@ use std::collections::HashSet;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::incremental::graph::Graph;
-    use crate::incremental::loader::LazyLoader;
-    use crate::incremental::storage::MemoryStorage;
-    use crate::incremental::transform::{Transform, OneToOneTransform, TransformError};
-    use crate::incremental::value::Value;
+    use crate::graph::Graph;
+    use crate::loader::LazyLoader;
+    use crate::storage::MemoryStorage;
+    use crate::transform::{Transform, OneToOneTransform, TransformError};
+    use crate::value::Value;
     use async_trait::async_trait;
     use std::sync::Arc;
     struct Double;

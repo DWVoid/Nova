@@ -1,7 +1,7 @@
 //! # Semantic Analysis Pipeline
 //!
 //! This module implements the **file-loading stage** of the Nova semantic
-//! pipeline, built on top of the [`crate::incremental`] computation graph.
+//! pipeline, built on top of the [`nova_incremental`] computation graph.
 //!
 //! ## Overview
 //!
@@ -33,9 +33,9 @@
 //!
 //! ```no_run
 //! use std::sync::Arc;
-//! use nova::incremental::storage::MemoryStorage;
-//! use nova::semantic::{SemanticSession, FileStat};
-//! use nova::semantic::file_access::MockFileAccess;
+//! use nova_incremental::storage::MemoryStorage;
+//! use nova_analyze::semantic::{SemanticSession, FileStat};
+//! use nova_analyze::semantic::file_access::MockFileAccess;
 //!
 //! #[tokio::main]
 //! async fn main() {

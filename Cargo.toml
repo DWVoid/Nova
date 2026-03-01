@@ -1,23 +1,18 @@
-[package]
-name = "Nova"
-version = "0.1.0"
-edition = "2024"
-autobins = false
-autoexamples = false
-autotests = false
-autobenches = false
+[workspace]
+resolver = "3"
+members = [
+    "nova-incremental",
+    "nova-analyze",
+    "nova-compile"
+]
 
-[[bin]]
-name = "Nova"
-path = "src/main.rs"
-
-[dependencies]
+[workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 icu = { version = "2.1.1", features = ["compiled_data"] }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
-toml = "0.8"
+toml = "1.0.3+spec-1.1.0"
 rmp-serde = "1"
 typeid = "1.0.3"
 dashmap = "6"

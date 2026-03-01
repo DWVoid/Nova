@@ -28,14 +28,14 @@
 //! Transform functions are code, not data – they cannot be meaningfully
 //! serialised.  Instead, each edge stores a `transform_key` (a
 //! user-assigned stable string).  On graph reload, the user re-registers all
-//! transforms with the same keys via [`crate::incremental::registry::TransformRegistry`],
+//! transforms with the same keys via [`crate::registry::TransformRegistry`],
 //! and the loader re-associates them.  This mirrors the approach taken by
 //! incremental compilation frameworks like Salsa.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::incremental::node_id::NodeId;
-use crate::incremental::value::ValueHash;
+use crate::node_id::NodeId;
+use crate::value::ValueHash;
 
 // ---------------------------------------------------------------------------
 // Storage key / value newtypes
@@ -108,7 +108,7 @@ impl std::error::Error for StorageError {}
 /// Async key-value storage backend.
 ///
 /// Implement this trait on your preferred storage engine and pass it to
-/// [`crate::incremental::engine::IncrementalEngine::new`].
+/// [`crate::engine::IncrementalEngine::new`].
 ///
 /// All methods take `&self` (shared reference) so the implementation can use
 /// internal mutability (e.g. `Mutex`, `RwLock`, or connection pooling) as
@@ -136,14 +136,14 @@ pub trait Storage: Send + Sync {
 ///
 /// The transform function itself is not serialised; only its `transform_key`
 /// is stored so it can be re-associated at reload time via the
-/// [`crate::incremental::registry::TransformRegistry`].
+/// [`crate::registry::TransformRegistry`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedEdge {
     /// Ordered list of source node IDs.
     pub sources: Vec<NodeId>,
     /// Ordered list of target node IDs.
     pub targets: Vec<NodeId>,
-    /// Stable user-assigned name that maps to a concrete [`crate::incremental::transform::Transform`].
+    /// Stable user-assigned name that maps to a concrete [`crate::transform::Transform`].
     pub transform_key: String,
 }
 

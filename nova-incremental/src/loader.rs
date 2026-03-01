@@ -30,9 +30,9 @@
 
 use std::sync::Arc;
 use dashmap::DashMap;
-use crate::incremental::node_id::NodeId;
-use crate::incremental::value::{Value, ValueHash, hash_bytes};
-use crate::incremental::storage::{Storage, StorageKey, StorageValue, StorageError, PersistedNodeData, encode, decode};
+use crate::node_id::NodeId;
+use crate::value::{Value, ValueHash, hash_bytes};
+use crate::storage::{Storage, StorageKey, StorageValue, StorageError, PersistedNodeData, encode, decode};
 
 /// Lazy value loader backed by an async [`Storage`] and an in-memory cache.
 #[derive(Clone)]
@@ -157,8 +157,8 @@ impl LazyLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::incremental::storage::MemoryStorage;
-    use crate::incremental::value::hash_bytes;
+    use crate::storage::MemoryStorage;
+    use crate::value::hash_bytes;
     use std::sync::Arc;
 
     #[tokio::test]

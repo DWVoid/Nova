@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 use async_trait::async_trait;
-use crate::incremental::value::Value;
+use crate::value::Value;
 
 /// Error produced by a transform function.
 #[derive(Debug, Clone, PartialEq, Eq)]

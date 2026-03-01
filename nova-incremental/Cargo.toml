@@ -1,0 +1,13 @@
+[package]
+name = "nova-incremental"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+rmp-serde = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }

@@ -3,4 +3,17 @@ name = "nova-compile"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "nvc"
+path = "src/main.rs"
+
 [dependencies]
+nova-incremental = { path = "../nova-incremental" }
+nova-analyze     = { path = "../nova-analyze" }
+serde            = { workspace = true }
+tokio            = { workspace = true }
+async-trait      = { workspace = true }
+toml             = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

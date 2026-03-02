@@ -225,10 +225,10 @@ async fn main() {
 
     // ── 7. Print report ───────────────────────────────────────────────────
     println!("nvc: update complete");
-    println!("     nodes evaluated  : {}", report.nodes_evaluated);
-    println!("     nodes changed    : {}", report.nodes_changed);
-    println!("     nodes skipped    : {}", report.nodes_skipped);
-    println!("     nodes blocked    : {}", report.nodes_blocked);
+    println!("     nodes evaluated  : {}", report.transforms_evaluated);
+    println!("     nodes changed    : {}", report.transforms_changed);
+    println!("     nodes skipped    : {}", report.transforms_skipped);
+    println!("     nodes blocked    : {}", report.transforms_blocked);
     if !report.errors.is_empty() {
         eprintln!("nvc: {} error(s) during update:", report.errors.len());
         for (node_id, err) in &report.errors {

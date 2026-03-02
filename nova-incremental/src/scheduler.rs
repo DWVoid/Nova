@@ -1,171 +1,238 @@
-//! Parallel recomputation engine.
+//! Parallel recomputation engine for the bipartite incremental graph.
 //!
-//! ## Design: Tokio Tasks vs. Rayon
+//! ## Design: Wave-Based Parallel Execution over TransformNodes
 //!
-//! Transforms are defined as `async` functions (see `transform.rs`).  Rayon
-//! operates on OS threads with a blocking interface; mixing Rayon and Tokio
-//! is possible but adds complexity (blocking tasks must use
-//! `tokio::task::spawn_blocking`).  We therefore use Tokio's work-stealing
-//! scheduler throughout:
+//! The dirty subgraph is processed in topological waves over `TransformNode`s.
+//! Within a wave, all transforms are independent and run concurrently via
+//! `tokio::spawn`.
 //!
-//! - Each node recomputation is a `tokio::task::spawn` task.
-//! - Tasks within the same "wave" (see below) run concurrently on the Tokio
-//!   thread pool.
-//! - CPU-bound transforms will naturally benefit from Tokio's multi-threaded
-//!   runtime (`tokio::runtime::Builder::new_multi_thread`).
+//! ## Design: Crossing-Kind Edge Handling
 //!
-//! If a host application uses transforms that are purely CPU-bound and
-//! blocking, they should call `tokio::task::spawn_blocking` internally.
+//! The scheduler resolves `Collection→Single` (per-element) and
+//! `Single→Collection` (insert-into-gather) connections transparently:
 //!
-//! ## Design: Wave-Based Parallel Execution
+//! - **`Collection→Single`**: the transform is invoked once per dirty element.
+//! - **`Single→Collection`**: the single value is upserted into the collection
+//!   edge's element list using the slot's registered sorter.
 //!
-//! The dirty subgraph is processed in topological waves:
+//! ## Design: SCC Fixed-Point Loop
 //!
-//! - **Wave 0**: dirty input nodes (no unresolved dirty predecessors).
-//! - **Wave 1**: nodes whose only dirty predecessors are in Wave 0.
-//! - **Wave K**: nodes whose dirty predecessors all belong to waves < K.
-//!
-//! All nodes within a wave are independent of each other and can run in
-//! parallel.  After a wave completes we start the next wave, which may have
-//! grown (because nodes in the previous wave may have been marked dirty
-//! downstream – though with eager dirty propagation from `mark_dirty` this
-//! is not needed here).
-//!
-//! ## Design: Hash-Based Early Exit
-//!
-//! After a transform runs, the scheduler hashes the outputs.  If all output
-//! hashes match the previously stored hashes, no downstream nodes are marked
-//! dirty and the persist step is skipped.  This can eliminate large swaths
-//! of the recomputation graph when an input change ultimately has no effect
-//! on a particular output (e.g. a whitespace change in source that the
-//! parser normalises away).
-use std::collections::HashMap;
+//! Legal cycles (SCC groups with Collection back-edges) are processed with a
+//! bounded iteration loop that re-runs dirty members until convergence
+//! (no collection element changed) or the cycle limit is hit.
+
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use futures::future::join_all;
-use crate::graph::Graph;
+use crate::collection::{CollectionDiff, ElementKey};
+use crate::graph::{EdgeId, EdgePayload, Endpoint, Graph};
 use crate::loader::LazyLoader;
 use crate::node_id::NodeId;
-use crate::transform::TransformError;
-use crate::value::{Value, hash_bytes};
+use crate::registry::SorterFn;
+use crate::transform::{SlotInput, SlotOutput, TransformError};
+use crate::value::{Value, ValueHash, hash_bytes};
+
 // ---------------------------------------------------------------------------
-// Update report
+// UpdateReport
 // ---------------------------------------------------------------------------
+
 /// Summary of a single incremental update cycle.
 #[derive(Debug, Default)]
 pub struct UpdateReport {
-    /// Number of dirty nodes that were evaluated.
-    pub nodes_evaluated: usize,
-    /// Number of nodes whose output actually changed (hash mismatch).
-    pub nodes_changed: usize,
-    /// Number of nodes skipped because their output hash was unchanged
-    /// (hash-based early exit).
-    pub nodes_skipped: usize,
-    /// Number of nodes left as Dirty because an upstream source was in
-    /// Error state.  These nodes will be retried on the next `update()` call.
-    pub nodes_blocked: usize,
-    /// Errors encountered during the update, keyed by node ID.
-    pub errors: Vec<(NodeId, TransformError)>,
+    pub transforms_evaluated:         usize,
+    pub transforms_changed:           usize,
+    pub transforms_skipped:           usize,
+    pub transforms_blocked:           usize,
+    pub collection_elements_changed:  usize,
+    pub cycles_iterated:              usize,
+    pub errors:                       Vec<(NodeId, TransformError)>,
+    pub cycle_limit_exceeded:         Vec<NodeId>,
 }
+
 impl UpdateReport {
-    /// Return `true` if the update completed without any errors.
-    pub fn is_ok(&self) -> bool { self.errors.is_empty() }
+    pub fn is_ok(&self) -> bool { self.errors.is_empty() && self.cycle_limit_exceeded.is_empty() }
+
+    // Backward-compat aliases.
+    #[deprecated(note = "use transforms_evaluated")]
+    pub fn nodes_evaluated(&self) -> usize { self.transforms_evaluated }
+    #[deprecated(note = "use transforms_changed")]
+    pub fn nodes_changed(&self) -> usize { self.transforms_changed }
+    #[deprecated(note = "use transforms_skipped")]
+    pub fn nodes_skipped(&self) -> usize { self.transforms_skipped }
+    #[deprecated(note = "use transforms_blocked")]
+    pub fn nodes_blocked(&self) -> usize { self.transforms_blocked }
 }
+
 // ---------------------------------------------------------------------------
 // Scheduler
 // ---------------------------------------------------------------------------
+
 /// Parallel incremental recomputation engine.
-///
-/// Owns shared references to the `Graph` (topology + dirty flags) and the
-/// `LazyLoader` (value cache + persistence).  Both are wrapped in `Arc` so
-/// Tokio tasks can hold clones.
 #[derive(Clone)]
 pub struct Scheduler {
-    graph: Arc<Graph>,
-    loader: Arc<LazyLoader>,
+    graph:        Arc<Graph>,
+    loader:       Arc<LazyLoader>,
+    cycle_limit:  u32,
+    /// Registered sorter functions (key → comparator), shared from engine.
+    sorters:      Arc<std::sync::RwLock<HashMap<String, SorterFn>>>,
 }
+
 impl Scheduler {
-    /// Create a scheduler over the given graph and loader.
     pub fn new(graph: Arc<Graph>, loader: Arc<LazyLoader>) -> Self {
-        Self { graph, loader }
-    }
-    /// Run one incremental update cycle.
-    ///
-    /// 1. Computes the topologically-sorted list of dirty nodes.
-    /// 2. Decomposes them into parallel waves.
-    /// 3. For each wave, spawns one Tokio task per node.
-    /// 4. Returns an [`UpdateReport`] when all waves complete.
-    pub async fn run_update(&self) -> UpdateReport {
-        let topo = self.graph.dirty_nodes_topo();
-        if topo.is_empty() {
-            return UpdateReport::default();
+        Self {
+            graph,
+            loader,
+            cycle_limit: 1000,
+            sorters: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn with_cycle_limit(mut self, limit: u32) -> Self {
+        self.cycle_limit = limit;
+        self
+    }
+
+    pub fn set_sorters(&mut self, sorters: Arc<std::sync::RwLock<HashMap<String, SorterFn>>>) {
+        self.sorters = sorters;
+    }
+
+    pub fn set_cycle_limit(&mut self, limit: u32) {
+        self.cycle_limit = limit;
+    }
+
+    /// Run one incremental update cycle.
+    pub async fn run_update(&self) -> UpdateReport {
+        let topo = self.graph.dirty_transforms_topo();
+        if topo.is_empty() { return UpdateReport::default(); }
+
         let waves = compute_waves(&topo, &self.graph);
         let mut report = UpdateReport::default();
-        for wave in waves {
-            let handles: Vec<_> = wave.into_iter().map(|nid| {
-                let graph = Arc::clone(&self.graph);
-                let loader = Arc::clone(&self.loader);
+        // in-memory prev_output cache: cleared at end of update()
+        let mut prev_outputs: HashMap<NodeId, Vec<SlotOutput>> = HashMap::new();
+
+        // -----------------------------------------------------------------------
+        // Identify SCC members so we can give them fixed-point treatment.
+        // -----------------------------------------------------------------------
+        let scc_groups = self.graph.scc_groups();
+        let _scc_member: HashSet<NodeId> = scc_groups.iter()
+            .flat_map(|g| g.members.iter().copied())
+            .collect();
+
+        // -----------------------------------------------------------------------
+        // Run the main wave pass (acyclic nodes + first pass of SCC nodes).
+        // -----------------------------------------------------------------------
+        for wave in &waves {
+            let handles: Vec<_> = wave.iter().map(|&nid| {
+                let graph   = Arc::clone(&self.graph);
+                let loader  = Arc::clone(&self.loader);
+                let sorters = Arc::clone(&self.sorters);
+                let prev    = prev_outputs.get(&nid).cloned();
                 tokio::spawn(async move {
-                    evaluate_node(nid, graph, loader).await
+                    evaluate_transform(nid, graph, loader, sorters, prev.as_deref()).await
                 })
             }).collect();
             let results = join_all(handles).await;
-            for result in results {
+            for (i, result) in results.into_iter().enumerate() {
+                let nid = wave[i];
                 match result {
-                    Err(join_err) => {
-                        // Task panicked – treat as an internal error; we
-                        // cannot associate it with a specific node easily.
-                        eprintln!("[incremental] task panicked: {join_err}");
-                    }
-                    Ok(NodeOutcome::Changed(nid)) => {
-                        report.nodes_evaluated += 1;
-                        report.nodes_changed += 1;
-                        let _ = nid;
-                    }
-                    Ok(NodeOutcome::Unchanged(nid)) => {
-                        report.nodes_evaluated += 1;
-                        report.nodes_skipped += 1;
-                        let _ = nid;
-                    }
-                    Ok(NodeOutcome::Blocked(nid)) => {
-                        // Not evaluated; stays Dirty for the next cycle.
-                        report.nodes_blocked += 1;
-                        let _ = nid;
-                    }
-                    Ok(NodeOutcome::InputNode) => {
-                        // Input nodes are set externally; not counted as
-                        // evaluated by the scheduler.
-                    }
-                    Ok(NodeOutcome::Error(nid, err)) => {
-                        report.nodes_evaluated += 1;
-                        report.errors.push((nid, err));
-                    }
+                    Err(je) => eprintln!("[incremental] task panicked: {je}"),
+                    Ok(outcome) => collect_outcome(outcome, nid, &mut report, &mut prev_outputs),
                 }
             }
         }
+
+        // -----------------------------------------------------------------------
+        // Fixed-point loop for each SCC group.
+        // -----------------------------------------------------------------------
+        for scc in &scc_groups {
+            let limit = self.cycle_limit;
+            let mut iterations = 0u32;
+            loop {
+                // Check if any SCC member is still dirty.
+                let dirty_members: Vec<NodeId> = scc.members.iter().copied()
+                    .filter(|&id| self.graph.transform_status(id)
+                        .map(|s| s.is_dirty()).unwrap_or(false))
+                    .collect();
+                if dirty_members.is_empty() { break; }
+                if iterations >= limit {
+                    report.cycle_limit_exceeded.extend(scc.members.iter().copied());
+                    break;
+                }
+                iterations += 1;
+                // Snapshot collection hashes before this iteration.
+                let pre_hashes = snapshot_scc_collection_hashes(scc, &self.graph);
+
+                // Run dirty SCC members sequentially (cycles have ordering constraints).
+                let topo_scc = topo_sort_subset(&dirty_members, &self.graph);
+                for &nid in &topo_scc {
+                    let graph   = Arc::clone(&self.graph);
+                    let loader  = Arc::clone(&self.loader);
+                    let sorters = Arc::clone(&self.sorters);
+                    let prev    = prev_outputs.get(&nid).cloned();
+                    let outcome = evaluate_transform(nid, graph, loader, sorters, prev.as_deref()).await;
+                    collect_outcome(outcome, nid, &mut report, &mut prev_outputs);
+                }
+                // Check convergence: did any collection in the SCC change?
+                let post_hashes = snapshot_scc_collection_hashes(scc, &self.graph);
+                if pre_hashes == post_hashes { break; }
+            }
+            report.cycles_iterated += iterations as usize;
+        }
+
         report
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helper: collect outcome into report
+// ---------------------------------------------------------------------------
+
+fn collect_outcome(
+    outcome: TransformOutcome,
+    nid: NodeId,
+    report: &mut UpdateReport,
+    prev_outputs: &mut HashMap<NodeId, Vec<SlotOutput>>,
+) {
+    match outcome {
+        TransformOutcome::Changed { outputs, elements_changed } => {
+            report.transforms_evaluated += 1;
+            report.transforms_changed += 1;
+            report.collection_elements_changed += elements_changed;
+            prev_outputs.insert(nid, outputs);
+        }
+        TransformOutcome::Unchanged { outputs } => {
+            report.transforms_evaluated += 1;
+            report.transforms_skipped += 1;
+            prev_outputs.insert(nid, outputs);
+        }
+        TransformOutcome::Blocked => {
+            report.transforms_blocked += 1;
+        }
+        TransformOutcome::Error(err) => {
+            report.transforms_evaluated += 1;
+            report.errors.push((nid, err));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wave decomposition
 // ---------------------------------------------------------------------------
-/// Split `topo` (already in topological order) into waves.
-///
-/// Wave 0 = nodes with no dirty predecessors in `topo`.
-/// Wave K = nodes whose latest dirty predecessor is in wave K-1.
+
 fn compute_waves(topo: &[NodeId], graph: &Graph) -> Vec<Vec<NodeId>> {
     let mut wave_of: HashMap<NodeId, usize> = HashMap::new();
     for &nid in topo {
-        let max_pred_wave = if let Some(edge) = graph.incoming_edge_for(nid) {
-            edge.sources.iter()
-                .filter_map(|s| wave_of.get(s).copied())
-                .max()
-                .map(|w| w + 1)
-                .unwrap_or(0)
+        // A transform is in wave max(wave of its dirty upstream transforms) + 1.
+        if let Some(tn) = graph.get_transform_node(nid) {
+            let max_pred = tn.input_edges.iter().flat_map(|slot| slot.iter()).filter_map(|&eid| {
+                let edge = graph.get_edge(eid)?;
+                let upstream = upstream_transform_of(&edge.from, graph);
+                upstream.into_iter().filter_map(|u| wave_of.get(&u).copied()).max()
+            }).max();
+            wave_of.insert(nid, max_pred.map(|w| w + 1).unwrap_or(0));
         } else {
-            0
-        };
-        wave_of.insert(nid, max_pred_wave);
+            wave_of.insert(nid, 0);
+        }
     }
     let max_wave = wave_of.values().copied().max().unwrap_or(0);
     let mut waves: Vec<Vec<NodeId>> = vec![vec![]; max_wave + 1];
@@ -175,206 +242,375 @@ fn compute_waves(topo: &[NodeId], graph: &Graph) -> Vec<Vec<NodeId>> {
     waves.retain(|w| !w.is_empty());
     waves
 }
-// ---------------------------------------------------------------------------
-// Per-node evaluation
-// ---------------------------------------------------------------------------
-enum NodeOutcome {
-    Changed(NodeId),
-    Unchanged(NodeId),
-    InputNode,
-    /// Node was left Dirty because an upstream source was in Error state.
-    Blocked(NodeId),
-    Error(NodeId, TransformError),
-}
-async fn evaluate_node(
-    nid: NodeId,
-    graph: Arc<Graph>,
-    loader: Arc<LazyLoader>,
-) -> NodeOutcome {
-    // Input nodes are set externally; mark them clean and move on.
-    if graph.is_input(nid) {
-        if let Some((v, h)) = graph.peek_value(nid) {
-            let _ = graph.store_value(nid, v, h);
-        }
-        return NodeOutcome::InputNode;
-    }
-    // Find the edge that feeds this node.
-    let edge = match graph.incoming_edge_for(nid) {
-        Some(e) => e,
-        None => {
-            // Computed node with no incoming edge – should not happen in a
-            // well-formed graph.
-            return NodeOutcome::Error(nid, TransformError::new(
-                format!("computed node {nid} has no incoming edge"),
-            ));
-        }
-    };
-    // Guard: block evaluation if any source is in a state where its value
-    // cannot be trusted:
-    //   - Error state: the source's last transform failed; its value (if any)
-    //     is stale and should not be consumed.
-    //   - Dirty with no value: the source was either also blocked this cycle,
-    //     or has never been computed.  Evaluating now would yield a
-    //     "source has no value" error that misleadingly looks like a real
-    //     transform failure and would poison downstream nodes.
-    //
-    // In both cases we leave `nid` as Dirty so it is retried on the next
-    // update() cycle once all its sources are Clean.
-    for &src in &edge.sources {
-        let src_status = graph.node_status(src);
-        let src_has_value = graph.peek_value(src).is_some()
-            || loader.is_cached(src);
-        let should_block = match src_status {
-            Some(s) if s.is_error() => true,
-            Some(s) if s.is_dirty() && !src_has_value => true,
-            _ => false,
-        };
-        if should_block {
-            return NodeOutcome::Blocked(nid);
-        }
-    }
-    // Load all source values.
-    let mut inputs: Vec<Value> = Vec::with_capacity(edge.sources.len());
-    for &src in &edge.sources {
-        match loader.get(src).await {
-            Ok(Some(v)) => inputs.push(v),
-            Ok(None) => {
-                // Fall back to graph cache.
-                match graph.peek_value(src) {
-                    Some((v, _)) => inputs.push(v),
-                    None => {
-                        return NodeOutcome::Error(nid, TransformError::new(
-                            format!("source node {src} has no value"),
-                        ));
+
+fn upstream_transform_of(from: &Endpoint, graph: &Graph) -> Vec<NodeId> {
+    match from {
+        Endpoint::TransformOutput { transform, .. } => vec![*transform],
+        Endpoint::Io(io_id) => {
+            if let Some(node) = graph.get_io_node(*io_id) {
+                if let Some(eid) = node.incoming {
+                    if let Some(edge) = graph.get_edge(eid) {
+                        return upstream_transform_of(&edge.from.clone(), graph);
                     }
                 }
             }
-            Err(e) => {
-                return NodeOutcome::Error(nid, TransformError::with_source(
-                    format!("failed to load source {src}"), e.to_string(),
-                ));
+            vec![]
+        }
+        _ => vec![],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SCC helpers
+// ---------------------------------------------------------------------------
+
+fn snapshot_scc_collection_hashes(scc: &crate::cycle::SccGroup, graph: &Graph) -> Vec<(EdgeId, u64)> {
+    let mut hashes = Vec::new();
+    for &tid in &scc.members {
+        if let Some(tn) = graph.get_transform_node(tid) {
+            for slot_edges in &tn.input_edges {
+                for &eid in slot_edges {
+                    if let Some(edge) = graph.get_edge(eid) {
+                        if let EdgePayload::Collection(c) = &edge.payload {
+                            hashes.push((eid, c.full_hash));
+                        }
+                    }
+                }
             }
         }
     }
-    // Run the transform.
-    let outputs = match edge.transform.apply(&inputs).await {
+    hashes.sort_by_key(|(eid, _)| eid.0);
+    hashes
+}
+
+fn topo_sort_subset(nodes: &[NodeId], graph: &Graph) -> Vec<NodeId> {
+    // Simple Kahn over the given subset.
+    let set: HashSet<NodeId> = nodes.iter().copied().collect();
+    let mut in_degree: HashMap<NodeId, usize> = nodes.iter().map(|&n| (n, 0)).collect();
+    let mut adj: HashMap<NodeId, Vec<NodeId>> = nodes.iter().map(|&n| (n, vec![])).collect();
+    for &nid in nodes {
+        if let Some(tn) = graph.get_transform_node(nid) {
+            for slot_edges in &tn.input_edges {
+                for &eid in slot_edges {
+                    if let Some(edge) = graph.get_edge(eid) {
+                        for u in upstream_transform_of(&edge.from, graph) {
+                            if set.contains(&u) {
+                                *in_degree.entry(nid).or_default() += 1;
+                                adj.entry(u).or_default().push(nid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut queue: std::collections::VecDeque<NodeId> = in_degree.iter()
+        .filter(|(_, d)| **d == 0).map(|(n, _)| *n).collect();
+    let mut result = Vec::new();
+    while let Some(n) = queue.pop_front() {
+        result.push(n);
+        if let Some(ns) = adj.get(&n) {
+            for &next in ns {
+                let d = in_degree.entry(next).or_default();
+                *d = d.saturating_sub(1);
+                if *d == 0 { queue.push_back(next); }
+            }
+        }
+    }
+    // Append any remaining (SCC back-edges may prevent full drain).
+    for &n in nodes {
+        if !result.contains(&n) { result.push(n); }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Per-transform evaluation
+// ---------------------------------------------------------------------------
+
+enum TransformOutcome {
+    Changed { outputs: Vec<SlotOutput>, elements_changed: usize },
+    Unchanged { outputs: Vec<SlotOutput> },
+    Blocked,
+    Error(TransformError),
+}
+
+async fn evaluate_transform(
+    tid: NodeId,
+    graph: Arc<Graph>,
+    loader: Arc<LazyLoader>,
+    sorters: Arc<std::sync::RwLock<HashMap<String, SorterFn>>>,
+    prev_output: Option<&[SlotOutput]>,
+) -> TransformOutcome {
+    let (transform, schema, input_edges, output_edges) = {
+        let tn = match graph.get_transform_node(tid) {
+            Some(t) => t,
+            None => return TransformOutcome::Error(
+                TransformError::new(format!("TransformNode {tid} not found"))),
+        };
+        (tn.transform.clone(), tn.transform.schema().clone(),
+         tn.input_edges.clone(), tn.output_edges.clone())
+    };
+
+    // -----------------------------------------------------------------------
+    // 1. Assemble SlotInputs
+    // -----------------------------------------------------------------------
+    let mut slot_inputs: Vec<SlotInput> = Vec::with_capacity(schema.inputs.len().max(input_edges.len()));
+    if schema.inputs.is_empty() && !input_edges.is_empty() {
+        // Dynamic-count shim (ManyToOne / ManyToMany): collect all edges as Singles.
+        for slot_edges in &input_edges {
+            for &eid in slot_edges {
+                let value = match load_single_edge_value(eid, &graph, &loader).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if is_upstream_dirty_and_valueless(eid, &graph) {
+                            return TransformOutcome::Blocked;
+                        }
+                        return TransformOutcome::Error(e);
+                    }
+                };
+                slot_inputs.push(SlotInput::Single(value));
+            }
+        }
+    } else {
+        for (slot_idx, slot_desc) in schema.inputs.iter().enumerate() {
+        let slot_edges = &input_edges[slot_idx];
+        match &slot_desc.kind {
+            crate::slot::SlotKind::Single => {
+                if slot_edges.is_empty() {
+                    return TransformOutcome::Error(TransformError::new(
+                        format!("transform {tid} slot {slot_idx} has no incoming edges")));
+                }
+                let eid = slot_edges[0];
+                let value = match load_single_edge_value(eid, &graph, &loader).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if is_upstream_dirty_and_valueless(eid, &graph) {
+                            return TransformOutcome::Blocked;
+                        }
+                        return TransformOutcome::Error(e);
+                    }
+                };
+                slot_inputs.push(SlotInput::Single(value));
+            }
+            crate::slot::SlotKind::Collection { .. } => {
+                let (elements, diff) = gather_collection_slot(slot_edges, &graph, &loader).await;
+                slot_inputs.push(SlotInput::Collection { elements, diff });
+            }
+        }
+    }
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Run the transform.
+    // -----------------------------------------------------------------------
+    let outputs = match transform.apply(&slot_inputs, prev_output).await {
         Ok(v) => v,
         Err(e) => {
-            let _ = graph.store_error(nid, e.clone());
-            return NodeOutcome::Error(nid, e);
+            let _ = graph.store_transform_error(tid, e.clone());
+            return TransformOutcome::Error(e);
         }
     };
-    // Pair outputs with target node IDs.
-    if outputs.len() != edge.targets.len() {
+
+    if outputs.len() != schema.outputs.len() && schema.outputs.len() > 0 {
         let err = TransformError::new(format!(
-            "transform produced {} outputs but edge has {} targets",
-            outputs.len(), edge.targets.len()
+            "transform {tid} produced {} outputs but schema has {} output slots",
+            outputs.len(), schema.outputs.len()
         ));
-        let _ = graph.store_error(nid, err.clone());
-        return NodeOutcome::Error(nid, err);
+        let _ = graph.store_transform_error(tid, err.clone());
+        return TransformOutcome::Error(err);
     }
+
+    // -----------------------------------------------------------------------
+    // 3. Store outputs on edges and propagate dirty if changed.
+    // -----------------------------------------------------------------------
     let mut any_changed = false;
-    for (output, &tid) in outputs.into_iter().zip(edge.targets.iter()) {
-        // Hash-based early exit: compare serialised bytes hash against the
-        // previously stored hash.  Because Value::to_bytes() uses the serde
-        // closure captured at construction time, two logically-equal values
-        // produced by separate transform invocations will produce the same
-        // hash, correctly skipping downstream recomputation.
-        let new_hash = hash_bytes(&loader.registry().serialize_value(&output));
-        let prev_hash = graph.last_hash(tid);
-        if prev_hash == Some(new_hash) {
-            // Hash unchanged – skip persist and downstream dirty.
-            let _ = graph.store_value(tid, output, new_hash);
-        } else {
-            any_changed = true;
-            // Store in graph and loader cache.
-            let _ = graph.store_value(tid, output.clone(), new_hash);
-            loader.cache_value(tid, output);
-            // Mark downstream dirty (will be processed in a later wave or
-            // the next update() call if they are not already in the current
-            // topo sort).
-            graph.mark_dirty_downstream(tid);
+    let mut elements_changed = 0usize;
+
+    // Handle dynamic-output transforms (schema.outputs.len() == 0 but output_edges has slots).
+    let effective_outputs: Vec<(&SlotOutput, Option<&crate::slot::SlotDescriptor>)> = if schema.outputs.is_empty() {
+        outputs.iter().enumerate().map(|(i, o)| {
+            (o, None)
+        }).collect()
+    } else {
+        outputs.iter().zip(schema.outputs.iter().map(Some)).collect()
+    };
+
+    for (slot_idx, (slot_output, slot_desc_opt)) in effective_outputs.iter().enumerate() {
+        let empty = vec![];
+        let slot_edges = output_edges.get(slot_idx).unwrap_or(&empty);
+        match slot_output {
+            SlotOutput::Single(value) => {
+                let new_hash = hash_bytes(&loader.registry().serialize_value(value));
+                for &eid in slot_edges {
+                    let prev_hash = graph.edge_hash(eid);
+                    if prev_hash == Some(new_hash) {
+                        let _ = graph.store_single_value(eid, value.clone(), new_hash);
+                    } else {
+                        any_changed = true;
+                        let _ = graph.store_single_value(eid, value.clone(), new_hash);
+                        if let Some(edge) = graph.get_edge(eid) {
+                            if let Endpoint::Io(io_id) = edge.to {
+                                loader.cache_value(io_id, value.clone());
+                            }
+                        }
+                        propagate_dirty_after_edge(&graph, eid);
+                    }
+                }
+            }
+            SlotOutput::Collection(new_pairs) => {
+                let sorter_key = slot_desc_opt
+                    .and_then(|d| if let crate::slot::SlotKind::Collection { sorter_key } = &d.kind { Some(sorter_key.as_str()) } else { None })
+                    .unwrap_or("");
+                let sorters_guard = sorters.read().unwrap();
+                let sorter: Option<&SorterFn> = sorters_guard.get(sorter_key);
+                let default_sorter: SorterFn = Arc::new(|_, _| std::cmp::Ordering::Equal);
+                let sorter_ref: &SorterFn = sorter.unwrap_or(&default_sorter);
+                let new_elements: Vec<(ElementKey, Value, ValueHash)> = new_pairs.iter().map(|(key, val)| {
+                    let h = hash_bytes(&loader.registry().serialize_value(val));
+                    (*key, val.clone(), h)
+                }).collect();
+                for &eid in slot_edges {
+                    let diff = match graph.store_collection_diff(eid, new_elements.clone(), sorter_ref.as_ref()) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            let err = TransformError::new(e.message);
+                            let _ = graph.store_transform_error(tid, err.clone());
+                            return TransformOutcome::Error(err);
+                        }
+                    };
+                    if !diff.is_empty() {
+                        elements_changed += diff.added.len() + diff.removed.len() + diff.changed.len();
+                        any_changed = true;
+                        propagate_dirty_after_edge(&graph, eid);
+                    }
+                }
+            }
         }
     }
+
+    graph.mark_transform_clean(tid);
+
     if any_changed {
-        NodeOutcome::Changed(nid)
+        TransformOutcome::Changed { outputs: outputs.clone(), elements_changed }
     } else {
-        NodeOutcome::Unchanged(nid)
+        TransformOutcome::Unchanged { outputs: outputs.clone() }
     }
 }
-use std::collections::HashSet;
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::graph::Graph;
-    use crate::loader::LazyLoader;
-    use crate::storage::MemoryStorage;
-    use crate::transform::{Transform, TypedOneToOne};
-    use crate::value::ValueTypeRegistry;
-    use std::sync::Arc;
 
-    fn make_registry() -> Arc<ValueTypeRegistry> {
-        let mut r = ValueTypeRegistry::new();
-        r.register_primitives().unwrap();
-        Arc::new(r)
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+async fn load_single_edge_value(
+    eid: EdgeId,
+    graph: &Graph,
+    loader: &LazyLoader,
+) -> Result<Value, TransformError> {
+    // First try the edge's own cached value.
+    if let Some((v, _)) = graph.peek_single_value(eid) {
+        return Ok(v);
     }
-
-    fn make_double_transform(registry: Arc<ValueTypeRegistry>) -> Transform {
-        Transform::OneToOne(Arc::new(TypedOneToOne::new(
-            |n: &i32| { let n = *n; async move { Ok(n * 2) } },
-            registry,
-        )))
+    // The source might be an IoNode that is itself written by another edge.
+    // Walk upstream: if source is an IoNode, check its incoming edge for a value.
+    let src_io_id = {
+        let edge = graph.get_edge(eid)
+            .ok_or_else(|| TransformError::new(format!("edge {eid:?} not found")))?;
+        match edge.from {
+            Endpoint::Io(id) => Some(id),
+            _ => None,
+        }
+    };
+    if let Some(io_id) = src_io_id {
+        // Check incoming edge of this IoNode (which may hold the computed value).
+        if let Some((v, _)) = graph.peek_io_value(io_id) {
+            return Ok(v);
+        }
+        // Try loader cache keyed by the IoNode's ID.
+        match loader.get(io_id).await {
+            Ok(Some(v)) => return Ok(v),
+            _ => {}
+        }
     }
+    Err(TransformError::new(format!("no value on edge {eid:?}")))
+}
 
-    fn make_graph_with_double(registry: Arc<ValueTypeRegistry>) -> (Arc<Graph>, NodeId, NodeId) {
-        let g = Arc::new(Graph::new());
-        let src = g.add_input_node();
-        let tgt = g.add_computed_node();
-        g.add_transform(vec![src], vec![tgt], make_double_transform(registry), "double").unwrap();
-        (g, src, tgt)
+fn is_upstream_dirty_and_valueless(eid: EdgeId, graph: &Graph) -> bool {
+    if let Some(edge) = graph.get_edge(eid) {
+        match edge.from {
+            Endpoint::TransformOutput { transform, .. } => {
+                if let Some(status) = graph.transform_status(transform) {
+                    return status.is_dirty() || status.is_error();
+                }
+            }
+            Endpoint::Io(io_id) => {
+                // IoNode with no value: check if its incoming transform errored.
+                if let Some((_, _)) = graph.peek_io_value(io_id) {
+                    // Has a value — not blocked.
+                    return false;
+                }
+                // No value. Check if the upstream transform errored.
+                if let Some(node) = graph.get_io_node(io_id) {
+                    if let Some(incoming_eid) = node.incoming {
+                        drop(node);
+                        return is_upstream_dirty_and_valueless(incoming_eid, graph);
+                    }
+                }
+                // IoNode has no incoming edge and no value → input not set yet.
+                return true;
+            }
+            _ => {}
+        }
     }
+    false
+}
 
-    #[tokio::test]
-    async fn scheduler_evaluates_dirty_node() {
-        let registry = make_registry();
-        let (graph, src, tgt) = make_graph_with_double(Arc::clone(&registry));
-        let v = registry.make_value(5i32).unwrap();
-        graph.set_input(src, v.clone()).unwrap();
-        let storage = Arc::new(MemoryStorage::new());
-        let loader = Arc::new(LazyLoader::new(storage, Arc::clone(&registry)));
-        loader.cache_value(src, v);
-        let scheduler = Scheduler::new(Arc::clone(&graph), Arc::clone(&loader));
-        let report = scheduler.run_update().await;
-        assert!(report.is_ok(), "errors: {:?}", report.errors);
-        assert_eq!(report.nodes_evaluated, 1);
-        let (v, _) = graph.peek_value(tgt).expect("target should have value");
-        assert_eq!(registry.downcast_value::<i32>(&v).unwrap(), 10i32);
+async fn gather_collection_slot(
+    slot_edges: &[EdgeId],
+    graph: &Graph,
+    _loader: &LazyLoader,
+) -> (Vec<Value>, CollectionDiff) {
+    let mut elements: Vec<Value> = Vec::new();
+    let mut diff = CollectionDiff::default();
+    for &eid in slot_edges {
+        if let Some(edge) = graph.get_edge(eid) {
+            match &edge.payload {
+                EdgePayload::Collection(c) => {
+                    for el in &c.elements {
+                        elements.push(el.value.clone());
+                    }
+                    // Accumulate diffs (simplified: mark all dirty elements as changed).
+                    for el in c.elements.iter().filter(|e| e.dirty) {
+                        diff.changed.push((el.key, el.value.clone(), el.value.clone()));
+                    }
+                }
+                EdgePayload::Single(s) => {
+                    // Single→Collection crossing: treat as one-element collection.
+                    if let Some(v) = &s.value {
+                        elements.push(v.clone());
+                        if s.dirty {
+                            diff.added.push((s.value_hash.unwrap_or(0), v.clone()));
+                        }
+                    }
+                }
+            }
+        }
     }
+    (elements, diff)
+}
 
-    #[tokio::test]
-    async fn empty_graph_returns_empty_report() {
-        let registry = make_registry();
-        let graph = Arc::new(Graph::new());
-        let storage = Arc::new(MemoryStorage::new());
-        let loader = Arc::new(LazyLoader::new(storage, registry));
-        let scheduler = Scheduler::new(graph, loader);
-        let report = scheduler.run_update().await;
-        assert_eq!(report.nodes_evaluated, 0);
-    }
-
-    #[test]
-    fn compute_waves_single_chain() {
-        let registry = make_registry();
-        let g = Arc::new(Graph::new());
-        let a = g.add_input_node();
-        let b = g.add_computed_node();
-        let c = g.add_computed_node();
-        g.add_transform(vec![a], vec![b], make_double_transform(Arc::clone(&registry)), "ab").unwrap();
-        g.add_transform(vec![b], vec![c], make_double_transform(Arc::clone(&registry)), "bc").unwrap();
-        let topo = g.dirty_nodes_topo();
-        let waves = compute_waves(&topo, &g);
-        assert!(waves.len() >= 2, "chain should have at least 2 waves");
-        let wave0_ids: HashSet<_> = waves[0].iter().copied().collect();
-        assert!(wave0_ids.contains(&a));
+fn propagate_dirty_after_edge(graph: &Graph, eid: EdgeId) {
+    if let Some(edge) = graph.get_edge(eid) {
+        let to = edge.to.clone();
+        drop(edge);
+        match to {
+            Endpoint::TransformInput { transform, .. } => {
+                graph.mark_transform_dirty(transform);
+            }
+            Endpoint::Io(io_id) => {
+                graph.propagate_dirty_from_io(io_id);
+            }
+            _ => {}
+        }
     }
 }

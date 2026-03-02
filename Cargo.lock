@@ -802,6 +802,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "futures",
+ "parking_lot",
  "rmp-serde",
  "serde",
  "tokio",

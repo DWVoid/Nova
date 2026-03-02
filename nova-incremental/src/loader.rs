@@ -134,6 +134,28 @@ impl LazyLoader {
     pub fn storage(&self) -> &Arc<dyn Storage> {
         &self.storage
     }
+
+    /// Flush all in-memory cached values to storage.
+    pub async fn flush_all(&self) -> Result<(), StorageError> {
+        let entries: Vec<(NodeId, Value)> = self.cache.iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+        for (id, value) in entries {
+            let type_key = self.registry.type_key_of(&value).to_string();
+            let value_bytes = self.registry.serialize_value(&value);
+            let hash = hash_bytes(&value_bytes);
+            let data = PersistedNodeData {
+                node_id: id,
+                type_key,
+                value_bytes,
+                value_hash: hash,
+                is_input: false,
+            };
+            let bytes = encode(&data)?;
+            self.storage.set(&StorageKey::for_node(id), StorageValue::new(bytes)).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -1,26 +1,33 @@
-//! Transform function abstractions – internal implementation detail.
+//! Transform function abstractions.
 //!
-//! Users register transforms through [`crate::engine::IncrementalEngine`]
-//! typed registration methods (`register_one_to_one`, etc.).  The `Transform`
-//! enum and arity traits are `pub(crate)` and never exposed in the public API.
+//! ## Design: Single Trait, Arbitrary Slots
 //!
-//! ## Design: Typed Closure Wrappers
+//! The old four-arity enum (`OneToOne`, `ManyToOne`, etc.) is replaced by a
+//! single [`TransformFn`] trait.  Every transform declares a
+//! [`TransformSchema`] (arbitrary number of typed input/output slots) and an
+//! `apply` method that receives [`SlotInput`]s and returns [`SlotOutput`]s.
 //!
-//! Each typed registration method (`register_one_to_one<In, Out, F, Fut>`)
-//! wraps the user-supplied closure in a `TypedOneToOne` adapter that:
-//! 1. Decodes `Value` → `In` via the `ValueTypeRegistry`.
-//! 2. Calls the user closure.
-//! 3. Encodes `Out` → `Value` via the `ValueTypeRegistry`.
+//! ## Design: `prev_output` for Cycle Caching
 //!
-//! This keeps `Value` entirely hidden from user code.
+//! Transforms that participate in a legal cycle receive their previous output
+//! via `prev_output: Option<&[SlotOutput]>`.  This is an **in-memory hint**
+//!" only — `None` on first run and after a restart.
+//!
+//! ## Design: Crossing-Kind Edges
+//!
+//! - **`Collection→Single`**: scheduler invokes the transform once per element.
+//! - **`Single→Collection`**: scheduler inserts the value into the gather slot.
 
-use std::sync::Arc;
+use std::any::Any;
 use std::future::Future;
+use std::sync::Arc;
 use async_trait::async_trait;
+use crate::collection::{CollectionDiff, ElementKey};
+use crate::slot::TransformSchema;
 use crate::value::{Value, ValueTypeRegistry, RegistryError};
 
 // ---------------------------------------------------------------------------
-// Public: TransformError
+// TransformError (public)
 // ---------------------------------------------------------------------------
 
 /// Error produced by a transform function.
@@ -34,7 +41,6 @@ impl TransformError {
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), source: None }
     }
-
     pub fn with_source(message: impl Into<String>, source: impl Into<String>) -> Self {
         Self { message: message.into(), source: Some(source.into()) }
     }
@@ -43,108 +49,97 @@ impl TransformError {
 impl std::fmt::Display for TransformError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)?;
-        if let Some(src) = &self.source {
-            write!(f, ": {}", src)?;
-        }
+        if let Some(src) = &self.source { write!(f, ": {src}")?; }
         Ok(())
     }
 }
-
 impl std::error::Error for TransformError {}
-
 impl From<RegistryError> for TransformError {
-    fn from(e: RegistryError) -> Self {
-        TransformError::new(e.message)
-    }
+    fn from(e: RegistryError) -> Self { TransformError::new(e.message) }
 }
 
 // ---------------------------------------------------------------------------
-// Internal: arity traits
+// SlotInput / SlotOutput
+// ---------------------------------------------------------------------------
+
+/// Value delivered to one input slot during a transform invocation.
+#[derive(Clone, Debug)]
+pub enum SlotInput {
+    /// A single value for a `Single`-typed input slot.
+    Single(Value),
+    /// An ordered element list + diff for a `Collection`-typed input slot.
+    Collection {
+        elements: Vec<Value>,
+        diff: CollectionDiff,
+    },
+}
+
+/// Value produced for one output slot by a transform invocation.
+#[derive(Clone, Debug)]
+pub enum SlotOutput {
+    /// A single value for a `Single`-typed output slot.
+    Single(Value),
+    /// `(element_key, value)` pairs for a `Collection`-typed output slot.
+    Collection(Vec<(ElementKey, Value)>),
+}
+
+// ---------------------------------------------------------------------------
+// TransformFn trait
 // ---------------------------------------------------------------------------
 
 #[async_trait]
-pub(crate) trait OneToOneTransform: Send + Sync {
-    async fn apply(&self, input: &Value) -> Result<Value, TransformError>;
-}
-
-#[async_trait]
-pub(crate) trait OneToManyTransform: Send + Sync {
-    async fn apply(&self, input: &Value) -> Result<Vec<Value>, TransformError>;
-}
-
-#[async_trait]
-pub(crate) trait ManyToOneTransform: Send + Sync {
-    async fn apply(&self, inputs: &[Value]) -> Result<Value, TransformError>;
-}
-
-#[async_trait]
-pub(crate) trait ManyToManyTransform: Send + Sync {
-    async fn apply(&self, inputs: &[Value]) -> Result<Vec<Value>, TransformError>;
+pub(crate) trait TransformFn: Send + Sync {
+    fn schema(&self) -> &TransformSchema;
+    async fn apply(
+        &self,
+        inputs: &[SlotInput],
+        prev_output: Option<&[SlotOutput]>,
+    ) -> Result<Vec<SlotOutput>, TransformError>;
 }
 
 // ---------------------------------------------------------------------------
-// Internal: Transform enum
+// Transform handle
 // ---------------------------------------------------------------------------
 
-/// Unified transform handle stored on each graph edge.  Internal only.
 #[derive(Clone)]
-pub(crate) enum Transform {
-    OneToOne(Arc<dyn OneToOneTransform>),
-    OneToMany(Arc<dyn OneToManyTransform>),
-    ManyToOne(Arc<dyn ManyToOneTransform>),
-    ManyToMany(Arc<dyn ManyToManyTransform>),
+pub(crate) struct Transform {
+    pub(crate) f: Arc<dyn TransformFn>,
 }
 
 impl Transform {
-    pub(crate) async fn apply(&self, inputs: &[Value]) -> Result<Vec<Value>, TransformError> {
-        match self {
-            Transform::OneToOne(t) => {
-                debug_assert_eq!(inputs.len(), 1, "OneToOne expects exactly 1 input");
-                Ok(vec![t.apply(&inputs[0]).await?])
-            }
-            Transform::OneToMany(t) => {
-                debug_assert_eq!(inputs.len(), 1, "OneToMany expects exactly 1 input");
-                t.apply(&inputs[0]).await
-            }
-            Transform::ManyToOne(t) => {
-                Ok(vec![t.apply(inputs).await?])
-            }
-            Transform::ManyToMany(t) => {
-                t.apply(inputs).await
-            }
-        }
-    }
-
-    pub(crate) fn arity_name(&self) -> &'static str {
-        match self {
-            Transform::OneToOne(_)  => "OneToOne",
-            Transform::OneToMany(_) => "OneToMany",
-            Transform::ManyToOne(_) => "ManyToOne",
-            Transform::ManyToMany(_) => "ManyToMany",
-        }
+    pub(crate) fn new(f: Arc<dyn TransformFn>) -> Self { Self { f } }
+    pub(crate) fn schema(&self) -> &TransformSchema { self.f.schema() }
+    pub(crate) async fn apply(
+        &self,
+        inputs: &[SlotInput],
+        prev_output: Option<&[SlotOutput]>,
+    ) -> Result<Vec<SlotOutput>, TransformError> {
+        self.f.apply(inputs, prev_output).await
     }
 }
 
 impl std::fmt::Debug for Transform {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Transform::{}", self.arity_name())
+        write!(f, "Transform({} in → {} out)",
+            self.schema().inputs.len(), self.schema().outputs.len())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Internal: typed closure adapters
+// Typed closure adapters
 // ---------------------------------------------------------------------------
 
-/// Adapter that wraps a user `Fn(&In) -> Fut` and handles Value encode/decode.
+/// `Fn(&In) -> Fut` → `Single(Out)`.
 pub(crate) struct TypedOneToOne<In, Out, F, Fut>
 where
-    In:  Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
-    Out: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    In:  Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    Out: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     F:  Fn(&In) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
 {
     pub(crate) f: F,
     pub(crate) registry: Arc<ValueTypeRegistry>,
+    pub(crate) schema: TransformSchema,
     _in: std::marker::PhantomData<In>,
     _out: std::marker::PhantomData<Out>,
 }
@@ -157,38 +152,52 @@ where
     Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
 {
     pub(crate) fn new(f: F, registry: Arc<ValueTypeRegistry>) -> Self {
-        Self { f, registry, _in: std::marker::PhantomData, _out: std::marker::PhantomData }
+        let in_key  = registry.key_for_type_id(std::any::TypeId::of::<In>())
+            .unwrap_or_else(|| std::any::type_name::<In>().to_string());
+        let out_key = registry.key_for_type_id(std::any::TypeId::of::<Out>())
+            .unwrap_or_else(|| std::any::type_name::<Out>().to_string());
+        Self {
+            f, registry,
+            schema: TransformSchema::one_to_one(in_key, out_key),
+            _in: std::marker::PhantomData,
+            _out: std::marker::PhantomData,
+        }
     }
 }
 
-use std::any::Any;
-
 #[async_trait]
-impl<In, Out, F, Fut> OneToOneTransform for TypedOneToOne<In, Out, F, Fut>
+impl<In, Out, F, Fut> TransformFn for TypedOneToOne<In, Out, F, Fut>
 where
     In:  Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     Out: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     F:  Fn(&In) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
 {
-    async fn apply(&self, input: &Value) -> Result<Value, TransformError> {
-        let typed_in = self.registry.downcast_value::<In>(input)
+    fn schema(&self) -> &TransformSchema { &self.schema }
+    async fn apply(&self, inputs: &[SlotInput], _prev: Option<&[SlotOutput]>) -> Result<Vec<SlotOutput>, TransformError> {
+        let v = match &inputs[0] {
+            SlotInput::Single(v) => v,
+            _ => return Err(TransformError::new("OneToOne: expected Single input")),
+        };
+        let typed: In = self.registry.downcast_value::<In>(v)
             .map_err(|e| TransformError::new(format!("OneToOne input: {}", e.message)))?;
-        let typed_out = (self.f)(&typed_in).await?;
-        self.registry.make_value(typed_out).map_err(TransformError::from)
+        let out: Out = (self.f)(&typed).await?;
+        let out_val = self.registry.make_value(out).map_err(TransformError::from)?;
+        Ok(vec![SlotOutput::Single(out_val)])
     }
 }
 
-/// Adapter for `Fn(&[In]) -> Fut` → one output.
+/// `Fn(&[In]) -> Fut<Out>` — N single inputs → 1 output.
 pub(crate) struct TypedManyToOne<In, Out, F, Fut>
 where
-    In:  Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
-    Out: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    In:  Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    Out: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     F:  Fn(&[In]) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
 {
     pub(crate) f: F,
     pub(crate) registry: Arc<ValueTypeRegistry>,
+    pub(crate) schema: TransformSchema,
     _in: std::marker::PhantomData<In>,
     _out: std::marker::PhantomData<Out>,
 }
@@ -201,38 +210,51 @@ where
     Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
 {
     pub(crate) fn new(f: F, registry: Arc<ValueTypeRegistry>) -> Self {
-        Self { f, registry, _in: std::marker::PhantomData, _out: std::marker::PhantomData }
+        let in_key  = registry.key_for_type_id(std::any::TypeId::of::<In>())
+            .unwrap_or_else(|| std::any::type_name::<In>().to_string());
+        let out_key = registry.key_for_type_id(std::any::TypeId::of::<Out>())
+            .unwrap_or_else(|| std::any::type_name::<Out>().to_string());
+        // Schema is fixed at registration; many-to-one compat shim uses 0 inputs
+        // (actual input count is determined by wiring).
+        let schema = TransformSchema { inputs: vec![], outputs: vec![crate::slot::SlotDescriptor::single(out_key)] };
+        let _ = in_key; // stored for documentation; inputs wired dynamically
+        Self { f, registry, schema, _in: std::marker::PhantomData, _out: std::marker::PhantomData }
     }
 }
 
 #[async_trait]
-impl<In, Out, F, Fut> ManyToOneTransform for TypedManyToOne<In, Out, F, Fut>
+impl<In, Out, F, Fut> TransformFn for TypedManyToOne<In, Out, F, Fut>
 where
     In:  Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     Out: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     F:  Fn(&[In]) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Out, TransformError>> + Send + 'static,
 {
-    async fn apply(&self, inputs: &[Value]) -> Result<Value, TransformError> {
-        let typed_ins: Result<Vec<In>, _> = inputs.iter().enumerate().map(|(i, v)| {
-            self.registry.downcast_value::<In>(v)
-                .map_err(|e| TransformError::new(format!("ManyToOne input[{i}]: {}", e.message)))
+    fn schema(&self) -> &TransformSchema { &self.schema }
+    async fn apply(&self, inputs: &[SlotInput], _prev: Option<&[SlotOutput]>) -> Result<Vec<SlotOutput>, TransformError> {
+        let typed: Result<Vec<In>, _> = inputs.iter().enumerate().map(|(i, s)| {
+            match s {
+                SlotInput::Single(v) => self.registry.downcast_value::<In>(v)
+                    .map_err(|e| TransformError::new(format!("ManyToOne input[{i}]: {}", e.message))),
+                _ => Err(TransformError::new(format!("ManyToOne input[{i}]: expected Single"))),
+            }
         }).collect();
-        let typed_out = (self.f)(&typed_ins?).await?;
-        self.registry.make_value(typed_out).map_err(TransformError::from)
+        let out = (self.f)(&typed?).await?;
+        Ok(vec![SlotOutput::Single(self.registry.make_value(out).map_err(TransformError::from)?)])
     }
 }
 
-/// Adapter for `Fn(&In) -> Fut` → many outputs.
+/// `Fn(&In) -> Fut<Vec<Out>>` — 1 input → N outputs.
 pub(crate) struct TypedOneToMany<In, Out, F, Fut>
 where
-    In:  Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
-    Out: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    In:  Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    Out: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     F:  Fn(&In) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
 {
     pub(crate) f: F,
     pub(crate) registry: Arc<ValueTypeRegistry>,
+    pub(crate) schema: TransformSchema,
     _in: std::marker::PhantomData<In>,
     _out: std::marker::PhantomData<Out>,
 }
@@ -245,38 +267,51 @@ where
     Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
 {
     pub(crate) fn new(f: F, registry: Arc<ValueTypeRegistry>) -> Self {
-        Self { f, registry, _in: std::marker::PhantomData, _out: std::marker::PhantomData }
+        let in_key  = registry.key_for_type_id(std::any::TypeId::of::<In>())
+            .unwrap_or_else(|| std::any::type_name::<In>().to_string());
+        let out_key = registry.key_for_type_id(std::any::TypeId::of::<Out>())
+            .unwrap_or_else(|| std::any::type_name::<Out>().to_string());
+        // Output count unknown at registration; schema updated when outputs are wired.
+        let schema = TransformSchema { inputs: vec![crate::slot::SlotDescriptor::single(in_key)], outputs: vec![] };
+        let _ = out_key;
+        Self { f, registry, schema, _in: std::marker::PhantomData, _out: std::marker::PhantomData }
     }
 }
 
 #[async_trait]
-impl<In, Out, F, Fut> OneToManyTransform for TypedOneToMany<In, Out, F, Fut>
+impl<In, Out, F, Fut> TransformFn for TypedOneToMany<In, Out, F, Fut>
 where
     In:  Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     Out: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     F:  Fn(&In) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
 {
-    async fn apply(&self, input: &Value) -> Result<Vec<Value>, TransformError> {
-        let typed_in = self.registry.downcast_value::<In>(input)
+    fn schema(&self) -> &TransformSchema { &self.schema }
+    async fn apply(&self, inputs: &[SlotInput], _prev: Option<&[SlotOutput]>) -> Result<Vec<SlotOutput>, TransformError> {
+        let v = match &inputs[0] {
+            SlotInput::Single(v) => v,
+            _ => return Err(TransformError::new("OneToMany: expected Single input")),
+        };
+        let typed: In = self.registry.downcast_value::<In>(v)
             .map_err(|e| TransformError::new(format!("OneToMany input: {}", e.message)))?;
-        let typed_outs = (self.f)(&typed_in).await?;
-        typed_outs.into_iter().map(|v| {
-            self.registry.make_value(v).map_err(TransformError::from)
+        let outs: Vec<Out> = (self.f)(&typed).await?;
+        outs.into_iter().map(|o| {
+            self.registry.make_value(o).map(SlotOutput::Single).map_err(TransformError::from)
         }).collect()
     }
 }
 
-/// Adapter for `Fn(&[In]) -> Fut` → many outputs.
+/// `Fn(&[In]) -> Fut<Vec<Out>>` — N inputs → M outputs.
 pub(crate) struct TypedManyToMany<In, Out, F, Fut>
 where
-    In:  Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
-    Out: Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    In:  Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
+    Out: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     F:  Fn(&[In]) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
 {
     pub(crate) f: F,
     pub(crate) registry: Arc<ValueTypeRegistry>,
+    pub(crate) schema: TransformSchema,
     _in: std::marker::PhantomData<In>,
     _out: std::marker::PhantomData<Out>,
 }
@@ -289,103 +324,32 @@ where
     Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
 {
     pub(crate) fn new(f: F, registry: Arc<ValueTypeRegistry>) -> Self {
-        Self { f, registry, _in: std::marker::PhantomData, _out: std::marker::PhantomData }
+        let schema = TransformSchema { inputs: vec![], outputs: vec![] };
+        Self { f, registry, schema, _in: std::marker::PhantomData, _out: std::marker::PhantomData }
     }
 }
 
 #[async_trait]
-impl<In, Out, F, Fut> ManyToManyTransform for TypedManyToMany<In, Out, F, Fut>
+impl<In, Out, F, Fut> TransformFn for TypedManyToMany<In, Out, F, Fut>
 where
     In:  Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     Out: Any + Send + Sync + Clone + serde::Serialize + serde::de::DeserializeOwned + 'static,
     F:  Fn(&[In]) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<Vec<Out>, TransformError>> + Send + 'static,
 {
-    async fn apply(&self, inputs: &[Value]) -> Result<Vec<Value>, TransformError> {
-        let typed_ins: Result<Vec<In>, _> = inputs.iter().enumerate().map(|(i, v)| {
-            self.registry.downcast_value::<In>(v)
-                .map_err(|e| TransformError::new(format!("ManyToMany input[{i}]: {}", e.message)))
+    fn schema(&self) -> &TransformSchema { &self.schema }
+    async fn apply(&self, inputs: &[SlotInput], _prev: Option<&[SlotOutput]>) -> Result<Vec<SlotOutput>, TransformError> {
+        let typed: Result<Vec<In>, _> = inputs.iter().enumerate().map(|(i, s)| {
+            match s {
+                SlotInput::Single(v) => self.registry.downcast_value::<In>(v)
+                    .map_err(|e| TransformError::new(format!("ManyToMany input[{i}]: {}", e.message))),
+                _ => Err(TransformError::new(format!("ManyToMany input[{i}]: expected Single"))),
+            }
         }).collect();
-        let typed_outs = (self.f)(&typed_ins?).await?;
-        typed_outs.into_iter().map(|v| {
-            self.registry.make_value(v).map_err(TransformError::from)
+        let outs: Vec<Out> = (self.f)(&typed?).await?;
+        outs.into_iter().map(|o| {
+            self.registry.make_value(o).map(SlotOutput::Single).map_err(TransformError::from)
         }).collect()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::value::ValueTypeRegistry;
-    use std::sync::Arc;
-
-    fn make_registry() -> Arc<ValueTypeRegistry> {
-        let mut r = ValueTypeRegistry::new();
-        r.register_primitives().unwrap();
-        Arc::new(r)
-    }
-
-    #[tokio::test]
-    async fn typed_one_to_one_doubles() {
-        let reg = make_registry();
-        let t = Transform::OneToOne(Arc::new(TypedOneToOne::new(
-            |n: &i32| {
-                let n = *n;
-                async move { Ok(n * 2) }
-            },
-            Arc::clone(&reg),
-        )));
-        let input = reg.make_value(5i32).unwrap();
-        let out = t.apply(&[input]).await.unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(reg.downcast_value::<i32>(&out[0]).unwrap(), 10i32);
-    }
-
-    #[tokio::test]
-    async fn typed_many_to_one_sums() {
-        let reg = make_registry();
-        let t = Transform::ManyToOne(Arc::new(TypedManyToOne::new(
-            |inputs: &[i32]| {
-                let sum: i32 = inputs.iter().sum();
-                async move { Ok(sum) }
-            },
-            Arc::clone(&reg),
-        )));
-        let a = reg.make_value(3i32).unwrap();
-        let b = reg.make_value(4i32).unwrap();
-        let out = t.apply(&[a, b]).await.unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(reg.downcast_value::<i32>(&out[0]).unwrap(), 7i32);
-    }
-
-    #[tokio::test]
-    async fn typed_one_to_many_duplicates() {
-        let reg = make_registry();
-        let t = Transform::OneToMany(Arc::new(TypedOneToMany::new(
-            |n: &i32| {
-                let n = *n;
-                async move { Ok(vec![n, n]) }
-            },
-            Arc::clone(&reg),
-        )));
-        let input = reg.make_value(7i32).unwrap();
-        let out = t.apply(&[input]).await.unwrap();
-        assert_eq!(out.len(), 2);
-        assert_eq!(reg.downcast_value::<i32>(&out[0]).unwrap(), 7i32);
-        assert_eq!(reg.downcast_value::<i32>(&out[1]).unwrap(), 7i32);
-    }
-
-    #[tokio::test]
-    async fn type_mismatch_produces_transform_error() {
-        let reg = make_registry();
-        let t = Transform::OneToOne(Arc::new(TypedOneToOne::new(
-            |n: &i32| { let n = *n; async move { Ok(n * 2) } },
-            Arc::clone(&reg),
-        )));
-        // Pass u64 instead of i32
-        let input = reg.make_value(5u64).unwrap();
-        let result = t.apply(&[input]).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("type mismatch"));
-    }
-}

@@ -75,8 +75,6 @@ pub struct ProjectManifest {
     /// Semver string (from `[package] version`).
     pub version: String,
     /// Optional description string.
-    // Retained as public API for future use (e.g. `nvc --info`, docs generation).
-    #[allow(dead_code)]
     pub description: String,
     /// Absolute path to the directory containing `bundle.toml`.
     pub root: PathBuf,

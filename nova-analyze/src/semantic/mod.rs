@@ -61,6 +61,7 @@ pub mod load_transform;
 pub mod lex_transform;
 pub mod parse_transform;
 pub mod session;
+mod symbol_model;
 
 // Top-level re-exports.
 pub use file_stat::FileStat;

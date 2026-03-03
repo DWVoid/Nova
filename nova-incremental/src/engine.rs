@@ -10,7 +10,7 @@ use crate::loader::Loader;
 use crate::node_id::NodeId;
 use crate::scheduler::{Scheduler, UpdateReport};
 use crate::storage::{Storage, StorageError};
-use crate::transform::{Transform, ErasedTransform, IncrementalValue};
+use crate::transform::{Transform, ErasedTransform, IncrementalValue, TransformRegistrar};
 use crate::value::{ValueTypeRegistry, ValueTypeRegistryBuilder, hash_value};
 
 // ---------------------------------------------------------------------------
@@ -62,29 +62,43 @@ enum PendingEdge {
 // ---------------------------------------------------------------------------
 
 pub struct EngineBuilder {
-    nodes:       Vec<PendingNode>,
-    edges:       Vec<PendingEdge>,
-    transforms:  HashMap<String, ErasedTransform>,
+    nodes:               Vec<PendingNode>,
+    edges:               Vec<PendingEdge>,
+    transforms:          HashMap<String, ErasedTransform>,
     /// Maps transform UUID → registered key, for schema lookup during edge creation.
-    uuid_to_key: HashMap<Uuid, String>,
-    cycle_limit: u32,
+    uuid_to_key:         HashMap<Uuid, String>,
+    cycle_limit:         u32,
+    /// Accumulated errors from `register()` calls — surfaced by `build()`.
+    registration_errors: Vec<String>,
 }
 
 impl EngineBuilder {
     pub fn new() -> Self {
         Self {
-            nodes: vec![],
-            edges: vec![],
-            transforms: HashMap::new(),
-            uuid_to_key: HashMap::new(),
-            cycle_limit: 1000,
+            nodes:               vec![],
+            edges:               vec![],
+            transforms:          HashMap::new(),
+            uuid_to_key:         HashMap::new(),
+            cycle_limit:         1000,
+            registration_errors: vec![],
         }
     }
 
-    /// Register a transform type under `key`.  All slot value types are auto-registered.
+    /// Register a transform type under `key`.
+    ///
+    /// Calls `T::register` to declare slot types.  Any errors are accumulated
+    /// and surfaced as a single `EngineError` when [`build`](Self::build) is called.
     pub fn register<T: Transform>(mut self, key: &str, instance: T) -> Self {
-        let schema = T::schema();
-        let erased = ErasedTransform::new(schema, instance);
+        if self.transforms.contains_key(key) {
+            self.registration_errors.push(format!(
+                "duplicate transform key {:?}", key
+            ));
+            return self;
+        }
+        let mut registrar = TransformRegistrar::new();
+        T::register(&mut registrar);
+        let layout = registrar.finish();
+        let erased = ErasedTransform::new(layout, instance);
         self.transforms.insert(key.to_owned(), erased);
         self
     }
@@ -135,6 +149,13 @@ impl EngineBuilder {
     pub fn cycle_limit(mut self, limit: u32) -> Self { self.cycle_limit = limit; self }
 
     pub async fn build(self, storage: Arc<dyn Storage>) -> Result<Engine, EngineError> {
+        // Surface any errors accumulated during register() calls.
+        if !self.registration_errors.is_empty() {
+            return Err(EngineError::new(
+                self.registration_errors.join("; ")
+            ));
+        }
+
         // Build phase: register all slot types, then freeze the registry.
         let mut reg_builder = ValueTypeRegistryBuilder::new();
         for erased in self.transforms.values() {

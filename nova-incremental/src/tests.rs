@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::{
     Engine, EngineBuilder, MemoryStorage, Storage,
-    Transform, TransformContext, TransformSchema, TransformError,
+    Transform, TransformContext, TransformRegisterContext, TransformError,
     KeyExtractor, Uuid,
 };
 
@@ -34,8 +34,9 @@ struct DoubleTransform;
 
 #[async_trait]
 impl Transform for DoubleTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new().input::<u32>().output::<u32>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<u32>();
+        ctx.output::<u32>();
     }
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
         let v = *ctx.input::<u32>(0)?;
@@ -110,8 +111,9 @@ struct AddOneTransform;
 
 #[async_trait]
 impl Transform for AddOneTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new().input::<u32>().output::<u32>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<u32>();
+        ctx.output::<u32>();
     }
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
         let v = *ctx.input::<u32>(0)?;
@@ -166,10 +168,9 @@ impl KeyExtractor<Item> for ItemByIdKey {
 struct ExpandTransform;
 #[async_trait]
 impl Transform for ExpandTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input::<Vec<Item>>()
-            .output_collection::<Item, ItemByIdKey>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<Vec<Item>>();
+        ctx.output_collection::<Item, ItemByIdKey>();
     }
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
         let items = ctx.input::<Vec<Item>>(0)?.clone();
@@ -180,10 +181,9 @@ impl Transform for ExpandTransform {
 struct DoubleItemTransform;
 #[async_trait]
 impl Transform for DoubleItemTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input::<Item>()
-            .output::<Item>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<Item>();
+        ctx.output::<Item>();
     }
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
         let item = ctx.input::<Item>(0)?.clone();
@@ -194,10 +194,9 @@ impl Transform for DoubleItemTransform {
 struct CollectTransform;
 #[async_trait]
 impl Transform for CollectTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input_collection::<Item, ItemByIdKey>()
-            .output::<Vec<Item>>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input_collection::<Item, ItemByIdKey>();
+        ctx.output::<Vec<Item>>();
     }
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
         let col = ctx.input_collection::<Item>(0)?;
@@ -327,8 +326,9 @@ async fn test_checkpoint_discard() {
 struct ErrorTransform;
 #[async_trait]
 impl Transform for ErrorTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new().input::<u32>().output::<u32>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<u32>();
+        ctx.output::<u32>();
     }
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
         let v = *ctx.input::<u32>(0)?;
@@ -374,13 +374,12 @@ async fn test_context_type_mismatch() {
     struct BadTypeTransform;
     #[async_trait]
     impl Transform for BadTypeTransform {
-        fn schema() -> TransformSchema where Self: Sized {
-            TransformSchema::new().input::<u32>().output::<u32>()
+        fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+            ctx.input::<u32>();
+            ctx.output::<u32>();
         }
         async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
-            // Intentionally read as wrong type.
             let _bad: Result<&String, _> = ctx.input::<String>(0);
-            // This should fail gracefully.
             ctx.output(0, 1u32)
         }
     }
@@ -392,10 +391,14 @@ async fn test_context_type_mismatch() {
         Arc::new(b.freeze())
     };
 
-    let schema = Arc::new(
-        TransformSchema::new().input::<u32>().output::<u32>()
-    );
-    let mut ctx = crate::transform::TransformContext::new(Arc::clone(&schema), Arc::clone(&reg));
+    // Use TransformRegistrar directly to build a SlotLayout for the context.
+    let layout = {
+        let mut r = crate::transform::TransformRegistrar::new();
+        r.input::<u32>();
+        r.output::<u32>();
+        Arc::new(r.finish())
+    };
+    let mut ctx = crate::transform::TransformContext::new(Arc::clone(&layout), Arc::clone(&reg));
 
     // String lookup on u32 slot should fail.
     assert!(ctx.input::<String>(0).is_err());
@@ -457,11 +460,10 @@ struct Pair { a: u32, b: u32 }
 struct SumPairTransform;
 #[async_trait]
 impl Transform for SumPairTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input::<u32>()
-            .input::<u32>()
-            .output::<u32>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<u32>();
+        ctx.input::<u32>();
+        ctx.output::<u32>();
     }
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
         let a = *ctx.input::<u32>(0)?;

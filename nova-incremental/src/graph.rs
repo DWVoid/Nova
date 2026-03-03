@@ -751,8 +751,8 @@ impl Graph {
         all
     }
 
-    /// Get the transform node for an id (cloned schema for inspection).
-    pub(crate) fn transform_schema(&self, id: NodeId) -> Option<Arc<crate::transform::TransformSchema>> {
+    /// Get the transform node for an id (cloned slot layout for inspection).
+    pub(crate) fn transform_schema(&self, id: NodeId) -> Option<Arc<crate::transform::SlotLayout>> {
         self.inner.read().unwrap().transform_nodes.get(&id)
             .map(|t| Arc::clone(&t.transform.schema))
     }
@@ -953,14 +953,15 @@ impl Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transform::{TransformSchema, TransformContext, TransformError, Transform};
+    use crate::transform::{TransformContext, TransformError, Transform};
     use async_trait::async_trait;
 
     struct DummyTransform;
     #[async_trait]
     impl Transform for DummyTransform {
-        fn schema() -> TransformSchema where Self: Sized {
-            TransformSchema::new().input::<u32>().output::<u32>()
+        fn register(ctx: &mut impl crate::transform::TransformRegisterContext) where Self: Sized {
+            ctx.input::<u32>();
+            ctx.output::<u32>();
         }
         async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
             let v = *ctx.input::<u32>(0)?;
@@ -969,7 +970,9 @@ mod tests {
     }
 
     fn make_erased() -> ErasedTransform {
-        ErasedTransform::new(DummyTransform::schema(), DummyTransform)
+        let mut r = crate::transform::TransformRegistrar::new();
+        DummyTransform::register(&mut r);
+        ErasedTransform::new(r.finish(), DummyTransform)
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //! MemoryStorage   — in-memory implementation (for tests / ephemeral use)
 //! Transform       — trait: implement to define a computation step
 //! TransformContext — per-invocation I/O (input() / output() / etc.)
-//! TransformSchema — slot-layout builder (returned by Transform::schema())
+//! TransformRegisterContext — slot declaration DSL (passed to Transform::register)
 //! TransformError  — error type from transform execution
 //! IncrementalValue — auto-impl marker for types that flow through the graph
 //! KeyExtractor    — derives stable u64 key from a collection element
@@ -57,7 +57,7 @@ pub use storage::MemoryStorage;
 // Transform authoring
 pub use transform::Transform;
 pub use transform::TransformContext;
-pub use transform::TransformSchema;
+pub use transform::TransformRegisterContext;
 pub use transform::TransformError;
 pub use transform::IncrementalValue;
 pub use transform::KeyExtractor;

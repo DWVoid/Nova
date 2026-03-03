@@ -5,11 +5,11 @@
 //! External crates only see:
 //! - `Transform` – the trait to implement
 //! - `TransformContext` – typed I/O injected per `apply()` call
-//! - `TransformSchema` – opaque slot-layout builder (returned by `schema()`)
+//! - `TransformRegisterContext` – slot declaration DSL (sealed, not implementable externally)
 //! - `TransformError`, `IncrementalValue`, `KeyExtractor`,
 //!   `CollectionInput`, `CollectionChange`
 //!
-//! All internal execution machinery (`SlotInput`, `SlotOutput`, `Value`, etc.)
+//! All internal execution machinery (`SlotSpec`, `SlotLayout`, `Value`, etc.)
 //! stays `pub(crate)` in this module.
 
 use std::any::{Any, TypeId};
@@ -89,7 +89,6 @@ pub(crate) struct SlotSpec {
     /// Extract stable key from Value (collection slots only).
     pub(crate) extract_key: Option<fn(&crate::value::Value, &crate::value::ValueTypeRegistry) -> u64>,
     /// Build an ErasedCollection from graph elements (collection input slots only).
-    /// Signature: (all_values: Vec<Value>, dirty_keys: Vec<u64>, registry) → ErasedCollection
     pub(crate) build_collection: Option<
         fn(Vec<crate::value::Value>, Vec<u64>, &crate::value::ValueTypeRegistry) -> ErasedCollection
     >,
@@ -153,10 +152,10 @@ impl SlotSpec {
             type_id:          TypeId::of::<T>(),
             type_name:        std::any::type_name::<T>(),
             is_col:           false,
-            register:         slot_register::<T>,
             downcast:         slot_downcast::<T>,
             extract_key:      None,
             build_collection: None,
+            register:         slot_register::<T>,
         }
     }
 
@@ -165,56 +164,32 @@ impl SlotSpec {
             type_id:          TypeId::of::<T>(),
             type_name:        std::any::type_name::<T>(),
             is_col:           true,
-            register:         slot_register::<T>,
             downcast:         slot_downcast::<T>,
             extract_key:      Some(slot_extract_key::<T, K>),
             build_collection: Some(slot_build_collection::<T>),
+            register:         slot_register::<T>,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// TransformSchema (public opaque)
+// SlotLayout (pub(crate)) — internal replacement for the old public TransformSchema
 // ---------------------------------------------------------------------------
 
-/// Describes the typed slot layout of a [`Transform`].
-///
-/// Constructed via chaining: `TransformSchema::new().input::<A>().output::<B>()`.
-/// Fields are private; the engine reads them through `pub(crate)` accessors.
+/// Internal slot description for a transform.  Not part of the public API.
+/// Produced by [`TransformRegistrar`] during the build phase.
 #[derive(Clone, Debug)]
-pub struct TransformSchema {
+pub(crate) struct SlotLayout {
     pub(crate) inputs:  Vec<SlotSpec>,
     pub(crate) outputs: Vec<SlotSpec>,
 }
 
-impl TransformSchema {
-    pub fn new() -> Self { Self { inputs: vec![], outputs: vec![] } }
-
-    /// Append a single-value input slot of type `T`.
-    pub fn input<T: IncrementalValue>(mut self) -> Self {
-        self.inputs.push(SlotSpec::single::<T>());
-        self
+impl SlotLayout {
+    pub(crate) fn new(inputs: Vec<SlotSpec>, outputs: Vec<SlotSpec>) -> Self {
+        Self { inputs, outputs }
     }
 
-    /// Append a collection input slot (gather) of type `T`, keyed by `K`.
-    pub fn input_collection<T: IncrementalValue, K: KeyExtractor<T>>(mut self) -> Self {
-        self.inputs.push(SlotSpec::collection::<T, K>());
-        self
-    }
-
-    /// Append a single-value output slot of type `T`.
-    pub fn output<T: IncrementalValue>(mut self) -> Self {
-        self.outputs.push(SlotSpec::single::<T>());
-        self
-    }
-
-    /// Append a collection output slot (spread) of type `T`, keyed by `K`.
-    pub fn output_collection<T: IncrementalValue, K: KeyExtractor<T>>(mut self) -> Self {
-        self.outputs.push(SlotSpec::collection::<T, K>());
-        self
-    }
-
-    /// Register all slot types into the registry builder (build phase only).
+    /// Register all slot types into the registry builder.
     pub(crate) fn register_all_into(&self, b: &mut crate::value::ValueTypeRegistryBuilder) {
         for s in self.inputs.iter().chain(self.outputs.iter()) {
             (s.register)(b);
@@ -222,10 +197,63 @@ impl TransformSchema {
     }
 }
 
-impl Default for TransformSchema { fn default() -> Self { Self::new() } }
+// ---------------------------------------------------------------------------
+// TransformRegisterContext — sealed public trait
+// ---------------------------------------------------------------------------
+
+mod sealed { pub trait Sealed {} }
+
+/// DSL for declaring a transform's input/output slot layout.
+///
+/// Passed to [`Transform::register`] once at build time.  Users call the
+/// fluent methods to declare slots; errors are accumulated and surfaced later
+/// by [`EngineBuilder::build`].
+///
+/// This trait is **sealed** — it cannot be implemented outside this crate.
+pub trait TransformRegisterContext: sealed::Sealed {
+    /// Declare a single-value input slot of type `T`.
+    fn input<T: IncrementalValue>(&mut self);
+    /// Declare a collection input slot (gather) of type `T`, keyed by `K`.
+    fn input_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self);
+    /// Declare a single-value output slot of type `T`.
+    fn output<T: IncrementalValue>(&mut self);
+    /// Declare a collection output slot (spread) of type `T`, keyed by `K`.
+    fn output_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self);
+}
+
+/// Private implementation of [`TransformRegisterContext`].
+pub(crate) struct TransformRegistrar {
+    pub(crate) inputs:  Vec<SlotSpec>,
+    pub(crate) outputs: Vec<SlotSpec>,
+}
+
+impl TransformRegistrar {
+    pub(crate) fn new() -> Self { Self { inputs: vec![], outputs: vec![] } }
+
+    pub(crate) fn finish(self) -> SlotLayout {
+        SlotLayout::new(self.inputs, self.outputs)
+    }
+}
+
+impl sealed::Sealed for TransformRegistrar {}
+
+impl TransformRegisterContext for TransformRegistrar {
+    fn input<T: IncrementalValue>(&mut self) {
+        self.inputs.push(SlotSpec::single::<T>());
+    }
+    fn input_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self) {
+        self.inputs.push(SlotSpec::collection::<T, K>());
+    }
+    fn output<T: IncrementalValue>(&mut self) {
+        self.outputs.push(SlotSpec::single::<T>());
+    }
+    fn output_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self) {
+        self.outputs.push(SlotSpec::collection::<T, K>());
+    }
+}
 
 // ---------------------------------------------------------------------------
-// CollectionChange / CollectionInput (public)
+// CollectionChange / CollectionInput (public) — unchanged
 // ---------------------------------------------------------------------------
 
 /// Incremental diff for a collection input slot.
@@ -285,29 +313,25 @@ pub(crate) enum ContextOutput {
 
 /// Per-invocation typed I/O context injected into [`Transform::apply`].
 pub struct TransformContext {
-    /// Single-value input slots; index = slot number.
     pub(crate) single_inputs:      Vec<Option<Box<dyn Any + Send + Sync>>>,
-    /// Collection input slots; index = slot number.
     pub(crate) collection_inputs:  Vec<Option<ErasedCollection>>,
-    /// True iff slot[i] is a collection.
     pub(crate) slot_is_collection: Vec<bool>,
-    /// Output slots, initially None, filled by transform.
     pub(crate) outputs:            Vec<Option<ContextOutput>>,
-    pub(crate) schema:             Arc<TransformSchema>,
+    pub(crate) layout:             Arc<SlotLayout>,
     pub(crate) registry:           Arc<crate::value::ValueTypeRegistry>,
 }
 
 impl TransformContext {
-    pub(crate) fn new(schema: Arc<TransformSchema>, registry: Arc<crate::value::ValueTypeRegistry>) -> Self {
-        let n_in  = schema.inputs.len();
-        let n_out = schema.outputs.len();
-        let slot_is_collection = schema.inputs.iter().map(|s| s.is_col).collect();
+    pub(crate) fn new(layout: Arc<SlotLayout>, registry: Arc<crate::value::ValueTypeRegistry>) -> Self {
+        let n_in  = layout.inputs.len();
+        let n_out = layout.outputs.len();
+        let slot_is_collection = layout.inputs.iter().map(|s| s.is_col).collect();
         Self {
             single_inputs:      (0..n_in).map(|_| None).collect(),
             collection_inputs:  (0..n_in).map(|_| None).collect(),
             slot_is_collection,
             outputs:            (0..n_out).map(|_| None).collect(),
-            schema,
+            layout,
             registry,
         }
     }
@@ -370,7 +394,7 @@ impl TransformContext {
         if slot >= self.outputs.len() {
             return Err(TransformError::new(format!("output slot {slot}: out of range")));
         }
-        let spec = &self.schema.outputs[slot];
+        let spec = &self.layout.outputs[slot];
         if spec.is_col {
             return Err(TransformError::new(format!(
                 "output slot {slot}: is collection — use output_collection()"
@@ -398,7 +422,7 @@ impl TransformContext {
         if slot >= self.outputs.len() {
             return Err(TransformError::new(format!("output slot {slot}: out of range")));
         }
-        let spec = &self.schema.outputs[slot];
+        let spec = &self.layout.outputs[slot];
         if !spec.is_col {
             return Err(TransformError::new(format!(
                 "output slot {slot}: not collection — use output()"
@@ -431,8 +455,9 @@ impl TransformContext {
 
 #[async_trait]
 pub trait Transform: Send + Sync + 'static {
-    /// Declare the slot layout.  Called as `MyTransform::schema()`.
-    fn schema() -> TransformSchema where Self: Sized;
+    /// Declare this transform's slot layout.
+    /// Called once at build time; use `ctx.input::<T>()` etc. to declare slots.
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized;
 
     /// Execute one invocation.  Use `?` to propagate `TransformError`.
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError>;
@@ -443,8 +468,6 @@ pub trait Transform: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 /// SAFETY wrapper to move a raw pointer across the Send boundary.
-/// The pointer is stored as a `usize` to avoid rustc's raw-pointer Send check.
-/// Users MUST ensure the pointed-to value outlives any future that uses it.
 struct SendablePtr(usize);
 unsafe impl Send for SendablePtr {}
 
@@ -459,15 +482,15 @@ type ApplyFn = Arc<
     + Send + Sync,
 >;
 
-/// Object-safe wrapper holding a boxed `Transform` instance + its schema.
+/// Object-safe wrapper holding a boxed `Transform` instance + its layout.
 #[derive(Clone)]
 pub(crate) struct ErasedTransform {
-    pub(crate) schema:    Arc<TransformSchema>,
+    pub(crate) schema:    Arc<SlotLayout>,
     pub(crate) apply_fn:  ApplyFn,
 }
 
 impl ErasedTransform {
-    pub(crate) fn new<T: Transform>(schema: TransformSchema, instance: T) -> Self {
+    pub(crate) fn new<T: Transform>(layout: SlotLayout, instance: T) -> Self {
         let instance = Arc::new(instance);
         let apply_fn: ApplyFn = Arc::new(move |ctx: &mut TransformContext| {
             let inst = Arc::clone(&instance);
@@ -478,7 +501,7 @@ impl ErasedTransform {
                 inst.apply(ctx_ref).await
             })
         });
-        Self { schema: Arc::new(schema), apply_fn }
+        Self { schema: Arc::new(layout), apply_fn }
     }
 
     pub(crate) async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {

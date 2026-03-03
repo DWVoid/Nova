@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 
 use nova_incremental::{
-    Transform, TransformContext, TransformSchema, TransformError,
+    Transform, TransformContext, TransformRegisterContext, TransformError,
     KeyExtractor,
 };
 
@@ -112,10 +112,9 @@ pub struct ExpandTransform;
 
 #[async_trait]
 impl Transform for ExpandTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input::<ProjectDescriptor>()
-            .output_collection::<FileStat, FileStatByPath>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<ProjectDescriptor>();
+        ctx.output_collection::<FileStat, FileStatByPath>();
     }
 
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
@@ -133,10 +132,9 @@ pub struct LoadTransform(pub Arc<dyn FileAccess>);
 
 #[async_trait]
 impl Transform for LoadTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input::<FileStat>()
-            .output::<FileContent>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<FileStat>();
+        ctx.output::<FileContent>();
     }
 
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
@@ -158,10 +156,9 @@ pub struct LexTransform;
 
 #[async_trait]
 impl Transform for LexTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input::<FileContent>()
-            .output::<LexOutput>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<FileContent>();
+        ctx.output::<LexOutput>();
     }
 
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
@@ -192,10 +189,9 @@ pub struct ParseTransform;
 
 #[async_trait]
 impl Transform for ParseTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input::<LexOutput>()
-            .output::<ParseOutput>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<LexOutput>();
+        ctx.output::<ParseOutput>();
     }
 
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
@@ -222,10 +218,9 @@ pub struct CollectTransform;
 
 #[async_trait]
 impl Transform for CollectTransform {
-    fn schema() -> TransformSchema where Self: Sized {
-        TransformSchema::new()
-            .input_collection::<ParseOutput, ParseOutputByPath>()
-            .output::<String>()
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input_collection::<ParseOutput, ParseOutputByPath>();
+        ctx.output::<String>();
     }
 
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {

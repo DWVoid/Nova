@@ -1,31 +1,17 @@
 //! `nova-incremental` — incremental computation engine for the Nova compiler.
 //!
-//! ## Public API
+//! ## Public API (unchanged from user perspective)
 //!
 //! ```text
-//! Engine          — sealed runtime (update / get / checkpoint / commit / discard)
-//! EngineBuilder   — static topology declaration
-//! EngineError     — error type from engine operations
-//! UpdateReport    — summary of one update() call
-//! Storage         — trait: implement to supply a custom backend
-//! StorageError    — error type from storage operations
-//! MemoryStorage   — in-memory implementation (for tests / ephemeral use)
-//! Transform       — trait: implement to define a computation step
-//! TransformContext — per-invocation I/O (input() / output() / etc.)
-//! TransformRegisterContext — slot declaration DSL (passed to Transform::register)
-//! TransformError  — error type from transform execution
-//! IncrementalValue — auto-impl marker for types that flow through the graph
-//! KeyExtractor    — derives stable u64 key from a collection element
-//! CollectionInput — typed view of a gathered collection input
-//! CollectionChange — incremental diff for a collection
-//! Uuid            — re-exported for node identity
+//! Engine, EngineBuilder, EngineError
+//! UpdateReport
+//! Storage, StorageError, StorageKey, StorageValue, MemoryStorage
+//! Transform, TransformContext, TransformRegisterContext, TransformError
+//! IncrementalValue, KeyExtractor, CollectionInput, CollectionChange
+//! Uuid
 //! ```
-//!
-//! All internal modules are `pub(crate)` only.
 
 mod engine;
-mod execution_context;
-mod graph;
 mod loader;
 mod node_id;
 mod scheduler;

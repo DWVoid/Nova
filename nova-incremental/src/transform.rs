@@ -47,7 +47,7 @@ pub trait KeyExtractor<T>: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 /// Error produced during transform execution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TransformError {
     pub message: String,
     pub source: Option<String>,

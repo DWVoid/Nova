@@ -140,6 +140,15 @@ impl StorageKey {
         for i in 0..8 { bytes[8 + i] ^= ek[i]; }
         Self(Uuid::from_bytes(bytes))
     }
+    /// Key for the serialised WorkState snapshot.
+    pub(crate) fn state() -> Self {
+        // Fixed UUID: "nova-incremental workstate snapshot" (v5 of DNS namespace)
+        const STATE_UUID: Uuid = Uuid::from_bytes([
+            0x9a, 0x3f, 0x1c, 0x2e, 0x4b, 0x5d, 0x6e, 0x7f,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        ]);
+        Self(STATE_UUID)
+    }
 }
 
 /// Raw bytes stored in the backend.

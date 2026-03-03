@@ -1,18 +1,18 @@
-//! `EngineBuilder` — static topology declaration + `Engine` — sealed runtime.
+//! `EngineBuilder` — static topology declaration + `Engine` — thin orchestration.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::execution_context::ExecutionContext;
 use crate::loader::Loader;
 use crate::node_id::NodeId;
 use crate::scheduler::{Scheduler, UpdateReport};
-use crate::storage::{Storage, StorageError};
+use crate::storage::{Storage, StorageError, StorageKey, encode, decode};
 use crate::topology::{Topology, TopologyBuilder, TopologyError, Endpoint};
 use crate::transform::{Transform, ErasedTransform, IncrementalValue, TransformRegistrar};
-use crate::value::{ValueTypeRegistryBuilder, hash_value};
+use crate::value::{ValueTypeRegistryBuilder, ValueTypeRegistry, hash_value};
+use crate::workstate::{WorkState, StateSnapshot};
 
 // ---------------------------------------------------------------------------
 // EngineError (public)
@@ -58,8 +58,6 @@ enum PendingEdge {
     SlotToSlot { from: Uuid, out_slot: usize, to: Uuid, in_slot: usize },
 }
 
-/// A deferred transform constructor: takes a `ValueTypeRegistryBuilder`, registers
-/// the transform's types into it, and returns a fully built [`ErasedTransform`].
 type PendingTransform = Box<dyn FnOnce(&mut ValueTypeRegistryBuilder) -> ErasedTransform + Send>;
 
 // ---------------------------------------------------------------------------
@@ -152,7 +150,7 @@ impl EngineBuilder {
             return Err(EngineError::new(self.registration_errors.join("; ")));
         }
 
-        // Resolve pending transforms: register types + produce ErasedTransform.
+        // Resolve pending transforms.
         let mut reg_builder = ValueTypeRegistryBuilder::new();
         let transforms: HashMap<String, ErasedTransform> = self.pending_transforms
             .into_iter()
@@ -160,18 +158,13 @@ impl EngineBuilder {
             .collect();
         let registry = Arc::new(reg_builder.freeze());
 
-        // Build the topology.
+        // Build topology.
         let mut topo_builder = TopologyBuilder::new();
         let mut uuid_to_node: HashMap<Uuid, NodeId> = HashMap::new();
 
         for node in &self.nodes {
             match node {
-                PendingNode::Input { uuid } => {
-                    let nid = NodeId::from_uuid(*uuid);
-                    uuid_to_node.insert(*uuid, nid);
-                    topo_builder.add_io_node(nid)?;
-                }
-                PendingNode::Output { uuid } => {
+                PendingNode::Input  { uuid } | PendingNode::Output { uuid } => {
                     let nid = NodeId::from_uuid(*uuid);
                     uuid_to_node.insert(*uuid, nid);
                     topo_builder.add_io_node(nid)?;
@@ -180,9 +173,7 @@ impl EngineBuilder {
                     let nid = NodeId::from_uuid(*uuid);
                     uuid_to_node.insert(*uuid, nid);
                     let erased = transforms.get(key.as_str())
-                        .ok_or_else(|| EngineError::new(format!(
-                            "transform key {key:?} not registered"
-                        )))?
+                        .ok_or_else(|| EngineError::new(format!("transform key {key:?} not registered")))?
                         .clone();
                     topo_builder.add_transform_node(nid, erased)?;
                 }
@@ -193,33 +184,28 @@ impl EngineBuilder {
             uuid_to_node.get(u).copied()
                 .ok_or_else(|| EngineError::new(format!("node {u} not declared")))
         };
-
         let out_is_col = |uuid: &Uuid, slot: usize| -> bool {
             self.uuid_to_key.get(uuid)
                 .and_then(|k| transforms.get(k.as_str()))
                 .and_then(|e| e.schema.outputs.get(slot))
-                .map(|s| s.is_col)
-                .unwrap_or(false)
+                .map(|s| s.is_col).unwrap_or(false)
         };
         let in_is_col = |uuid: &Uuid, slot: usize| -> bool {
             self.uuid_to_key.get(uuid)
                 .and_then(|k| transforms.get(k.as_str()))
                 .and_then(|e| e.schema.inputs.get(slot))
-                .map(|s| s.is_col)
-                .unwrap_or(false)
+                .map(|s| s.is_col).unwrap_or(false)
         };
 
-        // Compute fan-out set (Collection→Single crossing propagation).
-        let mut fanout: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        // Fan-out propagation.
+        let mut fanout: std::collections::HashSet<Uuid> = Default::default();
         let mut changed = true;
         while changed {
             changed = false;
             for edge in &self.edges {
                 if let PendingEdge::SlotToSlot { from, out_slot, to, in_slot } = edge {
                     let is_c = out_is_col(from, *out_slot) || fanout.contains(from);
-                    if is_c && !in_is_col(to, *in_slot) && fanout.insert(*to) {
-                        changed = true;
-                    }
+                    if is_c && !in_is_col(to, *in_slot) && fanout.insert(*to) { changed = true; }
                 }
             }
         }
@@ -256,48 +242,25 @@ impl EngineBuilder {
         }
 
         let topology = Arc::new(topo_builder.freeze(Arc::clone(&registry)));
+        let loader   = Arc::new(Loader::new(Arc::clone(&storage), Arc::clone(&registry)));
+        let workstate = WorkState::new();
 
-        let loader  = Arc::new(Loader::new(Arc::clone(&storage), Arc::clone(&registry)));
-        let mut exec = ExecutionContext::new(Arc::clone(&loader), Arc::clone(&registry));
+        // Attempt warm-start: restore state snapshot from storage.
+        let warmed = try_restore_snapshot(&storage, &workstate, &topology, &registry).await;
 
-        // Initialise WorkState edge values.
-        for (eid, edge) in &topology.edges {
-            exec.init_edge(*eid, edge.is_collection);
+        if !warmed {
+            workstate.init_from_topology(&topology);
         }
-
-        // Mark all transform nodes dirty initially.
-        exec.workstate.mark_all_dirty(topology.transform_nodes.keys());
-
-        // Warm start: restore cached values.
-        let input_uuids: std::collections::HashSet<Uuid> = self.nodes.iter()
-            .filter_map(|n| if let PendingNode::Input { uuid } = n { Some(*uuid) } else { None })
-            .collect();
-
-        for (uuid, &nid) in &uuid_to_node {
-            if let Ok(Some((v, h))) = loader.get(nid).await {
-                if input_uuids.contains(uuid) {
-                    exec.preload_input_value(&topology, nid, v, h);
-                } else {
-                    // Write output value onto the incoming edge of the IoNode.
-                    if let Some(adj) = topology.io_adjacency(nid) {
-                        if let Some(in_eid) = adj.incoming {
-                            exec.workstate.preload_single(in_eid, v, h);
-                        }
-                    }
-                }
-            }
-        }
-
-        // On warm start: mark all transforms clean if we restored any output.
-        exec.try_mark_all_clean_on_warm_start(&topology);
 
         let mut sched = Scheduler::new();
         sched.cycle_limit = self.cycle_limit;
 
         Ok(Engine {
             topology,
-            exec: Arc::new(Mutex::new(exec)),
+            workstate: Arc::new(Mutex::new(workstate)),
+            loader,
             storage,
+            registry,
             sched: Arc::new(sched),
             checkpoint_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
@@ -307,93 +270,117 @@ impl EngineBuilder {
 impl Default for EngineBuilder { fn default() -> Self { Self::new() } }
 
 // ---------------------------------------------------------------------------
+// Warm-start helper
+// ---------------------------------------------------------------------------
+
+async fn try_restore_snapshot(
+    storage:   &Arc<dyn Storage>,
+    workstate: &WorkState,
+    topology:  &Arc<Topology>,
+    registry:  &Arc<ValueTypeRegistry>,
+) -> bool {
+    let key = StorageKey::state();
+    let bytes = match storage.get(&key).await {
+        Ok(Some(sv)) => sv.0,
+        _ => return false,
+    };
+    let snapshot: StateSnapshot = match decode(&bytes) {
+        Ok(s)  => s,
+        Err(_) => return false,
+    };
+    workstate.restore(topology, snapshot, registry);
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Engine (public)
 // ---------------------------------------------------------------------------
 
 pub struct Engine {
-    topology:          Arc<Topology>,
-    exec:              Arc<Mutex<ExecutionContext>>,
-    storage:           Arc<dyn Storage>,
-    sched:             Arc<Scheduler>,
-    checkpoint_active: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) topology:          Arc<Topology>,
+    pub(crate) workstate:         Arc<Mutex<WorkState>>,
+    pub(crate) loader:            Arc<Loader>,
+    pub(crate) storage:           Arc<dyn Storage>,
+    pub(crate) registry:          Arc<ValueTypeRegistry>,
+    pub(crate) sched:             Arc<Scheduler>,
+    pub(crate) checkpoint_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Engine {
-    /// Update the value of an input node.  No-op if hash is unchanged.
+    /// Write a new value to an input node.
     pub fn set_input<T: IncrementalValue>(&self, id: Uuid, value: T) -> Result<(), EngineError> {
-        let nid = NodeId::from_uuid(id);
+        let nid      = NodeId::from_uuid(id);
         let registry = &self.topology.registry;
         let v = registry.make_value(value).map_err(|e| EngineError::new(e.message))?;
         let h = hash_value(&v, registry);
-        // Cache for warm start (synchronous write to in-memory cache).
-        // Note: exec lock is needed to update WorkState.
-        // We use try_lock since set_input is sync; callers shouldn't call during update.
-        if let Ok(mut exec) = self.exec.try_lock() {
-            exec.loader.cache(nid, v.clone(), h);
-            exec.set_input_value(&self.topology, nid, v, h);
-        }
+        self.loader.cache(nid, v.clone(), h);
+        let ws = self.workstate.try_lock()
+            .expect("set_input called while update is running");
+        ws.set_input(&self.topology, nid, v, h);
         Ok(())
     }
 
-    /// Run one incremental update cycle.
+    /// Run one or more incremental update passes until convergence.
     pub async fn update(&self) -> UpdateReport {
         let cycle_limit = self.sched.cycle_limit;
         let mut report  = UpdateReport::default();
         let mut iteration = 0u32;
 
         loop {
-            let task_graph = {
-                let mut exec = self.exec.lock().await;
-                exec.propagate_removals(&self.topology);
-                exec.build_task_graph(&self.topology)
-            };
+            // Run one pass — acquire mutex, do sync work, then release before async work.
+            let (nothing_happened, pass_result) = {
+                let ws = self.workstate.lock().await;
+                ws.propagate_removals(&self.topology);
+                // run_pass is async (spawns tasks, awaits scheduler join).
+                // We must NOT hold the tokio Mutex across the await — but WorkState.inner
+                // is a std::sync::RwLock so it won't be held across .await points.
+                // The tokio::Mutex guard is held here but that is fine since run_pass
+                // does not re-acquire it.
+                let result = ws.run_pass(
+                    &self.topology,
+                    &self.loader,
+                    &self.registry,
+                    &self.sched,
+                ).await;
+                let nothing_happened = result.nothing_happened;
+                (nothing_happened, result)
+            }; // mutex guard dropped here
 
-            if task_graph.is_empty() { break; }
+            report.transforms_evaluated        += pass_result.transforms_evaluated;
+            report.transforms_changed          += pass_result.transforms_changed;
+            report.collection_elements_changed += pass_result.coll_changed;
+            report.errors.extend(pass_result.errors);
 
+            if nothing_happened { break; }
+
+            iteration += 1;
             if iteration >= cycle_limit {
-                // Collect the remaining dirty node ids as cycle-limit violators.
-                let exec = self.exec.lock().await;
+                let ws2    = self.workstate.lock().await;
+                let inner  = ws2.inner.read().unwrap();
                 for &id in self.topology.topo_order() {
-                    if exec.is_dirty(id) {
+                    if inner.is_dirty(id) {
                         report.cycle_limit_exceeded.push(id.as_uuid());
                     }
                 }
                 break;
             }
-
-            let n_tasks = task_graph.len();
-            let results = self.sched.run(task_graph).await;
-
-            let (changed, coll_changed, errors) = {
-                let mut exec = self.exec.lock().await;
-                exec.apply_results(&self.topology, results).await
-            };
-
-            report.transforms_evaluated        += n_tasks;
-            report.transforms_changed          += changed;
-            report.collection_elements_changed += coll_changed;
-            report.errors.extend(errors);
-            iteration += 1;
         }
 
         report
     }
 
-    /// Read the current value of a node.
+    /// Read the current output value for a node.
     pub async fn get<T: IncrementalValue>(&self, id: Uuid) -> Result<Option<T>, EngineError> {
         let nid      = NodeId::from_uuid(id);
         let registry = &self.topology.registry;
-        {
-            let exec = self.exec.lock().await;
-            if let Some((v, _)) = exec.peek_output(&self.topology, nid) {
-                return registry.downcast_value::<T>(&v)
-                    .map(Some)
-                    .map_err(|e| EngineError::new(e.message));
-            }
+        let ws = self.workstate.lock().await;
+        if let Some((v, _)) = ws.peek_output(&self.topology, nid) {
+            return registry.downcast_value::<T>(&v)
+                .map(Some)
+                .map_err(|e| EngineError::new(e.message));
         }
-        // Fall back to storage.
-        let exec = self.exec.lock().await;
-        match exec.loader.get(nid).await {
+        drop(ws);
+        match self.loader.get(nid).await {
             Ok(Some((v, _))) => registry.downcast_value::<T>(&v)
                 .map(Some).map_err(|e| EngineError::new(e.message)),
             Ok(None) => Ok(None),
@@ -412,8 +399,14 @@ impl Engine {
         if !self.checkpoint_active.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(EngineError::new("no active checkpoint to commit"));
         }
-        let exec = self.exec.lock().await;
-        exec.loader.flush_all().await.map_err(EngineError::from)?;
+        // Flush loader cache.
+        self.loader.flush_all().await.map_err(EngineError::from)?;
+        // Persist workstate snapshot.
+        let ws       = self.workstate.lock().await;
+        let snapshot = ws.snapshot(&self.topology, &self.registry);
+        let bytes    = encode(&snapshot).map_err(EngineError::from)?;
+        self.storage.set(&StorageKey::state(), crate::storage::StorageValue::new(bytes))
+            .await.map_err(EngineError::from)?;
         self.storage.commit().await.map_err(EngineError::from)
     }
 
@@ -421,11 +414,14 @@ impl Engine {
         if !self.checkpoint_active.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(EngineError::new("no active checkpoint to discard"));
         }
-        {
-            let mut exec = self.exec.lock().await;
-            exec.loader.evict_all();
-            exec.clear_values_and_mark_all_dirty(&self.topology);
+        self.storage.discard().await.map_err(EngineError::from)?;
+        self.loader.evict_all();
+        // Restore state from storage (which rolled back to the checkpoint).
+        let ws = self.workstate.lock().await;
+        let warmed = try_restore_snapshot(&self.storage, &ws, &self.topology, &self.registry).await;
+        if !warmed {
+            ws.clear_and_mark_all_dirty(&self.topology);
         }
-        self.storage.discard().await.map_err(EngineError::from)
+        Ok(())
     }
 }

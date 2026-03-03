@@ -5,13 +5,14 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::graph::{Graph, Endpoint};
+use crate::execution_context::ExecutionContext;
 use crate::loader::Loader;
 use crate::node_id::NodeId;
 use crate::scheduler::{Scheduler, UpdateReport};
 use crate::storage::{Storage, StorageError};
+use crate::topology::{Topology, TopologyBuilder, TopologyError, Endpoint};
 use crate::transform::{Transform, ErasedTransform, IncrementalValue, TransformRegistrar};
-use crate::value::{ValueTypeRegistry, ValueTypeRegistryBuilder, hash_value};
+use crate::value::{ValueTypeRegistryBuilder, hash_value};
 
 // ---------------------------------------------------------------------------
 // EngineError (public)
@@ -33,8 +34,8 @@ impl std::fmt::Display for EngineError {
 }
 impl std::error::Error for EngineError {}
 
-impl From<crate::graph::GraphError> for EngineError {
-    fn from(e: crate::graph::GraphError) -> Self { Self::new(e.to_string()) }
+impl From<TopologyError> for EngineError {
+    fn from(e: TopologyError) -> Self { Self::new(e.to_string()) }
 }
 impl From<StorageError> for EngineError {
     fn from(e: StorageError) -> Self { Self::new(e.to_string()) }
@@ -66,15 +67,12 @@ type PendingTransform = Box<dyn FnOnce(&mut ValueTypeRegistryBuilder) -> ErasedT
 // ---------------------------------------------------------------------------
 
 pub struct EngineBuilder {
-    nodes:                Vec<PendingNode>,
-    edges:                Vec<PendingEdge>,
-    /// Deferred transform constructors — resolved during `build()`.
-    pending_transforms:   HashMap<String, PendingTransform>,
-    /// Maps transform UUID → registered key, for schema lookup during edge creation.
-    uuid_to_key:          HashMap<Uuid, String>,
-    cycle_limit:          u32,
-    /// Accumulated errors from `register()` calls — surfaced by `build()`.
-    registration_errors:  Vec<String>,
+    nodes:               Vec<PendingNode>,
+    edges:               Vec<PendingEdge>,
+    pending_transforms:  HashMap<String, PendingTransform>,
+    uuid_to_key:         HashMap<Uuid, String>,
+    cycle_limit:         u32,
+    registration_errors: Vec<String>,
 }
 
 impl EngineBuilder {
@@ -89,20 +87,13 @@ impl EngineBuilder {
         }
     }
 
-    /// Register a transform type under `key`.
-    ///
-    /// Calls `T::register` to declare slot types.  Type registration and
-    /// dispatch table construction happen during [`build`](Self::build).
     pub fn register<T: Transform>(mut self, key: &str, instance: T) -> Self {
         if self.pending_transforms.contains_key(key) {
-            self.registration_errors.push(format!(
-                "duplicate transform key {:?}", key
-            ));
+            self.registration_errors.push(format!("duplicate transform key {:?}", key));
             return self;
         }
         let mut registrar = TransformRegistrar::new();
         T::register(&mut registrar);
-
         let pending: PendingTransform = Box::new(move |builder: &mut ValueTypeRegistryBuilder| {
             let (layout, dispatch) = registrar.finish_into(builder);
             ErasedTransform::new(layout, dispatch, instance)
@@ -157,23 +148,20 @@ impl EngineBuilder {
     pub fn cycle_limit(mut self, limit: u32) -> Self { self.cycle_limit = limit; self }
 
     pub async fn build(self, storage: Arc<dyn Storage>) -> Result<Engine, EngineError> {
-        // Surface any errors accumulated during register() calls.
         if !self.registration_errors.is_empty() {
-            return Err(EngineError::new(
-                self.registration_errors.join("; ")
-            ));
+            return Err(EngineError::new(self.registration_errors.join("; ")));
         }
 
-        // Build phase: resolve all pending transforms — each one registers its
-        // slot types into the builder and produces an ErasedTransform.
+        // Resolve pending transforms: register types + produce ErasedTransform.
         let mut reg_builder = ValueTypeRegistryBuilder::new();
         let transforms: HashMap<String, ErasedTransform> = self.pending_transforms
             .into_iter()
             .map(|(key, make)| (key, make(&mut reg_builder)))
             .collect();
         let registry = Arc::new(reg_builder.freeze());
-        let graph    = Arc::new(Graph::new());
 
+        // Build the topology.
+        let mut topo_builder = TopologyBuilder::new();
         let mut uuid_to_node: HashMap<Uuid, NodeId> = HashMap::new();
 
         for node in &self.nodes {
@@ -181,33 +169,31 @@ impl EngineBuilder {
                 PendingNode::Input { uuid } => {
                     let nid = NodeId::from_uuid(*uuid);
                     uuid_to_node.insert(*uuid, nid);
-                    graph.add_input_node(nid)?;
+                    topo_builder.add_io_node(nid)?;
                 }
                 PendingNode::Output { uuid } => {
                     let nid = NodeId::from_uuid(*uuid);
                     uuid_to_node.insert(*uuid, nid);
-                    graph.add_output_node(nid)?;
+                    topo_builder.add_io_node(nid)?;
                 }
                 PendingNode::Transform { uuid, key } => {
                     let nid = NodeId::from_uuid(*uuid);
                     uuid_to_node.insert(*uuid, nid);
                     let erased = transforms.get(key.as_str())
                         .ok_or_else(|| EngineError::new(format!(
-                            "transform key {key:?} not registered (declare with builder.register(...))"
+                            "transform key {key:?} not registered"
                         )))?
                         .clone();
-                    graph.add_transform_node(nid, key.clone(), erased)?;
+                    topo_builder.add_transform_node(nid, erased)?;
                 }
             }
         }
 
-        // Helper: resolve UUID → NodeId.
         let lookup = |u: &Uuid| -> Result<NodeId, EngineError> {
             uuid_to_node.get(u).copied()
                 .ok_or_else(|| EngineError::new(format!("node {u} not declared")))
         };
 
-        // Helper: is output slot `slot` of transform `uuid` a collection?
         let out_is_col = |uuid: &Uuid, slot: usize| -> bool {
             self.uuid_to_key.get(uuid)
                 .and_then(|k| transforms.get(k.as_str()))
@@ -215,8 +201,6 @@ impl EngineBuilder {
                 .map(|s| s.is_col)
                 .unwrap_or(false)
         };
-
-        // Helper: is input slot `slot` of transform `uuid` a collection?
         let in_is_col = |uuid: &Uuid, slot: usize| -> bool {
             self.uuid_to_key.get(uuid)
                 .and_then(|k| transforms.get(k.as_str()))
@@ -225,36 +209,16 @@ impl EngineBuilder {
                 .unwrap_or(false)
         };
 
-        // Compute the set of "fan-out" transforms transitively:
-        // A transform is in fan-out mode if ANY of its input edges carries a collection
-        // BUT its schema declares that slot as Single (not as input_collection).
-        // This is the Collection→Single crossing that causes per-element invocation.
-        //
-        // A transform that declares input_collection IS a gather transform and is NOT
-        // a fan-out transform (it receives the full collection itself).
-        //
-        // Propagation: if transform A is fan-out (outputs per-element collections) and
-        // transform B receives A's output on a Single slot, B is also fan-out.
-        //
-        // Algorithm: iterate edges until the fan-out set stabilises.
-        let mut fanout_transforms: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+        // Compute fan-out set (Collection→Single crossing propagation).
+        let mut fanout: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
         let mut changed = true;
         while changed {
             changed = false;
             for edge in &self.edges {
                 if let PendingEdge::SlotToSlot { from, out_slot, to, in_slot } = edge {
-                    // This edge is collection if:
-                    // (a) the source transform's schema declares collection output, OR
-                    // (b) the source is a fan-out transform (its outputs accumulate as collections).
-                    let is_c = out_is_col(from, *out_slot) || fanout_transforms.contains(from);
-                    if is_c {
-                        // Does 'to' receive this collection on a Single slot?
-                        // (i.e., in_is_col for this slot is false → fan-out)
-                        // OR on an explicitly declared collection slot → gather (NOT fan-out).
-                        if !in_is_col(to, *in_slot) && !fanout_transforms.contains(to) {
-                            fanout_transforms.insert(*to);
-                            changed = true;
-                        }
+                    let is_c = out_is_col(from, *out_slot) || fanout.contains(from);
+                    if is_c && !in_is_col(to, *in_slot) && fanout.insert(*to) {
+                        changed = true;
                     }
                 }
             }
@@ -263,77 +227,78 @@ impl EngineBuilder {
         for edge in &self.edges {
             match edge {
                 PendingEdge::IoToIo { from, to } => {
-                    let f = lookup(from)?;
-                    let t = lookup(to)?;
-                    graph.add_edge(Endpoint::Io(f), Endpoint::Io(t), false)?;
+                    topo_builder.add_edge(Endpoint::Io(lookup(from)?), Endpoint::Io(lookup(to)?), false)?;
                 }
                 PendingEdge::IoToSlot { from, to, slot } => {
-                    let f = lookup(from)?;
-                    let t = lookup(to)?;
-                    graph.add_edge(Endpoint::Io(f),
-                        Endpoint::TransformInput { transform: t, slot: *slot },
-                        in_is_col(to, *slot))?;
+                    topo_builder.add_edge(
+                        Endpoint::Io(lookup(from)?),
+                        Endpoint::TransformInput { transform: lookup(to)?, slot: *slot },
+                        in_is_col(to, *slot),
+                    )?;
                 }
                 PendingEdge::SlotToIo { from, slot, to } => {
-                    let f = lookup(from)?;
-                    let t = lookup(to)?;
-                    // If the source transform is fan-out, its output to an IoNode is also collection.
-                    // (But gather transforms with declared output_collection are handled by out_is_col.)
-                    let is_c = out_is_col(from, *slot) || fanout_transforms.contains(from);
-                    graph.add_edge(
-                        Endpoint::TransformOutput { transform: f, slot: *slot },
-                        Endpoint::Io(t),
-                        is_c)?;
+                    let is_c = out_is_col(from, *slot) || fanout.contains(from);
+                    topo_builder.add_edge(
+                        Endpoint::TransformOutput { transform: lookup(from)?, slot: *slot },
+                        Endpoint::Io(lookup(to)?),
+                        is_c,
+                    )?;
                 }
                 PendingEdge::SlotToSlot { from, out_slot, to, in_slot } => {
-                    let f = lookup(from)?;
-                    let t = lookup(to)?;
-                    // Collection if source declares collection output, source is fan-out,
-                    // OR target explicitly declares collection input.
-                    let is_c = out_is_col(from, *out_slot)
-                        || fanout_transforms.contains(from)
-                        || in_is_col(to, *in_slot);
-                    graph.add_edge(
-                        Endpoint::TransformOutput { transform: f, slot: *out_slot },
-                        Endpoint::TransformInput  { transform: t, slot: *in_slot  },
-                        is_c)?;
+                    let is_c = out_is_col(from, *out_slot) || fanout.contains(from) || in_is_col(to, *in_slot);
+                    topo_builder.add_edge(
+                        Endpoint::TransformOutput { transform: lookup(from)?, slot: *out_slot },
+                        Endpoint::TransformInput  { transform: lookup(to)?,   slot: *in_slot  },
+                        is_c,
+                    )?;
                 }
             }
         }
 
-        let loader = Arc::new(Loader::new(Arc::clone(&storage), Arc::clone(&registry)));
-        let mut sched = Scheduler::new(
-            Arc::clone(&graph), Arc::clone(&loader), Arc::clone(&registry),
-        );
-        sched.set_cycle_limit(self.cycle_limit);
+        let topology = Arc::new(topo_builder.freeze(Arc::clone(&registry)));
+
+        let loader  = Arc::new(Loader::new(Arc::clone(&storage), Arc::clone(&registry)));
+        let mut exec = ExecutionContext::new(Arc::clone(&loader), Arc::clone(&registry));
+
+        // Initialise WorkState edge values.
+        for (eid, edge) in &topology.edges {
+            exec.init_edge(*eid, edge.is_collection);
+        }
+
+        // Mark all transform nodes dirty initially.
+        exec.workstate.mark_all_dirty(topology.transform_nodes.keys());
 
         // Warm start: restore cached values.
-        // - Input nodes: use preload_input (no dirty marking) so set_input can hash-compare.
-        // - Output/intermediate nodes: use store_output_on_node.
         let input_uuids: std::collections::HashSet<Uuid> = self.nodes.iter()
             .filter_map(|n| if let PendingNode::Input { uuid } = n { Some(*uuid) } else { None })
             .collect();
 
-        for (uuid, nid) in &uuid_to_node {
-            if let Ok(Some((v, h))) = loader.get(*nid).await {
+        for (uuid, &nid) in &uuid_to_node {
+            if let Ok(Some((v, h))) = loader.get(nid).await {
                 if input_uuids.contains(uuid) {
-                    graph.preload_input(*nid, v, h);
+                    exec.preload_input_value(&topology, nid, v, h);
                 } else {
-                    graph.store_output_on_node(*nid, v, h);
+                    // Write output value onto the incoming edge of the IoNode.
+                    if let Some(adj) = topology.io_adjacency(nid) {
+                        if let Some(in_eid) = adj.incoming {
+                            exec.workstate.preload_single(in_eid, v, h);
+                        }
+                    }
                 }
             }
         }
 
-        // On warm start, if we restored any cached values, mark all transforms Clean.
-        // They will be re-dirtied by set_input() if any input hash changed.
-        graph.mark_all_clean_if_warmed();
+        // On warm start: mark all transforms clean if we restored any output.
+        exec.try_mark_all_clean_on_warm_start(&topology);
+
+        let mut sched = Scheduler::new();
+        sched.cycle_limit = self.cycle_limit;
 
         Ok(Engine {
-            graph,
-            loader,
-            scheduler: Arc::new(Mutex::new(sched)),
+            topology,
+            exec: Arc::new(Mutex::new(exec)),
             storage,
-            registry,
+            sched: Arc::new(sched),
             checkpoint_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
@@ -346,11 +311,10 @@ impl Default for EngineBuilder { fn default() -> Self { Self::new() } }
 // ---------------------------------------------------------------------------
 
 pub struct Engine {
-    graph:             Arc<Graph>,
-    loader:            Arc<Loader>,
-    scheduler:         Arc<Mutex<Scheduler>>,
+    topology:          Arc<Topology>,
+    exec:              Arc<Mutex<ExecutionContext>>,
     storage:           Arc<dyn Storage>,
-    registry:          Arc<ValueTypeRegistry>,
+    sched:             Arc<Scheduler>,
     checkpoint_active: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -358,39 +322,85 @@ impl Engine {
     /// Update the value of an input node.  No-op if hash is unchanged.
     pub fn set_input<T: IncrementalValue>(&self, id: Uuid, value: T) -> Result<(), EngineError> {
         let nid = NodeId::from_uuid(id);
-        let v = self.registry.make_value(value)
-            .map_err(|e| EngineError::new(e.message))?;
-        let h = hash_value(&v, &self.registry);
-        // Cache the input value so warm start can restore it next session.
-        self.loader.cache(nid, v.clone(), h);
-        self.graph.set_input(nid, v, h);
+        let registry = &self.topology.registry;
+        let v = registry.make_value(value).map_err(|e| EngineError::new(e.message))?;
+        let h = hash_value(&v, registry);
+        // Cache for warm start (synchronous write to in-memory cache).
+        // Note: exec lock is needed to update WorkState.
+        // We use try_lock since set_input is sync; callers shouldn't call during update.
+        if let Ok(mut exec) = self.exec.try_lock() {
+            exec.loader.cache(nid, v.clone(), h);
+            exec.set_input_value(&self.topology, nid, v, h);
+        }
         Ok(())
     }
 
     /// Run one incremental update cycle.
     pub async fn update(&self) -> UpdateReport {
-        self.scheduler.lock().await.run_update().await
+        let cycle_limit = self.sched.cycle_limit;
+        let mut report  = UpdateReport::default();
+        let mut iteration = 0u32;
+
+        loop {
+            let task_graph = {
+                let mut exec = self.exec.lock().await;
+                exec.propagate_removals(&self.topology);
+                exec.build_task_graph(&self.topology)
+            };
+
+            if task_graph.is_empty() { break; }
+
+            if iteration >= cycle_limit {
+                // Collect the remaining dirty node ids as cycle-limit violators.
+                let exec = self.exec.lock().await;
+                for &id in self.topology.topo_order() {
+                    if exec.is_dirty(id) {
+                        report.cycle_limit_exceeded.push(id.as_uuid());
+                    }
+                }
+                break;
+            }
+
+            let n_tasks = task_graph.len();
+            let results = self.sched.run(task_graph).await;
+
+            let (changed, coll_changed, errors) = {
+                let mut exec = self.exec.lock().await;
+                exec.apply_results(&self.topology, results).await
+            };
+
+            report.transforms_evaluated        += n_tasks;
+            report.transforms_changed          += changed;
+            report.collection_elements_changed += coll_changed;
+            report.errors.extend(errors);
+            iteration += 1;
+        }
+
+        report
     }
 
     /// Read the current value of a node.
     pub async fn get<T: IncrementalValue>(&self, id: Uuid) -> Result<Option<T>, EngineError> {
-        let nid = NodeId::from_uuid(id);
-        // Live output node value.
-        if let Some((v, _)) = self.graph.peek_output(nid) {
-            return self.registry.downcast_value::<T>(&v)
-                .map(Some)
-                .map_err(|e| EngineError::new(e.message));
+        let nid      = NodeId::from_uuid(id);
+        let registry = &self.topology.registry;
+        {
+            let exec = self.exec.lock().await;
+            if let Some((v, _)) = exec.peek_output(&self.topology, nid) {
+                return registry.downcast_value::<T>(&v)
+                    .map(Some)
+                    .map_err(|e| EngineError::new(e.message));
+            }
         }
-        // Storage cache.
-        match self.loader.get(nid).await {
-            Ok(Some((v, _))) => self.registry.downcast_value::<T>(&v)
+        // Fall back to storage.
+        let exec = self.exec.lock().await;
+        match exec.loader.get(nid).await {
+            Ok(Some((v, _))) => registry.downcast_value::<T>(&v)
                 .map(Some).map_err(|e| EngineError::new(e.message)),
             Ok(None) => Ok(None),
             Err(e)   => Err(EngineError::from(e)),
         }
     }
 
-    /// Begin a checkpoint.
     pub async fn checkpoint(&self) -> Result<(), EngineError> {
         if self.checkpoint_active.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return Err(EngineError::new("checkpoint already active"));
@@ -398,25 +408,24 @@ impl Engine {
         self.storage.checkpoint().await.map_err(EngineError::from)
     }
 
-    /// Commit all writes since `checkpoint()`.
     pub async fn commit(&self) -> Result<(), EngineError> {
         if !self.checkpoint_active.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(EngineError::new("no active checkpoint to commit"));
         }
-        self.loader.flush_all().await.map_err(EngineError::from)?;
+        let exec = self.exec.lock().await;
+        exec.loader.flush_all().await.map_err(EngineError::from)?;
         self.storage.commit().await.map_err(EngineError::from)
     }
 
-    /// Discard all writes since `checkpoint()`.
     pub async fn discard(&self) -> Result<(), EngineError> {
         if !self.checkpoint_active.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return Err(EngineError::new("no active checkpoint to discard"));
         }
-        // Evict the in-memory loader cache so get() falls through to storage.
-        self.loader.evict_all();
-        // Clear in-memory graph edge values so peek_output() returns None,
-        // forcing get() to consult storage (which is now rolled back).
-        self.graph.clear_io_values();
+        {
+            let mut exec = self.exec.lock().await;
+            exec.loader.evict_all();
+            exec.clear_values_and_mark_all_dirty(&self.topology);
+        }
         self.storage.discard().await.map_err(EngineError::from)
     }
 }

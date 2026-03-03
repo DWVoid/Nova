@@ -57,19 +57,24 @@ enum PendingEdge {
     SlotToSlot { from: Uuid, out_slot: usize, to: Uuid, in_slot: usize },
 }
 
+/// A deferred transform constructor: takes a `ValueTypeRegistryBuilder`, registers
+/// the transform's types into it, and returns a fully built [`ErasedTransform`].
+type PendingTransform = Box<dyn FnOnce(&mut ValueTypeRegistryBuilder) -> ErasedTransform + Send>;
+
 // ---------------------------------------------------------------------------
 // EngineBuilder (public)
 // ---------------------------------------------------------------------------
 
 pub struct EngineBuilder {
-    nodes:               Vec<PendingNode>,
-    edges:               Vec<PendingEdge>,
-    transforms:          HashMap<String, ErasedTransform>,
+    nodes:                Vec<PendingNode>,
+    edges:                Vec<PendingEdge>,
+    /// Deferred transform constructors — resolved during `build()`.
+    pending_transforms:   HashMap<String, PendingTransform>,
     /// Maps transform UUID → registered key, for schema lookup during edge creation.
-    uuid_to_key:         HashMap<Uuid, String>,
-    cycle_limit:         u32,
+    uuid_to_key:          HashMap<Uuid, String>,
+    cycle_limit:          u32,
     /// Accumulated errors from `register()` calls — surfaced by `build()`.
-    registration_errors: Vec<String>,
+    registration_errors:  Vec<String>,
 }
 
 impl EngineBuilder {
@@ -77,7 +82,7 @@ impl EngineBuilder {
         Self {
             nodes:               vec![],
             edges:               vec![],
-            transforms:          HashMap::new(),
+            pending_transforms:  HashMap::new(),
             uuid_to_key:         HashMap::new(),
             cycle_limit:         1000,
             registration_errors: vec![],
@@ -86,10 +91,10 @@ impl EngineBuilder {
 
     /// Register a transform type under `key`.
     ///
-    /// Calls `T::register` to declare slot types.  Any errors are accumulated
-    /// and surfaced as a single `EngineError` when [`build`](Self::build) is called.
+    /// Calls `T::register` to declare slot types.  Type registration and
+    /// dispatch table construction happen during [`build`](Self::build).
     pub fn register<T: Transform>(mut self, key: &str, instance: T) -> Self {
-        if self.transforms.contains_key(key) {
+        if self.pending_transforms.contains_key(key) {
             self.registration_errors.push(format!(
                 "duplicate transform key {:?}", key
             ));
@@ -97,9 +102,12 @@ impl EngineBuilder {
         }
         let mut registrar = TransformRegistrar::new();
         T::register(&mut registrar);
-        let layout = registrar.finish();
-        let erased = ErasedTransform::new(layout, instance);
-        self.transforms.insert(key.to_owned(), erased);
+
+        let pending: PendingTransform = Box::new(move |builder: &mut ValueTypeRegistryBuilder| {
+            let (layout, dispatch) = registrar.finish_into(builder);
+            ErasedTransform::new(layout, dispatch, instance)
+        });
+        self.pending_transforms.insert(key.to_owned(), pending);
         self
     }
 
@@ -156,11 +164,13 @@ impl EngineBuilder {
             ));
         }
 
-        // Build phase: register all slot types, then freeze the registry.
+        // Build phase: resolve all pending transforms — each one registers its
+        // slot types into the builder and produces an ErasedTransform.
         let mut reg_builder = ValueTypeRegistryBuilder::new();
-        for erased in self.transforms.values() {
-            erased.schema.register_all_into(&mut reg_builder);
-        }
+        let transforms: HashMap<String, ErasedTransform> = self.pending_transforms
+            .into_iter()
+            .map(|(key, make)| (key, make(&mut reg_builder)))
+            .collect();
         let registry = Arc::new(reg_builder.freeze());
         let graph    = Arc::new(Graph::new());
 
@@ -181,7 +191,7 @@ impl EngineBuilder {
                 PendingNode::Transform { uuid, key } => {
                     let nid = NodeId::from_uuid(*uuid);
                     uuid_to_node.insert(*uuid, nid);
-                    let erased = self.transforms.get(key.as_str())
+                    let erased = transforms.get(key.as_str())
                         .ok_or_else(|| EngineError::new(format!(
                             "transform key {key:?} not registered (declare with builder.register(...))"
                         )))?
@@ -200,7 +210,7 @@ impl EngineBuilder {
         // Helper: is output slot `slot` of transform `uuid` a collection?
         let out_is_col = |uuid: &Uuid, slot: usize| -> bool {
             self.uuid_to_key.get(uuid)
-                .and_then(|k| self.transforms.get(k.as_str()))
+                .and_then(|k| transforms.get(k.as_str()))
                 .and_then(|e| e.schema.outputs.get(slot))
                 .map(|s| s.is_col)
                 .unwrap_or(false)
@@ -209,7 +219,7 @@ impl EngineBuilder {
         // Helper: is input slot `slot` of transform `uuid` a collection?
         let in_is_col = |uuid: &Uuid, slot: usize| -> bool {
             self.uuid_to_key.get(uuid)
-                .and_then(|k| self.transforms.get(k.as_str()))
+                .and_then(|k| transforms.get(k.as_str()))
                 .and_then(|e| e.schema.inputs.get(slot))
                 .map(|s| s.is_col)
                 .unwrap_or(false)

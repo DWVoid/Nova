@@ -972,7 +972,9 @@ mod tests {
     fn make_erased() -> ErasedTransform {
         let mut r = crate::transform::TransformRegistrar::new();
         DummyTransform::register(&mut r);
-        ErasedTransform::new(r.finish(), DummyTransform)
+        let layout = r.finish();
+        let dispatch = crate::transform::DispatchTable::default();
+        ErasedTransform::new(layout, dispatch, DummyTransform)
     }
 
     #[test]

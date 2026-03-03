@@ -392,13 +392,15 @@ async fn test_context_type_mismatch() {
     };
 
     // Use TransformRegistrar directly to build a SlotLayout for the context.
-    let layout = {
+    let (layout, dispatch) = {
         let mut r = crate::transform::TransformRegistrar::new();
+        let mut b = crate::value::ValueTypeRegistryBuilder::new();
         r.input::<u32>();
         r.output::<u32>();
-        Arc::new(r.finish())
+        let (layout, dispatch) = r.finish_into(&mut b);
+        (Arc::new(layout), Arc::new(dispatch))
     };
-    let mut ctx = crate::transform::TransformContext::new(Arc::clone(&layout), Arc::clone(&reg));
+    let mut ctx = crate::transform::TransformContext::new(Arc::clone(&layout), Arc::clone(&dispatch), Arc::clone(&reg));
 
     // String lookup on u32 slot should fail.
     assert!(ctx.input::<String>(0).is_err());

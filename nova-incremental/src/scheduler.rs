@@ -172,13 +172,13 @@ async fn evaluate_transform(
     }
 
     // Normal invocation.
-    let mut ctx = TransformContext::new(Arc::clone(&schema), Arc::clone(&registry));
+    let mut ctx = TransformContext::new(Arc::clone(&schema), Arc::clone(&erased.dispatch), Arc::clone(&registry));
 
     for slot in 0..n_in {
         let spec = &schema.inputs[slot];
         if spec.is_col {
             let elems = graph.read_collection_input(tid, slot);
-            if let Some(build) = spec.build_collection {
+            if let Some(build) = erased.dispatch.inputs[slot].build_collection {
                 let all_values: Vec<_>  = elems.iter().map(|e| e.value.clone()).collect();
                 let dirty_keys: Vec<u64> = elems.iter().filter(|e| e.dirty).map(|e| e.key).collect();
                 ctx.collection_inputs[slot] = Some(build(all_values, dirty_keys, &registry));
@@ -188,7 +188,8 @@ async fn evaluate_transform(
                 Some(x) => x,
                 None => return err_result(tid, format!("missing input on slot {slot}")),
             };
-            match (spec.downcast)(&v, &registry) {
+            let downcast = erased.dispatch.inputs[slot].downcast;
+            match downcast(&v, &registry) {
                 Ok(boxed) => ctx.single_inputs[slot] = Some(boxed),
                 Err(e) => return err_result(tid, format!("slot {slot} downcast: {e}")),
             }
@@ -247,6 +248,7 @@ async fn evaluate_fanout(
     }
 
     let fanout_spec = schema.inputs[fanout_slot].clone();
+    let _ = fanout_spec; // type info now from dispatch table
     let mut changed = any_changed;
     let mut coll_changed = 0;
     let mut last_error: Option<TransformError> = None;
@@ -256,20 +258,22 @@ async fn evaluate_fanout(
         (0..n_out).map(|_| Vec::new()).collect();
 
     for elem in &dirty_elems {
-        let boxed = match (fanout_spec.downcast)(&elem.value, &registry) {
+        let fanout_downcast = erased.dispatch.inputs[fanout_slot].downcast;
+        let boxed = match fanout_downcast(&elem.value, &registry) {
             Ok(b) => b,
             Err(e) => { last_error = Some(TransformError::new(e)); continue; }
         };
 
-        let mut ctx = TransformContext::new(Arc::clone(&schema), Arc::clone(&registry));
+        let mut ctx = TransformContext::new(Arc::clone(&schema), Arc::clone(&erased.dispatch), Arc::clone(&registry));
         ctx.single_inputs[fanout_slot] = Some(boxed);
 
         // Fill other non-collection, non-fanout inputs.
         let mut ok = true;
         for (slot, spec) in schema.inputs.iter().enumerate() {
             if slot == fanout_slot || spec.is_col { continue; }
+            let slot_downcast = erased.dispatch.inputs[slot].downcast;
             match graph.read_single_input(tid, slot) {
-                Some((v, _)) => match (spec.downcast)(&v, &registry) {
+                Some((v, _)) => match slot_downcast(&v, &registry) {
                     Ok(b) => ctx.single_inputs[slot] = Some(b),
                     Err(e) => { last_error = Some(TransformError::new(e)); ok = false; break; }
                 },

@@ -72,33 +72,69 @@ impl std::fmt::Display for TransformError {
 impl std::error::Error for TransformError {}
 
 // ---------------------------------------------------------------------------
-// SlotSpec (pub(crate))
+// ---------------------------------------------------------------------------
+// SlotInfo (pub(crate)) — type identity for one slot
 // ---------------------------------------------------------------------------
 
-/// Erased type info for one slot.
-#[derive(Clone)]
+/// Minimal erased type info for one slot: identity + collection flag only.
+/// Stored in [`SlotLayout`] and used at runtime for type checking.
+#[derive(Clone, Debug)]
+pub(crate) struct SlotInfo {
+    pub(crate) type_id:   TypeId,
+    pub(crate) type_name: &'static str,
+    pub(crate) is_col:    bool,
+}
+
+// ---------------------------------------------------------------------------
+// SlotSpec (pub(crate), build-time only) — SlotInfo + dispatch fn ptrs
+// ---------------------------------------------------------------------------
+
+/// Full slot descriptor used only during [`crate::engine::EngineBuilder::build()`].
+/// The dispatch fn pointers are extracted into a [`DispatchTable`]; then only
+/// [`SlotInfo`] survives in [`SlotLayout`].
 pub(crate) struct SlotSpec {
-    pub(crate) type_id:    TypeId,
-    pub(crate) type_name:  &'static str,
-    pub(crate) is_col:     bool,
-    /// Downcast a Value → Box<T> (erased).
-    pub(crate) downcast:   fn(&crate::value::Value, &crate::value::ValueTypeRegistry)
-                              -> Result<Box<dyn Any + Send + Sync>, String>,
-    /// Extract stable key from Value (collection slots only).
-    pub(crate) extract_key: Option<fn(&crate::value::Value, &crate::value::ValueTypeRegistry) -> u64>,
-    /// Build an ErasedCollection from graph elements (collection input slots only).
+    pub(crate) info:             SlotInfo,
+    /// Register T into the registry builder.
+    pub(crate) register:         fn(&mut crate::value::ValueTypeRegistryBuilder),
+    /// Downcast a Value → Box<dyn Any> (for feeding into TransformContext).
+    pub(crate) downcast:         fn(&crate::value::Value, &crate::value::ValueTypeRegistry)
+                                    -> Result<Box<dyn Any + Send + Sync>, String>,
+    /// Extract stable key from Value (collection output slots only).
+    pub(crate) extract_key:      Option<fn(&crate::value::Value, &crate::value::ValueTypeRegistry) -> u64>,
+    /// Reconstruct a typed ErasedCollection from raw graph elements (collection input slots only).
     pub(crate) build_collection: Option<
         fn(Vec<crate::value::Value>, Vec<u64>, &crate::value::ValueTypeRegistry) -> ErasedCollection
     >,
-    /// Register this slot's type into the registry builder (build phase only).
-    pub(crate) register: fn(&mut crate::value::ValueTypeRegistryBuilder),
 }
 
-impl std::fmt::Debug for SlotSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SlotSpec({}, col={})", self.type_name, self.is_col)
-    }
+// ---------------------------------------------------------------------------
+// DispatchEntry + DispatchTable (pub(crate), runtime)
+// ---------------------------------------------------------------------------
+
+/// Erased dispatch functions for one value type.
+/// Built from [`SlotSpec`] fn pointers during the build phase; stored in
+/// [`DispatchTable`] keyed by `TypeId`.
+#[derive(Clone)]
+pub(crate) struct DispatchEntry {
+    pub(crate) downcast:         fn(&crate::value::Value, &crate::value::ValueTypeRegistry)
+                                    -> Result<Box<dyn Any + Send + Sync>, String>,
+    pub(crate) extract_key:      Option<fn(&crate::value::Value, &crate::value::ValueTypeRegistry) -> u64>,
+    pub(crate) build_collection: Option<
+        fn(Vec<crate::value::Value>, Vec<u64>, &crate::value::ValueTypeRegistry) -> ErasedCollection
+    >,
 }
+
+/// Per-transform dispatch table, indexed by slot index (inputs then outputs).
+/// Stored alongside the transform's [`SlotLayout`] in `Topology`.
+#[derive(Clone, Default)]
+pub(crate) struct DispatchTable {
+    pub(crate) inputs:  Vec<DispatchEntry>,
+    pub(crate) outputs: Vec<DispatchEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// SlotSpec constructors + helpers
+// ---------------------------------------------------------------------------
 
 fn slot_register<T: IncrementalValue>(b: &mut crate::value::ValueTypeRegistryBuilder) {
     let _ = b.register::<T>();
@@ -145,27 +181,40 @@ fn slot_build_collection<T: IncrementalValue>(
 }
 
 impl SlotSpec {
-    fn single<T: IncrementalValue>() -> Self {
+    pub(crate) fn single<T: IncrementalValue>() -> Self {
         Self {
-            type_id:          TypeId::of::<T>(),
-            type_name:        std::any::type_name::<T>(),
-            is_col:           false,
+            info:             SlotInfo {
+                type_id:   TypeId::of::<T>(),
+                type_name: std::any::type_name::<T>(),
+                is_col:    false,
+            },
+            register:         slot_register::<T>,
             downcast:         slot_downcast::<T>,
             extract_key:      None,
             build_collection: None,
-            register:         slot_register::<T>,
         }
     }
 
-    fn collection<T: IncrementalValue, K: KeyExtractor<T>>() -> Self {
+    pub(crate) fn collection<T: IncrementalValue, K: KeyExtractor<T>>() -> Self {
         Self {
-            type_id:          TypeId::of::<T>(),
-            type_name:        std::any::type_name::<T>(),
-            is_col:           true,
+            info:             SlotInfo {
+                type_id:   TypeId::of::<T>(),
+                type_name: std::any::type_name::<T>(),
+                is_col:    true,
+            },
+            register:         slot_register::<T>,
             downcast:         slot_downcast::<T>,
             extract_key:      Some(slot_extract_key::<T, K>),
             build_collection: Some(slot_build_collection::<T>),
-            register:         slot_register::<T>,
+        }
+    }
+
+    /// Extract the [`DispatchEntry`] from this spec (used during build phase).
+    pub(crate) fn dispatch_entry(&self) -> DispatchEntry {
+        DispatchEntry {
+            downcast:         self.downcast,
+            extract_key:      self.extract_key,
+            build_collection: self.build_collection,
         }
     }
 }
@@ -175,23 +224,17 @@ impl SlotSpec {
 // ---------------------------------------------------------------------------
 
 /// Internal slot description for a transform.  Not part of the public API.
-/// Produced by [`TransformRegistrar`] during the build phase.
+/// Produced by [`TransformRegistrar`] during the build phase and stored in
+/// `Topology`.  Contains only type identity — no fn pointers.
 #[derive(Clone, Debug)]
 pub(crate) struct SlotLayout {
-    pub(crate) inputs:  Vec<SlotSpec>,
-    pub(crate) outputs: Vec<SlotSpec>,
+    pub(crate) inputs:  Vec<SlotInfo>,
+    pub(crate) outputs: Vec<SlotInfo>,
 }
 
 impl SlotLayout {
-    pub(crate) fn new(inputs: Vec<SlotSpec>, outputs: Vec<SlotSpec>) -> Self {
+    pub(crate) fn new(inputs: Vec<SlotInfo>, outputs: Vec<SlotInfo>) -> Self {
         Self { inputs, outputs }
-    }
-
-    /// Register all slot types into the registry builder.
-    pub(crate) fn register_all_into(&self, b: &mut crate::value::ValueTypeRegistryBuilder) {
-        for s in self.inputs.iter().chain(self.outputs.iter()) {
-            (s.register)(b);
-        }
     }
 }
 
@@ -219,17 +262,52 @@ pub trait TransformRegisterContext: sealed::Sealed {
     fn output_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self);
 }
 
-/// Private implementation of [`TransformRegisterContext`].
+/// Build-phase accumulator implementing [`TransformRegisterContext`].
+/// Holds the full [`SlotSpec`] (including fn pointers) during registration;
+/// produces [`SlotLayout`] + [`DispatchTable`] via [`finish`](Self::finish).
 pub(crate) struct TransformRegistrar {
-    pub(crate) inputs:  Vec<SlotSpec>,
-    pub(crate) outputs: Vec<SlotSpec>,
+    inputs:  Vec<SlotSpec>,
+    outputs: Vec<SlotSpec>,
 }
 
 impl TransformRegistrar {
     pub(crate) fn new() -> Self { Self { inputs: vec![], outputs: vec![] } }
 
+    /// Register all slot types into the builder and produce the frozen
+    /// [`SlotLayout`] + [`DispatchTable`] for runtime use.
+    pub(crate) fn finish_into(
+        self,
+        builder: &mut crate::value::ValueTypeRegistryBuilder,
+    ) -> (SlotLayout, DispatchTable) {
+        let mut layout_inputs  = Vec::with_capacity(self.inputs.len());
+        let mut layout_outputs = Vec::with_capacity(self.outputs.len());
+        let mut disp_inputs    = Vec::with_capacity(self.inputs.len());
+        let mut disp_outputs   = Vec::with_capacity(self.outputs.len());
+
+        for spec in self.inputs {
+            (spec.register)(builder);
+            disp_inputs.push(spec.dispatch_entry());
+            layout_inputs.push(spec.info);
+        }
+        for spec in self.outputs {
+            (spec.register)(builder);
+            disp_outputs.push(spec.dispatch_entry());
+            layout_outputs.push(spec.info);
+        }
+
+        (
+            SlotLayout::new(layout_inputs, layout_outputs),
+            DispatchTable { inputs: disp_inputs, outputs: disp_outputs },
+        )
+    }
+
+    /// Convenience: produce a [`SlotLayout`] without registering types.
+    /// Used in tests that build a `TransformContext` directly.
     pub(crate) fn finish(self) -> SlotLayout {
-        SlotLayout::new(self.inputs, self.outputs)
+        SlotLayout::new(
+            self.inputs.into_iter().map(|s| s.info).collect(),
+            self.outputs.into_iter().map(|s| s.info).collect(),
+        )
     }
 }
 
@@ -316,11 +394,16 @@ pub struct TransformContext {
     pub(crate) slot_is_collection: Vec<bool>,
     pub(crate) outputs:            Vec<Option<ContextOutput>>,
     pub(crate) layout:             Arc<SlotLayout>,
+    pub(crate) dispatch:           Arc<DispatchTable>,
     pub(crate) registry:           Arc<crate::value::ValueTypeRegistry>,
 }
 
 impl TransformContext {
-    pub(crate) fn new(layout: Arc<SlotLayout>, registry: Arc<crate::value::ValueTypeRegistry>) -> Self {
+    pub(crate) fn new(
+        layout:   Arc<SlotLayout>,
+        dispatch: Arc<DispatchTable>,
+        registry: Arc<crate::value::ValueTypeRegistry>,
+    ) -> Self {
         let n_in  = layout.inputs.len();
         let n_out = layout.outputs.len();
         let slot_is_collection = layout.inputs.iter().map(|s| s.is_col).collect();
@@ -330,6 +413,7 @@ impl TransformContext {
             slot_is_collection,
             outputs:            (0..n_out).map(|_| None).collect(),
             layout,
+            dispatch,
             registry,
         }
     }
@@ -432,7 +516,8 @@ impl TransformContext {
                 spec.type_name, std::any::type_name::<T>()
             )));
         }
-        let extract_key = spec.extract_key
+        let extract_key = self.dispatch.outputs.get(slot)
+            .and_then(|d| d.extract_key)
             .ok_or_else(|| TransformError::new("output slot: missing key extractor"))?;
         let mut pairs = Vec::with_capacity(items.len());
         for item in items {
@@ -466,18 +551,19 @@ pub trait Transform: Send + Sync + 'static {
 // ---------------------------------------------------------------------------
 
 /// Object-safe wrapper holding a `Transform` instance (via `Arc<dyn Transform>`) and its
-/// slot layout.  `async_trait` makes `Transform` dyn-compatible, so no pointer
-/// tricks are required.
+/// slot layout + dispatch table.  `async_trait` makes `Transform` dyn-compatible.
 #[derive(Clone)]
 pub(crate) struct ErasedTransform {
     pub(crate) schema:    Arc<SlotLayout>,
+    pub(crate) dispatch:  Arc<DispatchTable>,
     pub(crate) instance:  Arc<dyn Transform>,
 }
 
 impl ErasedTransform {
-    pub(crate) fn new<T: Transform>(layout: SlotLayout, instance: T) -> Self {
+    pub(crate) fn new<T: Transform>(layout: SlotLayout, dispatch: DispatchTable, instance: T) -> Self {
         Self {
             schema:   Arc::new(layout),
+            dispatch: Arc::new(dispatch),
             instance: Arc::new(instance),
         }
     }

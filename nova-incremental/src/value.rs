@@ -4,6 +4,7 @@
 
 use serde::{Serialize, de::DeserializeOwned};
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
@@ -124,18 +125,17 @@ impl TypeEntry {
 #[derive(Default)]
 struct RegistryStore {
     entries:  Vec<TypeEntry>,
-    by_key:   std::collections::HashMap<String, usize>,
-    by_type:  std::collections::HashMap<TypeId, usize>,
+    by_key:   HashMap<String, usize>,
+    by_type:  HashMap<TypeId, usize>,
 }
 
 impl RegistryStore {
-    fn by_key(&self, k: &str)    -> Option<(usize, &TypeEntry)> {
+    fn by_key(&self, k: &str)       -> Option<(usize, &TypeEntry)> {
         self.by_key.get(k).map(|&i| (i, &self.entries[i]))
     }
     fn by_type_id(&self, t: TypeId) -> Option<(usize, &TypeEntry)> {
         self.by_type.get(&t).map(|&i| (i, &self.entries[i]))
     }
-    fn by_idx(&self, i: usize)   -> &TypeEntry { &self.entries[i] }
 
     fn insert(&mut self, e: TypeEntry) -> Result<(), RegistryError> {
         if let Some((_, ex)) = self.by_type_id(e.type_id) {
@@ -165,34 +165,63 @@ impl RegistryStore {
 }
 
 // ---------------------------------------------------------------------------
-// ValueTypeRegistry  (pub(crate), used by engine internals)
+// ValueTypeRegistryBuilder  (pub(crate), build phase only)
 // ---------------------------------------------------------------------------
 
-pub(crate) struct ValueTypeRegistry {
-    store: std::sync::RwLock<RegistryStore>,
+/// Mutable builder used exclusively during `EngineBuilder::build()`.
+/// Single-threaded, no locking.  Call `freeze()` to produce a read-only
+/// [`ValueTypeRegistry`] that can be shared across threads.
+pub(crate) struct ValueTypeRegistryBuilder {
+    store: RegistryStore,
 }
 
-impl Default for ValueTypeRegistry {
-    fn default() -> Self { Self { store: Default::default() } }
+impl ValueTypeRegistryBuilder {
+    pub(crate) fn new() -> Self { Self { store: RegistryStore::default() } }
+
+    /// Register `T`.  Idempotent for the same `(TypeId, type_name)` pair.
+    pub(crate) fn register<T>(&mut self) -> Result<(), RegistryError>
+    where T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
+    {
+        let key = std::any::type_name::<T>().to_owned();
+        self.store.insert(TypeEntry::new::<T>(key))
+    }
+
+    /// Seal the registry.  Consumes the builder; no further registration is possible.
+    pub(crate) fn freeze(self) -> ValueTypeRegistry {
+        ValueTypeRegistry {
+            entries:  self.store.entries.into_boxed_slice(),
+            by_key:   self.store.by_key,
+            by_type:  self.store.by_type,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ValueTypeRegistry  (pub(crate), runtime — frozen, lock-free)
+// ---------------------------------------------------------------------------
+
+/// Immutable type registry produced by [`ValueTypeRegistryBuilder::freeze()`].
+/// Shared as `Arc<ValueTypeRegistry>` across the scheduler, loader, and
+/// transform contexts.  All access is `&self`; no locking required.
+pub(crate) struct ValueTypeRegistry {
+    entries:  Box<[TypeEntry]>,
+    by_key:   HashMap<String, usize>,
+    by_type:  HashMap<TypeId, usize>,
 }
 
 impl ValueTypeRegistry {
-    pub(crate) fn new() -> Self { Self::default() }
-
-    /// Register `T` under `type_key`.  Idempotent for the same (T, key) pair.
-    pub(crate) fn register<T>(&self) -> Result<(), RegistryError>
-    where T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
-    {
-        // Use the Rust type name as the canonical key.
-        let key = std::any::type_name::<T>().to_owned();
-        self.store.write().unwrap().insert(TypeEntry::new::<T>(key))
+    fn by_key(&self, k: &str)       -> Option<(usize, &TypeEntry)> {
+        self.by_key.get(k).map(|&i| (i, &self.entries[i]))
     }
+    fn by_type_id(&self, t: TypeId) -> Option<(usize, &TypeEntry)> {
+        self.by_type.get(&t).map(|&i| (i, &self.entries[i]))
+    }
+    fn by_idx(&self, i: usize)      -> &TypeEntry { &self.entries[i] }
 
     pub(crate) fn make_value<T>(&self, v: T) -> Result<Value, RegistryError>
     where T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static,
     {
-        let store = self.store.read().unwrap();
-        let (idx, entry) = store.by_type_id(TypeId::of::<T>())
+        let (idx, entry) = self.by_type_id(TypeId::of::<T>())
             .ok_or_else(|| RegistryError::new(format!(
                 "type `{}` not registered",
                 std::any::type_name::<T>()
@@ -203,8 +232,7 @@ impl ValueTypeRegistry {
     pub(crate) fn downcast_value<T>(&self, v: &Value) -> Result<T, RegistryError>
     where T: Any + Clone + 'static,
     {
-        let store = self.store.read().unwrap();
-        let (idx, entry) = store.by_type_id(TypeId::of::<T>())
+        let (idx, entry) = self.by_type_id(TypeId::of::<T>())
             .ok_or_else(|| RegistryError::new(format!(
                 "type `{}` not registered",
                 std::any::type_name::<T>()
@@ -219,18 +247,17 @@ impl ValueTypeRegistry {
     }
 
     pub(crate) fn serialize(&self, v: &Value) -> Vec<u8> {
-        self.store.read().unwrap().by_idx(v.type_idx()).serialize_value(v)
+        self.by_idx(v.type_idx()).serialize_value(v)
     }
 
     pub(crate) fn deserialize(&self, type_key: &str, bytes: &[u8]) -> Result<Value, RegistryError> {
-        let store = self.store.read().unwrap();
-        let (idx, entry) = store.by_key(type_key)
+        let (idx, entry) = self.by_key(type_key)
             .ok_or_else(|| RegistryError::new(format!("unknown type key {type_key:?}")))?;
         entry.deserialize_value(bytes, idx)
     }
 
     pub(crate) fn type_key_of(&self, v: &Value) -> String {
-        self.store.read().unwrap().by_idx(v.type_idx()).type_key.clone()
+        self.by_idx(v.type_idx()).type_key.clone()
     }
 }
 
@@ -243,10 +270,10 @@ mod tests {
     use super::*;
 
     fn reg() -> ValueTypeRegistry {
-        let r = ValueTypeRegistry::new();
-        r.register::<u32>().unwrap();
-        r.register::<String>().unwrap();
-        r
+        let mut b = ValueTypeRegistryBuilder::new();
+        b.register::<u32>().unwrap();
+        b.register::<String>().unwrap();
+        b.freeze()
     }
 
     #[test]
@@ -285,8 +312,8 @@ mod tests {
 
     #[test]
     fn register_is_idempotent() {
-        let r = ValueTypeRegistry::new();
-        r.register::<i32>().unwrap();
-        r.register::<i32>().unwrap(); // no error
+        let mut b = ValueTypeRegistryBuilder::new();
+        b.register::<i32>().unwrap();
+        b.register::<i32>().unwrap(); // no error
     }
 }

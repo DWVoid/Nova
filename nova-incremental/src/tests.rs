@@ -386,9 +386,11 @@ async fn test_context_type_mismatch() {
     }
 
     // Build a small engine to test the context type-check paths.
-    let reg = crate::value::ValueTypeRegistry::new();
-    reg.register::<u32>().unwrap();
-    let reg = Arc::new(reg);
+    let reg = {
+        let mut b = crate::value::ValueTypeRegistryBuilder::new();
+        b.register::<u32>().unwrap();
+        Arc::new(b.freeze())
+    };
 
     let schema = Arc::new(
         TransformSchema::new().input::<u32>().output::<u32>()

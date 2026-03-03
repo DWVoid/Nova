@@ -1002,8 +1002,11 @@ mod tests {
         g.add_transform_node(t, "d".into(), make_erased()).unwrap();
         g.add_edge(Endpoint::Io(inp), Endpoint::TransformInput { transform: t, slot: 0 }, false).unwrap();
 
-        let reg = crate::value::ValueTypeRegistry::new();
-        reg.register::<u32>().unwrap();
+        let reg = {
+            let mut b = crate::value::ValueTypeRegistryBuilder::new();
+            b.register::<u32>().unwrap();
+            b.freeze()
+        };
         let v = reg.make_value(42u32).unwrap();
         let h = crate::value::hash_value(&v, &reg);
         assert!(g.set_input(inp, v, h));

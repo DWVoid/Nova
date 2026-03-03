@@ -83,8 +83,6 @@ pub(crate) struct SlotSpec {
     pub(crate) type_id:    TypeId,
     pub(crate) type_name:  &'static str,
     pub(crate) is_col:     bool,
-    /// Register T into the ValueTypeRegistry.
-    pub(crate) register:   fn(&crate::value::ValueTypeRegistry),
     /// Downcast a Value → Box<T> (erased).
     pub(crate) downcast:   fn(&crate::value::Value, &crate::value::ValueTypeRegistry)
                               -> Result<Box<dyn Any + Send + Sync>, String>,
@@ -95,6 +93,8 @@ pub(crate) struct SlotSpec {
     pub(crate) build_collection: Option<
         fn(Vec<crate::value::Value>, Vec<u64>, &crate::value::ValueTypeRegistry) -> ErasedCollection
     >,
+    /// Register this slot's type into the registry builder (build phase only).
+    pub(crate) register: fn(&mut crate::value::ValueTypeRegistryBuilder),
 }
 
 impl std::fmt::Debug for SlotSpec {
@@ -103,8 +103,8 @@ impl std::fmt::Debug for SlotSpec {
     }
 }
 
-fn slot_register<T: IncrementalValue>(reg: &crate::value::ValueTypeRegistry) {
-    let _ = reg.register::<T>();
+fn slot_register<T: IncrementalValue>(b: &mut crate::value::ValueTypeRegistryBuilder) {
+    let _ = b.register::<T>();
 }
 
 fn slot_downcast<T: IncrementalValue>(
@@ -214,10 +214,10 @@ impl TransformSchema {
         self
     }
 
-    /// Auto-register all slot types into `reg`.
-    pub(crate) fn register_all(&self, reg: &crate::value::ValueTypeRegistry) {
+    /// Register all slot types into the registry builder (build phase only).
+    pub(crate) fn register_all_into(&self, b: &mut crate::value::ValueTypeRegistryBuilder) {
         for s in self.inputs.iter().chain(self.outputs.iter()) {
-            (s.register)(reg);
+            (s.register)(b);
         }
     }
 }

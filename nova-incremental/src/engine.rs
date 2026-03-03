@@ -11,7 +11,7 @@ use crate::node_id::NodeId;
 use crate::scheduler::{Scheduler, UpdateReport};
 use crate::storage::{Storage, StorageError};
 use crate::transform::{Transform, ErasedTransform, IncrementalValue};
-use crate::value::{ValueTypeRegistry, hash_value};
+use crate::value::{ValueTypeRegistry, ValueTypeRegistryBuilder, hash_value};
 
 // ---------------------------------------------------------------------------
 // EngineError (public)
@@ -135,13 +135,13 @@ impl EngineBuilder {
     pub fn cycle_limit(mut self, limit: u32) -> Self { self.cycle_limit = limit; self }
 
     pub async fn build(self, storage: Arc<dyn Storage>) -> Result<Engine, EngineError> {
-        let registry = Arc::new(ValueTypeRegistry::new());
-        let graph    = Arc::new(Graph::new());
-
-        // Auto-register all value types from all registered transform schemas.
+        // Build phase: register all slot types, then freeze the registry.
+        let mut reg_builder = ValueTypeRegistryBuilder::new();
         for erased in self.transforms.values() {
-            erased.schema.register_all(&registry);
+            erased.schema.register_all_into(&mut reg_builder);
         }
+        let registry = Arc::new(reg_builder.freeze());
+        let graph    = Arc::new(Graph::new());
 
         let mut uuid_to_node: HashMap<Uuid, NodeId> = HashMap::new();
 

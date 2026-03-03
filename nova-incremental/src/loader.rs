@@ -108,14 +108,13 @@ impl Loader {
 mod tests {
     use super::*;
     use crate::storage::MemoryStorage;
-    use crate::value::ValueTypeRegistry;
-    use std::sync::Arc;
+    use crate::value::{ValueTypeRegistry, ValueTypeRegistryBuilder};
 
     fn make_registry() -> Arc<ValueTypeRegistry> {
-        let r = ValueTypeRegistry::new();
-        r.register::<i32>().unwrap();
-        r.register::<u32>().unwrap();
-        Arc::new(r)
+        let mut b = ValueTypeRegistryBuilder::new();
+        b.register::<i32>().unwrap();
+        b.register::<u32>().unwrap();
+        Arc::new(b.freeze())
     }
 
     fn make_loader() -> Loader {

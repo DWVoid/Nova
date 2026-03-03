@@ -27,7 +27,6 @@ mod engine;
 mod graph;
 mod loader;
 mod node_id;
-mod registry;
 mod scheduler;
 mod storage;
 mod transform;

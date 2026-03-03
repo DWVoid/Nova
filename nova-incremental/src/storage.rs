@@ -140,13 +140,6 @@ impl StorageKey {
         for i in 0..8 { bytes[8 + i] ^= ek[i]; }
         Self(Uuid::from_bytes(bytes))
     }
-    /// Fixed key for the persisted topology blob.
-    pub(crate) fn topology() -> Self {
-        Self(Uuid::from_bytes([
-            0x6e, 0x6f, 0x76, 0x61, 0x5f, 0x74, 0x6f, 0x70,
-            0x6f, 0x5f, 0x76, 0x32, 0x00, 0x00, 0x00, 0x00,
-        ]))
-    }
 }
 
 /// Raw bytes stored in the backend.
@@ -173,46 +166,6 @@ pub(crate) fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StorageError> {
 pub(crate) fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, StorageError> {
     rmp_serde::from_slice(bytes)
         .map_err(|e| StorageError::with_source("decode", e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// Persisted topology structs (pub(crate))
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum PersistedNodeKind { Input, Output }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PersistedIoNode {
-    pub id:   crate::node_id::NodeId,
-    pub kind: PersistedNodeKind,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PersistedTransformNode {
-    pub id:  crate::node_id::NodeId,
-    pub key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) enum PersistedEndpoint {
-    Io(crate::node_id::NodeId),
-    TransIn  { t: crate::node_id::NodeId, slot: usize },
-    TransOut { t: crate::node_id::NodeId, slot: usize },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PersistedEdge {
-    pub from: PersistedEndpoint,
-    pub to:   PersistedEndpoint,
-    pub coll: bool,  // true = collection edge
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PersistedTopology {
-    pub io_nodes:        Vec<PersistedIoNode>,
-    pub transform_nodes: Vec<PersistedTransformNode>,
-    pub edges:           Vec<PersistedEdge>,
 }
 
 /// Persisted value record for one node.

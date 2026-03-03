@@ -88,9 +88,6 @@ pub(crate) struct SlotSpec {
     /// Downcast a Value → Box<T> (erased).
     pub(crate) downcast:   fn(&crate::value::Value, &crate::value::ValueTypeRegistry)
                               -> Result<Box<dyn Any + Send + Sync>, String>,
-    /// Upcast Box<T> → Value.
-    pub(crate) make_value: fn(Box<dyn Any + Send + Sync>, &crate::value::ValueTypeRegistry)
-                              -> Result<crate::value::Value, String>,
     /// Extract stable key from Value (collection slots only).
     pub(crate) extract_key: Option<fn(&crate::value::Value, &crate::value::ValueTypeRegistry) -> u64>,
     /// Build an ErasedCollection from graph elements (collection input slots only).
@@ -117,15 +114,6 @@ fn slot_downcast<T: IncrementalValue>(
     reg.downcast_value::<T>(v)
         .map(|t| Box::new(t) as Box<dyn Any + Send + Sync>)
         .map_err(|e| e.message)
-}
-
-fn slot_make_value<T: IncrementalValue>(
-    boxed: Box<dyn Any + Send + Sync>,
-    reg: &crate::value::ValueTypeRegistry,
-) -> Result<crate::value::Value, String> {
-    let t = *boxed.downcast::<T>()
-        .map_err(|_| format!("make_value downcast failed for {}", std::any::type_name::<T>()))?;
-    reg.make_value(t).map_err(|e| e.message)
 }
 
 fn slot_extract_key<T: IncrementalValue, K: KeyExtractor<T>>(
@@ -167,7 +155,6 @@ impl SlotSpec {
             is_col:           false,
             register:         slot_register::<T>,
             downcast:         slot_downcast::<T>,
-            make_value:       slot_make_value::<T>,
             extract_key:      None,
             build_collection: None,
         }
@@ -180,7 +167,6 @@ impl SlotSpec {
             is_col:           true,
             register:         slot_register::<T>,
             downcast:         slot_downcast::<T>,
-            make_value:       slot_make_value::<T>,
             extract_key:      Some(slot_extract_key::<T, K>),
             build_collection: Some(slot_build_collection::<T>),
         }
@@ -268,14 +254,12 @@ pub(crate) struct TypedCollection<T: 'static> {
 pub(crate) struct ErasedCollection {
     inner:   Box<dyn Any + Send + Sync>,
     type_id: TypeId,
-    pub(crate) len: usize,
 }
 
 impl ErasedCollection {
     pub(crate) fn new<T: IncrementalValue>(elements: Vec<T>, diff: CollectionChange<T>) -> Self {
-        let len = elements.len();
         let type_id = TypeId::of::<T>();
-        Self { inner: Box::new(TypedCollection { elements, diff }), type_id, len }
+        Self { inner: Box::new(TypedCollection { elements, diff }), type_id }
     }
 
     pub(crate) fn type_id(&self) -> TypeId { self.type_id }
@@ -325,25 +309,6 @@ impl TransformContext {
             outputs:            (0..n_out).map(|_| None).collect(),
             schema,
             registry,
-        }
-    }
-
-    /// Set a single-value input slot (called by the engine scheduler).
-    pub(crate) fn set_single_input<T: IncrementalValue>(&mut self, slot: usize, value: T) {
-        if slot < self.single_inputs.len() {
-            self.single_inputs[slot] = Some(Box::new(value));
-        }
-    }
-
-    /// Set a collection input slot (called by the engine scheduler).
-    pub(crate) fn set_collection_input<T: IncrementalValue>(
-        &mut self,
-        slot: usize,
-        elements: Vec<T>,
-        diff: CollectionChange<T>,
-    ) {
-        if slot < self.collection_inputs.len() {
-            self.collection_inputs[slot] = Some(ErasedCollection::new(elements, diff));
         }
     }
 

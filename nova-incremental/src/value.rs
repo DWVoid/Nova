@@ -232,10 +232,6 @@ impl ValueTypeRegistry {
     pub(crate) fn type_key_of(&self, v: &Value) -> String {
         self.store.read().unwrap().by_idx(v.type_idx()).type_key.clone()
     }
-
-    pub(crate) fn contains_type_id(&self, tid: TypeId) -> bool {
-        self.store.read().unwrap().by_type_id(tid).is_some()
-    }
 }
 
 // ---------------------------------------------------------------------------

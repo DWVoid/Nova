@@ -90,25 +90,6 @@ impl Loader {
         self.storage.set(&StorageKey::for_element(node, elem_key), StorageValue(bytes)).await
     }
 
-    /// Get a persisted collection element.
-    pub(crate) async fn get_element(
-        &self,
-        node: NodeId,
-        elem_key: u64,
-    ) -> Result<Option<(Value, ValueHash)>, StorageError> {
-        let key = StorageKey::for_element(node, elem_key);
-        if let Some(sv) = self.storage.get(&key).await? {
-            let rec: PersistedElement = decode(sv.as_bytes())?;
-            if let Ok(v) = self.registry.deserialize(&rec.type_key, &rec.value_bytes) {
-                return Ok(Some((v, rec.hash)));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Evict a node from the memory cache.
-    pub(crate) fn evict(&self, id: NodeId) { self.cache.remove(&id); }
-
     /// Evict everything (called on `discard()`).
     pub(crate) fn evict_all(&self) { self.cache.clear(); }
 
@@ -121,8 +102,6 @@ impl Loader {
         }
         Ok(())
     }
-
-    pub(crate) fn storage(&self) -> &Arc<dyn Storage> { &self.storage }
 }
 
 #[cfg(test)]
@@ -163,7 +142,7 @@ mod tests {
         loader.persist(id, &v, hash).await.unwrap();
 
         // Evict from cache to force a storage round-trip.
-        loader.evict(id);
+        loader.evict_all();
         let loaded = loader.get(id).await.unwrap().expect("should be present");
         let n: i32 = registry.downcast_value::<i32>(&loaded.0).unwrap();
         assert_eq!(n, 42);

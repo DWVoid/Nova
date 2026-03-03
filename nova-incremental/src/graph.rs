@@ -94,7 +94,6 @@ impl EdgePayload {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ValueEdge {
-    pub id:      EdgeId,
     pub from:    Endpoint,
     pub to:      Endpoint,
     pub payload: EdgePayload,
@@ -104,13 +103,8 @@ pub(crate) struct ValueEdge {
 // IoNode
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IoKind { Input, Output }
-
 #[derive(Debug, Clone)]
 pub(crate) struct IoNode {
-    pub id:       NodeId,
-    pub kind:     IoKind,
     /// EdgeId of the one incoming edge (None for Input nodes initially).
     pub incoming: Option<EdgeId>,
     /// EdgeIds of all outgoing edges.
@@ -123,8 +117,6 @@ pub(crate) struct IoNode {
 
 #[derive(Debug)]
 pub(crate) struct TransformNode {
-    pub id:            NodeId,
-    pub transform_key: String,
     pub transform:     ErasedTransform,
     /// input_edges[slot] = list of incoming EdgeIds for that slot.
     pub input_edges:   Vec<Vec<EdgeId>>,
@@ -141,7 +133,6 @@ pub(crate) struct TransformNode {
 pub(crate) enum GraphError {
     DuplicateNode(NodeId),
     NodeNotFound(NodeId),
-    EdgeNotFound(EdgeId),
     SlotOutOfRange { node: NodeId, slot: usize },
     DuplicateEdge { from: Endpoint, to: Endpoint },
     TypeConflict(String),
@@ -152,7 +143,6 @@ impl std::fmt::Display for GraphError {
         match self {
             GraphError::DuplicateNode(id)          => write!(f, "duplicate node {id}"),
             GraphError::NodeNotFound(id)           => write!(f, "node {id} not found"),
-            GraphError::EdgeNotFound(id)           => write!(f, "edge {id:?} not found"),
             GraphError::SlotOutOfRange { node, slot } =>
                 write!(f, "slot {slot} out of range on node {node}"),
             GraphError::DuplicateEdge { from, to } =>
@@ -196,7 +186,7 @@ impl Graph {
         if g.io_nodes.contains_key(&id) || g.transform_nodes.contains_key(&id) {
             return Err(GraphError::DuplicateNode(id));
         }
-        g.io_nodes.insert(id, IoNode { id, kind: IoKind::Input, incoming: None, outgoing: vec![] });
+        g.io_nodes.insert(id, IoNode { incoming: None, outgoing: vec![] });
         Ok(())
     }
 
@@ -205,12 +195,12 @@ impl Graph {
         if g.io_nodes.contains_key(&id) || g.transform_nodes.contains_key(&id) {
             return Err(GraphError::DuplicateNode(id));
         }
-        g.io_nodes.insert(id, IoNode { id, kind: IoKind::Output, incoming: None, outgoing: vec![] });
+        g.io_nodes.insert(id, IoNode { incoming: None, outgoing: vec![] });
         Ok(())
     }
 
     pub(crate) fn add_transform_node(
-        &self, id: NodeId, key: String, transform: ErasedTransform,
+        &self, id: NodeId, _key: String, transform: ErasedTransform,
     ) -> Result<(), GraphError> {
         let n_in  = transform.schema.inputs.len();
         let n_out = transform.schema.outputs.len();
@@ -219,8 +209,6 @@ impl Graph {
             return Err(GraphError::DuplicateNode(id));
         }
         g.transform_nodes.insert(id, TransformNode {
-            id,
-            transform_key: key,
             transform,
             input_edges:   vec![vec![]; n_in],
             output_edges:  vec![vec![]; n_out],
@@ -244,7 +232,7 @@ impl Graph {
     ) -> Result<EdgeId, GraphError> {
         let id = EdgeId::next();
         let payload = if collection { EdgePayload::collection() } else { EdgePayload::single() };
-        let edge = ValueEdge { id, from, to, payload };
+        let edge = ValueEdge { from, to, payload };
 
         let mut g = self.inner.write().unwrap();
 
@@ -601,15 +589,6 @@ impl Graph {
         changed
     }
 
-    fn dirty_downstream_of_edges_locked(
-        &self,
-        edges: &HashMap<EdgeId, ValueEdge>,
-        edge_ids: &[EdgeId],
-        transforms: &mut HashMap<NodeId, TransformNode>,
-    ) {
-        let _ = (edges, edge_ids, transforms); // kept for potential future use
-    }
-
     // -----------------------------------------------------------------------
     // Status
     // -----------------------------------------------------------------------
@@ -778,17 +757,6 @@ impl Graph {
             .map(|t| Arc::clone(&t.transform.schema))
     }
 
-    /// Get all transform node IDs.
-    pub(crate) fn all_transform_ids(&self) -> Vec<NodeId> {
-        self.inner.read().unwrap().transform_nodes.keys().cloned().collect()
-    }
-
-    /// Get all IoNode IDs (input and output).
-    pub(crate) fn all_io_ids(&self) -> Vec<(NodeId, IoKind)> {
-        self.inner.read().unwrap().io_nodes.values()
-            .map(|n| (n.id, n.kind)).collect()
-    }
-
     /// Clear all in-memory edge values (Single payloads).
     /// Called by `Engine::discard()` so that subsequent `get()` calls read
     /// from storage rather than stale in-memory graph state.
@@ -891,26 +859,10 @@ impl Graph {
         }
     }
 
-    /// Return a snapshot of the current graph topology for persistence.
-    pub(crate) fn snapshot_topology(&self)
-        -> (Vec<(NodeId, IoKind)>, Vec<(NodeId, String)>, Vec<(Endpoint, Endpoint, bool)>)
-    {
-        let g = self.inner.read().unwrap();
-        let io = g.io_nodes.values().map(|n| (n.id, n.kind)).collect();
-        let tx = g.transform_nodes.values().map(|t| (t.id, t.transform_key.clone())).collect();
-        let ed = g.edges.values().map(|e| (e.from, e.to, e.payload.is_collection())).collect();
-        (io, tx, ed)
-    }
-
     /// Invoke the erased transform apply function (gives the scheduler access).
     pub(crate) fn get_erased_transform(&self, id: NodeId) -> Option<ErasedTransform> {
         self.inner.read().unwrap().transform_nodes.get(&id)
             .map(|t| t.transform.clone())
-    }
-
-    /// Check whether a transform node exists.
-    pub(crate) fn has_transform(&self, id: NodeId) -> bool {
-        self.inner.read().unwrap().transform_nodes.contains_key(&id)
     }
 
     /// Get all output edge endpoint pairs for a transform output slot.
@@ -940,13 +892,6 @@ impl Graph {
         } else {
             false
         }
-    }
-
-    /// Return all edges (from, to, is_collection) for topology persistence.
-    pub(crate) fn all_edges(&self) -> Vec<(Endpoint, Endpoint, bool)> {
-        self.inner.read().unwrap().edges.values()
-            .map(|e| (e.from, e.to, e.payload.is_collection()))
-            .collect()
     }
 
     /// Return the source transform NodeIds that feed a given transform's input slot.
@@ -984,18 +929,6 @@ impl Graph {
         sources
     }
 
-    /// Get last-known hash for a node's output (to detect if recompute changed anything).
-    pub(crate) fn last_output_hash(&self, transform: NodeId, slot: usize) -> Option<ValueHash> {
-        let g = self.inner.read().unwrap();
-        let eids = g.transform_nodes.get(&transform)?.output_edges.get(slot)?;
-        eids.first().and_then(|eid| {
-            g.edges.get(eid).and_then(|e| match &e.payload {
-                EdgePayload::Single(sv) => sv.hash,
-                EdgePayload::Collection(_) => None,
-            })
-        })
-    }
-
     /// Get the current element keys in a collection output slot.
     /// Used by fan-out transforms to detect removed elements.
     pub(crate) fn get_collection_output_keys(&self, transform: NodeId, slot: usize) -> Vec<u64> {
@@ -1025,7 +958,7 @@ mod tests {
 
     struct DummyTransform;
     #[async_trait]
-    impl crate::transform::Transform for DummyTransform {
+    impl Transform for DummyTransform {
         fn schema() -> TransformSchema where Self: Sized {
             TransformSchema::new().input::<u32>().output::<u32>()
         }

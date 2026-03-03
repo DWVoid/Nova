@@ -13,8 +13,6 @@
 //! stays `pub(crate)` in this module.
 
 use std::any::{Any, TypeId};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
@@ -467,45 +465,25 @@ pub trait Transform: Send + Sync + 'static {
 // ErasedTransform (pub(crate)) — object-safe wrapper
 // ---------------------------------------------------------------------------
 
-/// SAFETY wrapper to move a raw pointer across the Send boundary.
-struct SendablePtr(usize);
-unsafe impl Send for SendablePtr {}
-
-impl SendablePtr {
-    fn from_mut<T>(p: *mut T) -> Self { Self(p as usize) }
-    unsafe fn recover<T>(&self) -> *mut T { self.0 as *mut T }
-}
-
-type ApplyFn = Arc<
-    dyn for<'a> Fn(&'a mut TransformContext)
-        -> Pin<Box<dyn Future<Output = Result<(), TransformError>> + Send + 'a>>
-    + Send + Sync,
->;
-
-/// Object-safe wrapper holding a boxed `Transform` instance + its layout.
+/// Object-safe wrapper holding a `Transform` instance (via `Arc<dyn Transform>`) and its
+/// slot layout.  `async_trait` makes `Transform` dyn-compatible, so no pointer
+/// tricks are required.
 #[derive(Clone)]
 pub(crate) struct ErasedTransform {
     pub(crate) schema:    Arc<SlotLayout>,
-    pub(crate) apply_fn:  ApplyFn,
+    pub(crate) instance:  Arc<dyn Transform>,
 }
 
 impl ErasedTransform {
     pub(crate) fn new<T: Transform>(layout: SlotLayout, instance: T) -> Self {
-        let instance = Arc::new(instance);
-        let apply_fn: ApplyFn = Arc::new(move |ctx: &mut TransformContext| {
-            let inst = Arc::clone(&instance);
-            let ptr = SendablePtr::from_mut(ctx as *mut TransformContext);
-            Box::pin(async move {
-                // SAFETY: ctx is alive for the full await duration.
-                let ctx_ref = unsafe { &mut *ptr.recover::<TransformContext>() };
-                inst.apply(ctx_ref).await
-            })
-        });
-        Self { schema: Arc::new(layout), apply_fn }
+        Self {
+            schema:   Arc::new(layout),
+            instance: Arc::new(instance),
+        }
     }
 
     pub(crate) async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
-        (self.apply_fn)(ctx).await
+        self.instance.apply(ctx).await
     }
 }
 

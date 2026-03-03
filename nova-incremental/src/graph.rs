@@ -1,114 +1,99 @@
-//! Bipartite incremental computation graph.
-//!
-//! ## Design: Transforms as Nodes, Values on Edges
-//!
-//! The graph is **bipartite**:
-//! - [`InputNode`] / [`OutputNode`] are the user-visible endpoints.
-//! - [`TransformNode`] nodes hold transform functions.
-//! - [`ValueEdge`]s carry cached values between these node kinds.
-//!
-//! A `ValueEdge` can connect any of:
-//! - `InputNode  → TransformNode` (input slot)
-//! - `TransformNode → TransformNode` (transform-to-transform, slot wiring)
-//! - `TransformNode → OutputNode` (output slot)
-//! - `InputNode  → OutputNode` (passthrough, no transform)
-//!
-//! ## Design: Collection Edges
-//!
-//! A `Collection`-typed [`EdgePayload`] carries a [`CollectionEdge`] with
-//! per-element dirty tracking.  Crossing-kind connections are handled by the
-//! scheduler:
-//! - `Collection output → Single input slot`: scheduler calls the transform
-//!   once per element.
-//! - `Single output → Collection input slot`: scheduler inserts the value
-//!   into the collection using the slot's sorter.
+//! Bipartite computation graph: IoNodes, TransformNodes, and ValueEdges.
+//! All types are `pub(crate)`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use dashmap::DashMap;
-use crate::collection::{CollectionEdge, CollectionDiff, CollectionElement};
-use crate::cycle::{SccGroup, TarjanScc};
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use crate::node_id::NodeId;
-use crate::transform::{Transform, TransformError};
+use crate::transform::{ErasedTransform, TransformError};
 use crate::value::{Value, ValueHash};
 
 // ---------------------------------------------------------------------------
 // EdgeId
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct EdgeId(pub u64);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct EdgeId(u64);
 
-static NEXT_EDGE_ID: AtomicU64 = AtomicU64::new(1);
-fn next_edge_id() -> EdgeId {
-    EdgeId(NEXT_EDGE_ID.fetch_add(1, Ordering::Relaxed))
+static EDGE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl EdgeId {
+    pub(crate) fn next() -> Self {
+        Self(EDGE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 // ---------------------------------------------------------------------------
-// NodeStatus (for TransformNodes only)
+// Endpoint
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NodeStatus {
-    Clean,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Endpoint {
+    Io(NodeId),
+    TransformInput  { transform: NodeId, slot: usize },
+    TransformOutput { transform: NodeId, slot: usize },
+}
+
+// ---------------------------------------------------------------------------
+// NodeStatus
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub(crate) enum NodeStatus {
     Dirty,
+    Clean,
     Error(TransformError),
 }
 
 impl NodeStatus {
-    pub fn is_dirty(&self) -> bool { matches!(self, NodeStatus::Dirty) }
-    pub fn is_error(&self) -> bool { matches!(self, NodeStatus::Error(_)) }
+    pub(crate) fn is_dirty(&self) -> bool { matches!(self, NodeStatus::Dirty) }
 }
 
 // ---------------------------------------------------------------------------
-// Endpoint — one side of a ValueEdge
+// SingleEdgeValue / CollectionElement
 // ---------------------------------------------------------------------------
 
-/// One side of a [`ValueEdge`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Endpoint {
-    /// An `InputNode` or `OutputNode` (user-visible).
-    Io(NodeId),
-    /// An input slot of a `TransformNode`.
-    TransformInput { transform: NodeId, slot: usize },
-    /// An output slot of a `TransformNode`.
-    TransformOutput { transform: NodeId, slot: usize },
+#[derive(Debug, Clone)]
+pub(crate) struct SingleEdgeValue {
+    pub value: Option<Value>,
+    pub hash:  Option<ValueHash>,
+    pub dirty: bool,
 }
 
-impl Endpoint {
-    pub fn node_id(&self) -> NodeId {
-        match self {
-            Endpoint::Io(id) => *id,
-            Endpoint::TransformInput { transform, .. } => *transform,
-            Endpoint::TransformOutput { transform, .. } => *transform,
-        }
-    }
+impl Default for SingleEdgeValue {
+    fn default() -> Self { Self { value: None, hash: None, dirty: false } }
+}
+
+/// One element in a collection edge.
+#[derive(Debug, Clone)]
+pub(crate) struct CollectionElement {
+    pub key:   u64,
+    pub value: Value,
+    pub hash:  ValueHash,
+    pub dirty: bool,
 }
 
 // ---------------------------------------------------------------------------
 // EdgePayload
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-pub enum EdgePayload {
-    Single(SingleEdge),
-    Collection(CollectionEdge),
+#[derive(Debug, Clone)]
+pub(crate) enum EdgePayload {
+    Single(SingleEdgeValue),
+    Collection(Vec<CollectionElement>),
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct SingleEdge {
-    pub value:      Option<Value>,
-    pub value_hash: Option<ValueHash>,
-    pub dirty:      bool,
+impl EdgePayload {
+    pub(crate) fn single() -> Self { Self::Single(Default::default()) }
+    pub(crate) fn collection() -> Self { Self::Collection(vec![]) }
+    pub(crate) fn is_collection(&self) -> bool { matches!(self, EdgePayload::Collection(_)) }
 }
 
 // ---------------------------------------------------------------------------
 // ValueEdge
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
-pub struct ValueEdge {
+#[derive(Debug, Clone)]
+pub(crate) struct ValueEdge {
     pub id:      EdgeId,
     pub from:    Endpoint,
     pub to:      Endpoint,
@@ -116,25 +101,20 @@ pub struct ValueEdge {
 }
 
 // ---------------------------------------------------------------------------
-// IoNode (Input / Output)
+// IoNode
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IoKind { Input, Output }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IoKind { Input, Output }
 
-#[derive(Debug)]
-pub struct IoNode {
-    pub id:      NodeId,
-    pub kind:    IoKind,
-    /// Edge that writes to this node (None for InputNodes).
+#[derive(Debug, Clone)]
+pub(crate) struct IoNode {
+    pub id:       NodeId,
+    pub kind:     IoKind,
+    /// EdgeId of the one incoming edge (None for Input nodes initially).
     pub incoming: Option<EdgeId>,
-    /// Edges that read from this node (to transform input slots).
+    /// EdgeIds of all outgoing edges.
     pub outgoing: Vec<EdgeId>,
-}
-
-impl IoNode {
-    pub fn new_input(id: NodeId) -> Self  { Self { id, kind: IoKind::Input,  incoming: None, outgoing: vec![] } }
-    pub fn new_output(id: NodeId) -> Self { Self { id, kind: IoKind::Output, incoming: None, outgoing: vec![] } }
 }
 
 // ---------------------------------------------------------------------------
@@ -142,30 +122,15 @@ impl IoNode {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-pub struct TransformNode {
+pub(crate) struct TransformNode {
     pub id:            NodeId,
     pub transform_key: String,
-    pub transform:     Transform,
-    /// input_edges[slot_idx] = list of EdgeIds feeding that slot.
-    pub input_edges:  Vec<Vec<EdgeId>>,
-    /// output_edges[slot_idx] = list of EdgeIds leaving that slot.
-    pub output_edges: Vec<Vec<EdgeId>>,
+    pub transform:     ErasedTransform,
+    /// input_edges[slot] = list of incoming EdgeIds for that slot.
+    pub input_edges:   Vec<Vec<EdgeId>>,
+    /// output_edges[slot] = list of outgoing EdgeIds for that slot.
+    pub output_edges:  Vec<Vec<EdgeId>>,
     pub status:        NodeStatus,
-}
-
-impl TransformNode {
-    pub fn new(id: NodeId, transform_key: String, transform: Transform) -> Self {
-        let n_in  = transform.schema().inputs.len();
-        let n_out = transform.schema().outputs.len();
-        Self {
-            id,
-            transform_key,
-            transform,
-            input_edges:  vec![vec![]; n_in],
-            output_edges: vec![vec![]; n_out],
-            status:        NodeStatus::Dirty,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,17 +138,27 @@ impl TransformNode {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-pub struct GraphError {
-    pub message: String,
-}
-
-impl GraphError {
-    pub fn new(msg: impl Into<String>) -> Self { Self { message: msg.into() } }
+pub(crate) enum GraphError {
+    DuplicateNode(NodeId),
+    NodeNotFound(NodeId),
+    EdgeNotFound(EdgeId),
+    SlotOutOfRange { node: NodeId, slot: usize },
+    DuplicateEdge { from: Endpoint, to: Endpoint },
+    TypeConflict(String),
 }
 
 impl std::fmt::Display for GraphError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
+        match self {
+            GraphError::DuplicateNode(id)          => write!(f, "duplicate node {id}"),
+            GraphError::NodeNotFound(id)           => write!(f, "node {id} not found"),
+            GraphError::EdgeNotFound(id)           => write!(f, "edge {id:?} not found"),
+            GraphError::SlotOutOfRange { node, slot } =>
+                write!(f, "slot {slot} out of range on node {node}"),
+            GraphError::DuplicateEdge { from, to } =>
+                write!(f, "duplicate edge {from:?} → {to:?}"),
+            GraphError::TypeConflict(msg)          => write!(f, "type conflict: {msg}"),
+        }
     }
 }
 impl std::error::Error for GraphError {}
@@ -192,323 +167,528 @@ impl std::error::Error for GraphError {}
 // Graph
 // ---------------------------------------------------------------------------
 
-/// The bipartite incremental computation graph.
-#[derive(Clone)]
-pub struct Graph {
-    io_nodes:        Arc<DashMap<NodeId, IoNode>>,
-    transform_nodes: Arc<DashMap<NodeId, TransformNode>>,
-    edges:           Arc<DashMap<EdgeId, ValueEdge>>,
-    /// Legal SCC groups (cycles through Collection input slots).
-    scc_groups:      Arc<parking_lot::RwLock<Vec<SccGroup>>>,
+/// The bipartite computation graph.  All mutations are guarded by a single
+/// `RwLock` so that topology is always consistent.  After `EngineBuilder::build()`
+/// topology is sealed and only value mutations occur (via `set_input` / `push_output`).
+#[derive(Debug)]
+pub(crate) struct Graph {
+    inner: RwLock<GraphInner>,
+}
+
+#[derive(Debug, Default)]
+struct GraphInner {
+    io_nodes:        HashMap<NodeId, IoNode>,
+    transform_nodes: HashMap<NodeId, TransformNode>,
+    edges:           HashMap<EdgeId, ValueEdge>,
 }
 
 impl Graph {
-    pub fn new() -> Self {
-        Self {
-            io_nodes:        Arc::new(DashMap::new()),
-            transform_nodes: Arc::new(DashMap::new()),
-            edges:           Arc::new(DashMap::new()),
-            scc_groups:      Arc::new(parking_lot::RwLock::new(Vec::new())),
+    pub(crate) fn new() -> Self {
+        Self { inner: RwLock::new(GraphInner::default()) }
+    }
+
+    // -----------------------------------------------------------------------
+    // Node addition (build phase only)
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn add_input_node(&self, id: NodeId) -> Result<(), GraphError> {
+        let mut g = self.inner.write().unwrap();
+        if g.io_nodes.contains_key(&id) || g.transform_nodes.contains_key(&id) {
+            return Err(GraphError::DuplicateNode(id));
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // Node management
-    // -----------------------------------------------------------------------
-
-    pub fn add_input_node(&self) -> NodeId {
-        let id = NodeId::new();
-        self.io_nodes.insert(id, IoNode::new_input(id));
-        id
-    }
-
-    pub fn add_input_node_with_id(&self, id: NodeId) {
-        self.io_nodes.entry(id).or_insert_with(|| IoNode::new_input(id));
-    }
-
-    pub fn add_output_node(&self) -> NodeId {
-        let id = NodeId::new();
-        self.io_nodes.insert(id, IoNode::new_output(id));
-        id
-    }
-
-    pub fn add_output_node_with_id(&self, id: NodeId) {
-        self.io_nodes.entry(id).or_insert_with(|| IoNode::new_output(id));
-    }
-
-    /// Backward-compat alias for `add_output_node_with_id`.
-    pub fn add_computed_node_with_id(&self, id: NodeId) {
-        self.add_output_node_with_id(id);
-    }
-
-    pub fn add_transform_node(&self, key: impl Into<String>, transform: Transform) -> NodeId {
-        let id = NodeId::new();
-        let tn = TransformNode::new(id, key.into(), transform);
-        self.transform_nodes.insert(id, tn);
-        id
-    }
-
-    pub fn add_transform_node_with_id(&self, id: NodeId, key: impl Into<String>, transform: Transform) {
-        self.transform_nodes.entry(id).or_insert_with(|| TransformNode::new(id, key.into(), transform));
-    }
-
-    pub fn contains_io_node(&self, id: NodeId) -> bool {
-        self.io_nodes.contains_key(&id)
-    }
-
-    pub fn contains_transform_node(&self, id: NodeId) -> bool {
-        self.transform_nodes.contains_key(&id)
-    }
-
-    pub fn contains_node(&self, id: NodeId) -> bool {
-        self.io_nodes.contains_key(&id) || self.transform_nodes.contains_key(&id)
-    }
-
-    pub fn is_input_node(&self, id: NodeId) -> bool {
-        self.io_nodes.get(&id).map(|n| n.kind == IoKind::Input).unwrap_or(false)
-    }
-
-    // -----------------------------------------------------------------------
-    // Edge management (wiring)
-    // -----------------------------------------------------------------------
-
-    /// Add a Single-payload edge from `from` to `to`.
-    pub fn add_single_edge(&self, from: Endpoint, to: Endpoint) -> Result<EdgeId, GraphError> {
-        self.validate_endpoints(&from, &to)?;
-        let eid = next_edge_id();
-        let edge = ValueEdge {
-            id: eid,
-            from: from.clone(),
-            to: to.clone(),
-            payload: EdgePayload::Single(SingleEdge::default()),
-        };
-        self.edges.insert(eid, edge);
-        self.register_edge_in_nodes(eid, &from, &to);
-        Ok(eid)
-    }
-
-    /// Add a Collection-payload edge from `from` to `to`.
-    pub fn add_collection_edge(&self, from: Endpoint, to: Endpoint) -> Result<EdgeId, GraphError> {
-        self.validate_endpoints(&from, &to)?;
-        let eid = next_edge_id();
-        let edge = ValueEdge {
-            id: eid,
-            from: from.clone(),
-            to: to.clone(),
-            payload: EdgePayload::Collection(CollectionEdge::new()),
-        };
-        self.edges.insert(eid, edge);
-        self.register_edge_in_nodes(eid, &from, &to);
-        Ok(eid)
-    }
-
-    fn validate_endpoints(&self, from: &Endpoint, to: &Endpoint) -> Result<(), GraphError> {
-        self.check_endpoint_exists(from)?;
-        self.check_endpoint_exists(to)?;
+        g.io_nodes.insert(id, IoNode { id, kind: IoKind::Input, incoming: None, outgoing: vec![] });
         Ok(())
     }
 
-    fn check_endpoint_exists(&self, ep: &Endpoint) -> Result<(), GraphError> {
-        match ep {
-            Endpoint::Io(id) => {
-                if !self.io_nodes.contains_key(id) {
-                    return Err(GraphError::new(format!("IoNode {id} not in graph")));
-                }
-            }
-            Endpoint::TransformInput { transform, slot } |
-            Endpoint::TransformOutput { transform, slot } => {
-                let tn = self.transform_nodes.get(transform)
-                    .ok_or_else(|| GraphError::new(format!("TransformNode {transform} not in graph")))?;
-                let count = match ep {
-                    Endpoint::TransformInput  { .. } => tn.input_edges.len(),
-                    Endpoint::TransformOutput { .. } => tn.output_edges.len(),
-                    _ => unreachable!(),
-                };
-                if *slot >= count {
-                    return Err(GraphError::new(format!(
-                        "slot {slot} out of range (transform {transform} has {count} slots)"
-                    )));
-                }
-            }
+    pub(crate) fn add_output_node(&self, id: NodeId) -> Result<(), GraphError> {
+        let mut g = self.inner.write().unwrap();
+        if g.io_nodes.contains_key(&id) || g.transform_nodes.contains_key(&id) {
+            return Err(GraphError::DuplicateNode(id));
         }
+        g.io_nodes.insert(id, IoNode { id, kind: IoKind::Output, incoming: None, outgoing: vec![] });
         Ok(())
     }
 
-    fn register_edge_in_nodes(&self, eid: EdgeId, from: &Endpoint, to: &Endpoint) {
-        // "from" side: register as outgoing.
+    pub(crate) fn add_transform_node(
+        &self, id: NodeId, key: String, transform: ErasedTransform,
+    ) -> Result<(), GraphError> {
+        let n_in  = transform.schema.inputs.len();
+        let n_out = transform.schema.outputs.len();
+        let mut g = self.inner.write().unwrap();
+        if g.io_nodes.contains_key(&id) || g.transform_nodes.contains_key(&id) {
+            return Err(GraphError::DuplicateNode(id));
+        }
+        g.transform_nodes.insert(id, TransformNode {
+            id,
+            transform_key: key,
+            transform,
+            input_edges:   vec![vec![]; n_in],
+            output_edges:  vec![vec![]; n_out],
+            status:        NodeStatus::Dirty,
+        });
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge addition (build phase only)
+    // -----------------------------------------------------------------------
+
+    /// Add an edge from `from` to `to`.  `collection` controls edge type.
+    /// The edge type may also be forced Collection if the target slot schema
+    /// demands it.
+    pub(crate) fn add_edge(
+        &self,
+        from: Endpoint,
+        to:   Endpoint,
+        collection: bool,
+    ) -> Result<EdgeId, GraphError> {
+        let id = EdgeId::next();
+        let payload = if collection { EdgePayload::collection() } else { EdgePayload::single() };
+        let edge = ValueEdge { id, from, to, payload };
+
+        let mut g = self.inner.write().unwrap();
+
+        // Check for duplicate
+        for e in g.edges.values() {
+            if e.from == from && e.to == to {
+                return Err(GraphError::DuplicateEdge { from, to });
+            }
+        }
+
+        // Register on source node outgoing list.
         match from {
-            Endpoint::Io(id) => {
-                if let Some(mut n) = self.io_nodes.get_mut(id) { n.outgoing.push(eid); }
+            Endpoint::Io(n) => {
+                g.io_nodes.get_mut(&n)
+                    .ok_or(GraphError::NodeNotFound(n))?
+                    .outgoing.push(id);
             }
             Endpoint::TransformOutput { transform, slot } => {
-                if let Some(mut t) = self.transform_nodes.get_mut(transform) {
-                    if *slot < t.output_edges.len() {
-                        t.output_edges[*slot].push(eid);
-                    }
+                let t = g.transform_nodes.get_mut(&transform)
+                    .ok_or(GraphError::NodeNotFound(transform))?;
+                if slot >= t.output_edges.len() {
+                    return Err(GraphError::SlotOutOfRange { node: transform, slot });
                 }
+                t.output_edges[slot].push(id);
             }
-            _ => {}
+            Endpoint::TransformInput { .. } => {
+                return Err(GraphError::TypeConflict(
+                    "TransformInput cannot be an edge source".into()
+                ));
+            }
         }
-        // "to" side: register as incoming.
+
+        // Register on target node incoming list.
         match to {
-            Endpoint::Io(id) => {
-                if let Some(mut n) = self.io_nodes.get_mut(id) { n.incoming = Some(eid); }
+            Endpoint::Io(n) => {
+                let node = g.io_nodes.get_mut(&n)
+                    .ok_or(GraphError::NodeNotFound(n))?;
+                node.incoming = Some(id);
             }
             Endpoint::TransformInput { transform, slot } => {
-                if let Some(mut t) = self.transform_nodes.get_mut(transform) {
-                    if *slot < t.input_edges.len() {
-                        t.input_edges[*slot].push(eid);
-                    }
+                let t = g.transform_nodes.get_mut(&transform)
+                    .ok_or(GraphError::NodeNotFound(transform))?;
+                if slot >= t.input_edges.len() {
+                    return Err(GraphError::SlotOutOfRange { node: transform, slot });
                 }
+                t.input_edges[slot].push(id);
             }
-            _ => {}
+            Endpoint::TransformOutput { .. } => {
+                return Err(GraphError::TypeConflict(
+                    "TransformOutput cannot be an edge target".into()
+                ));
+            }
         }
+
+        g.edges.insert(id, edge);
+        Ok(id)
     }
 
     // -----------------------------------------------------------------------
-    // Input value management
+    // Input value mutation (runtime)
     // -----------------------------------------------------------------------
 
-    /// Set the value of an InputNode and mark all downstream transforms dirty.
-    pub fn set_input(&self, id: NodeId, value: Value, hash: ValueHash) -> Result<(), GraphError> {
-        let node = self.io_nodes.get(&id)
-            .ok_or_else(|| GraphError::new(format!("IoNode {id} not found")))?;
-        if node.kind != IoKind::Input {
-            return Err(GraphError::new(format!("node {id} is not an input node")));
-        }
-        let outgoing = node.outgoing.clone();
-        drop(node);
-        // Store value on all outgoing single edges.
+    /// Pre-load a restored input value on warm start.  Sets value on outgoing
+    /// edges WITHOUT dirtying downstream transforms.  This lets `set_input`
+    /// later compare hashes correctly and skip recomputation when unchanged.
+    pub(crate) fn preload_input(&self, id: NodeId, value: Value, hash: ValueHash) {
+        let mut g = self.inner.write().unwrap();
+        let outgoing: Vec<EdgeId> = g.io_nodes.get(&id)
+            .map(|n| n.outgoing.clone())
+            .unwrap_or_default();
         for eid in &outgoing {
-            if let Some(mut edge) = self.edges.get_mut(eid) {
+            if let Some(edge) = g.edges.get_mut(eid) {
+                if let EdgePayload::Single(sv) = &mut edge.payload {
+                    sv.value = Some(value.clone());
+                    sv.hash  = Some(hash);
+                    sv.dirty = false; // NOT dirty — warm start pre-load
+                }
+            }
+        }
+    }
+
+    /// Set the value of an input IoNode's outgoing edge(s).
+    /// Returns `true` if the hash changed (node was actually dirtied).
+    pub(crate) fn set_input(
+        &self,
+        id: NodeId,
+        value: Value,
+        hash:  ValueHash,
+    ) -> bool {
+        let mut g = self.inner.write().unwrap();
+        // Dirty all downstream transform nodes if hash changed.
+        let outgoing: Vec<EdgeId> = g.io_nodes.get(&id)
+            .map(|n| n.outgoing.clone())
+            .unwrap_or_default();
+
+        let mut changed = false;
+        for eid in &outgoing {
+            if let Some(edge) = g.edges.get_mut(eid) {
                 match &mut edge.payload {
-                    EdgePayload::Single(s) => {
-                        s.value = Some(value.clone());
-                        s.value_hash = Some(hash);
-                        s.dirty = true;
-                    }
-                    EdgePayload::Collection(c) => {
-                        // Single input feeding a collection: insert/update element.
-                        let key = hash; // content hash = element key
-                        Self::upsert_collection_element(c, key, value.clone(), hash);
-                    }
-                }
-            }
-        }
-        self.propagate_dirty_from_io(id);
-        Ok(())
-    }
-
-    fn upsert_collection_element(c: &mut CollectionEdge, key: crate::collection::ElementKey, value: Value, hash: ValueHash) {
-        match c.find_by_key(key) {
-            Ok(pos) => {
-                c.elements[pos].value = value;
-                c.elements[pos].hash = hash;
-                c.elements[pos].dirty = true;
-            }
-            Err(pos) => {
-                c.elements.insert(pos, CollectionElement {
-                    key, value, hash, dirty: true, nested: None,
-                });
-            }
-        }
-        c.dirty = true;
-        c.recompute_full_hash();
-    }
-
-    // -----------------------------------------------------------------------
-    // Dirty propagation
-    // -----------------------------------------------------------------------
-
-    /// Propagate dirty from an IoNode to downstream TransformNodes.
-    pub fn propagate_dirty_from_io(&self, io_id: NodeId) {
-        if let Some(node) = self.io_nodes.get(&io_id) {
-            let outgoing = node.outgoing.clone();
-            drop(node);
-            for eid in outgoing {
-                if let Some(edge) = self.edges.get(&eid) {
-                    let to = edge.to.clone();
-                    drop(edge);
-                    self.mark_transform_dirty_from_endpoint(&to);
-                }
-            }
-        }
-    }
-
-    fn mark_transform_dirty_from_endpoint(&self, ep: &Endpoint) {
-        if let Endpoint::TransformInput { transform, .. } | Endpoint::TransformOutput { transform, .. } = ep {
-            self.mark_transform_dirty(*transform);
-        }
-    }
-
-    /// Mark a TransformNode dirty and propagate forward through its output edges.
-    pub fn mark_transform_dirty(&self, id: NodeId) {
-        if let Some(mut tn) = self.transform_nodes.get_mut(&id) {
-            if tn.status.is_dirty() { return; } // already dirty, subtree already propagated
-            tn.status = NodeStatus::Dirty;
-            let output_edges: Vec<Vec<EdgeId>> = tn.output_edges.clone();
-            drop(tn);
-            for slot_edges in output_edges {
-                for eid in slot_edges {
-                    if let Some(mut edge) = self.edges.get_mut(&eid) {
-                        match &mut edge.payload {
-                            EdgePayload::Single(s) => s.dirty = true,
-                            EdgePayload::Collection(c) => c.dirty = true,
+                    EdgePayload::Single(sv) => {
+                        if sv.hash.map(|h| h != hash).unwrap_or(true) {
+                            sv.value = Some(value.clone());
+                            sv.hash  = Some(hash);
+                            sv.dirty = true;
+                            changed  = true;
                         }
-                        let to = edge.to.clone();
-                        drop(edge);
-                        // propagate downstream
-                        match &to {
-                            Endpoint::Io(io_id) => {
-                                // downstream IoNode → mark its outgoing edges' transforms dirty
-                                self.propagate_dirty_from_io(*io_id);
-                            }
-                            Endpoint::TransformInput { transform, .. } => {
-                                self.mark_transform_dirty(*transform);
-                            }
-                            _ => {}
+                    }
+                    EdgePayload::Collection(_) => {
+                        // Input IoNode → Collection edge not expected in this flow.
+                        // The expand transform handles collection fan-out.
+                    }
+                }
+            }
+        }
+
+        // Also dirty the transform nodes that have these edges as inputs.
+        if changed {
+            for eid in &outgoing {
+                if let Some(edge) = g.edges.get(eid) {
+                    if let Endpoint::TransformInput { transform, .. } = edge.to {
+                        if let Some(t) = g.transform_nodes.get_mut(&transform) {
+                            t.status = NodeStatus::Dirty;
                         }
                     }
                 }
             }
         }
+        changed
     }
 
     // -----------------------------------------------------------------------
-    // Dirty nodes (transforms) in topological order
+    // Output value storage (after scheduler computes a transform)
     // -----------------------------------------------------------------------
 
-    /// Return all dirty `TransformNode` IDs in topological order (inputs first).
-    pub fn dirty_transforms_topo(&self) -> Vec<NodeId> {
-        let dirty: HashSet<NodeId> = self.transform_nodes.iter()
-            .filter(|e| e.status.is_dirty())
-            .map(|e| *e.key())
-            .collect();
-        if dirty.is_empty() { return vec![]; }
+    /// Store a single output value on the edges coming from `transform` slot `out_slot`.
+    /// Dirty downstream transforms if hash changed.
+    pub(crate) fn push_single_output(
+        &self,
+        transform: NodeId,
+        out_slot:  usize,
+        value:     Value,
+        hash:      ValueHash,
+    ) -> bool {
+        let mut g = self.inner.write().unwrap();
+        let edge_ids: Vec<EdgeId> = g.transform_nodes.get(&transform)
+            .and_then(|t| t.output_edges.get(out_slot))
+            .cloned()
+            .unwrap_or_default();
 
-        let errored: HashSet<NodeId> = self.transform_nodes.iter()
-            .filter(|e| e.status.is_error())
-            .map(|e| *e.key())
-            .collect();
+        let mut changed = false;
+        for eid in &edge_ids {
+            if let Some(edge) = g.edges.get_mut(eid) {
+                match &mut edge.payload {
+                    EdgePayload::Single(sv) => {
+                        if sv.hash.map(|h| h != hash).unwrap_or(true) {
+                            sv.value = Some(value.clone());
+                            sv.hash  = Some(hash);
+                            sv.dirty = true;
+                            changed  = true;
+                        }
+                    }
+                    EdgePayload::Collection(elems) => {
+                        // Single→Collection: treat the value as one element.
+                        // The element key is derived externally; use hash as key proxy.
+                        // This path is used by per-element fan-out.
+                        let key = hash; // element key = output hash (stable per element)
+                        if let Some(el) = elems.iter_mut().find(|e| e.key == key) {
+                            if el.hash != hash {
+                                el.value = value.clone();
+                                el.hash  = hash;
+                                el.dirty = true;
+                                changed  = true;
+                            }
+                        } else {
+                            elems.push(CollectionElement { key, value: value.clone(), hash, dirty: true });
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
 
-        // Build in-degree map over dirty transforms.
-        // T depends on T' if any input edge of T has its source as an output
-        // edge of T'.
-        let mut in_degree: HashMap<NodeId, usize> = dirty.iter().map(|&id| (id, 0)).collect();
-        let mut adj: HashMap<NodeId, Vec<NodeId>> = dirty.iter().map(|&id| (id, vec![])).collect();
+        if changed {
+            // Collect downstream transform IDs first (avoids split borrow).
+            let dirty_targets: Vec<NodeId> = edge_ids.iter()
+                .filter_map(|eid| g.edges.get(eid))
+                .filter_map(|e| if let Endpoint::TransformInput { transform, .. } = e.to {
+                    Some(transform)
+                } else { None })
+                .collect();
+            for t_id in dirty_targets {
+                if let Some(t) = g.transform_nodes.get_mut(&t_id) {
+                    t.status = NodeStatus::Dirty;
+                }
+            }
+        }
+        changed
+    }
 
-        for t_ref in self.transform_nodes.iter() {
-            let tid = *t_ref.key();
-            if !dirty.contains(&tid) { continue; }
-            for slot_edges in &t_ref.input_edges {
-                for &eid in slot_edges {
-                    if let Some(edge) = self.edges.get(&eid) {
-                        let upstream = self.upstream_transform_of_edge(&edge.from);
-                        for u in upstream {
-                            if dirty.contains(&u) || errored.contains(&u) {
-                                *in_degree.entry(tid).or_default() += 1;
-                                if dirty.contains(&u) {
-                                    adj.entry(u).or_default().push(tid);
+    /// Store collection output from `transform` slot `out_slot`.
+    /// Diffs against existing collection; dirties downstream transforms.
+    /// Used by gather/expand transforms that replace the entire collection.
+    pub(crate) fn push_collection_output(
+        &self,
+        transform: NodeId,
+        out_slot:  usize,
+        items:     Vec<(u64, Value, ValueHash)>,
+    ) -> bool {
+        let mut g = self.inner.write().unwrap();
+        let edge_ids: Vec<EdgeId> = g.transform_nodes.get(&transform)
+            .and_then(|t| t.output_edges.get(out_slot))
+            .cloned()
+            .unwrap_or_default();
+
+        let mut changed = false;
+        for eid in &edge_ids {
+            if let Some(edge) = g.edges.get_mut(eid) {
+                if let EdgePayload::Collection(elems) = &mut edge.payload {
+                    let new_keys: std::collections::HashSet<u64> =
+                        items.iter().map(|(k, _, _)| *k).collect();
+                    // Mark removed elements dirty (absence = removal for downstream).
+                    elems.retain(|el| new_keys.contains(&el.key) || {
+                        changed = true;
+                        false // actually remove them
+                    });
+                    for (key, value, hash) in &items {
+                        if let Some(el) = elems.iter_mut().find(|e| e.key == *key) {
+                            if el.hash != *hash {
+                                el.value = value.clone();
+                                el.hash  = *hash;
+                                el.dirty = true;
+                                changed  = true;
+                            }
+                        } else {
+                            elems.push(CollectionElement {
+                                key: *key, value: value.clone(), hash: *hash, dirty: true,
+                            });
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if changed {
+            let dirty_targets: Vec<NodeId> = edge_ids.iter()
+                .filter_map(|eid| g.edges.get(eid))
+                .filter_map(|e| if let Endpoint::TransformInput { transform, .. } = e.to {
+                    Some(transform)
+                } else { None })
+                .collect();
+            for t_id in dirty_targets {
+                if let Some(t) = g.transform_nodes.get_mut(&t_id) {
+                    t.status = NodeStatus::Dirty;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Upsert collection elements for a fan-out transform output.
+    /// Unlike `push_collection_output`, this does NOT remove elements that are
+    /// absent from `items` — it only adds new elements or updates changed ones.
+    /// Removal is handled by `remove_collection_elements`.
+    pub(crate) fn upsert_collection_output(
+        &self,
+        transform: NodeId,
+        out_slot:  usize,
+        items:     Vec<(u64, Value, ValueHash)>,
+    ) -> bool {
+        let mut g = self.inner.write().unwrap();
+        let edge_ids: Vec<EdgeId> = g.transform_nodes.get(&transform)
+            .and_then(|t| t.output_edges.get(out_slot))
+            .cloned()
+            .unwrap_or_default();
+
+        let mut changed = false;
+        for eid in &edge_ids {
+            if let Some(edge) = g.edges.get_mut(eid) {
+                if let EdgePayload::Collection(elems) = &mut edge.payload {
+                    for (key, value, hash) in &items {
+                        if let Some(el) = elems.iter_mut().find(|e| e.key == *key) {
+                            if el.hash != *hash {
+                                el.value = value.clone();
+                                el.hash  = *hash;
+                                el.dirty = true;
+                                changed  = true;
+                            }
+                        } else {
+                            elems.push(CollectionElement {
+                                key: *key, value: value.clone(), hash: *hash, dirty: true,
+                            });
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if changed {
+            let dirty_targets: Vec<NodeId> = edge_ids.iter()
+                .filter_map(|eid| g.edges.get(eid))
+                .filter_map(|e| if let Endpoint::TransformInput { transform, .. } = e.to {
+                    Some(transform)
+                } else { None })
+                .collect();
+            for t_id in dirty_targets {
+                if let Some(t) = g.transform_nodes.get_mut(&t_id) {
+                    t.status = NodeStatus::Dirty;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Remove specific collection elements from a fan-out transform output.
+    /// Called when an upstream collection element has been removed.
+    pub(crate) fn remove_collection_elements(
+        &self,
+        transform: NodeId,
+        out_slot:  usize,
+        keys_to_remove: &[u64],
+    ) -> bool {
+        if keys_to_remove.is_empty() { return false; }
+        let remove_set: std::collections::HashSet<u64> = keys_to_remove.iter().copied().collect();
+        let mut g = self.inner.write().unwrap();
+        let edge_ids: Vec<EdgeId> = g.transform_nodes.get(&transform)
+            .and_then(|t| t.output_edges.get(out_slot))
+            .cloned()
+            .unwrap_or_default();
+
+        let mut changed = false;
+        for eid in &edge_ids {
+            if let Some(edge) = g.edges.get_mut(eid) {
+                if let EdgePayload::Collection(elems) = &mut edge.payload {
+                    let before = elems.len();
+                    elems.retain(|el| !remove_set.contains(&el.key));
+                    if elems.len() < before { changed = true; }
+                }
+            }
+        }
+        if changed {
+            let dirty_targets: Vec<NodeId> = edge_ids.iter()
+                .filter_map(|eid| g.edges.get(eid))
+                .filter_map(|e| if let Endpoint::TransformInput { transform, .. } = e.to {
+                    Some(transform)
+                } else { None })
+                .collect();
+            for t_id in dirty_targets {
+                if let Some(t) = g.transform_nodes.get_mut(&t_id) {
+                    t.status = NodeStatus::Dirty;
+                }
+            }
+        }
+        changed
+    }
+
+    fn dirty_downstream_of_edges_locked(
+        &self,
+        edges: &HashMap<EdgeId, ValueEdge>,
+        edge_ids: &[EdgeId],
+        transforms: &mut HashMap<NodeId, TransformNode>,
+    ) {
+        let _ = (edges, edge_ids, transforms); // kept for potential future use
+    }
+
+    // -----------------------------------------------------------------------
+    // Status
+    // -----------------------------------------------------------------------
+
+    pub(crate) fn mark_clean(&self, id: NodeId) {
+        if let Some(t) = self.inner.write().unwrap().transform_nodes.get_mut(&id) {
+            t.status = NodeStatus::Clean;
+        }
+    }
+
+    pub(crate) fn mark_error(&self, id: NodeId, err: TransformError) {
+        if let Some(t) = self.inner.write().unwrap().transform_nodes.get_mut(&id) {
+            t.status = NodeStatus::Error(err);
+        }
+    }
+
+    /// Mark all transform nodes Clean.  Called on warm start after restoring
+    /// cached values.  Transforms will be re-dirtied by `set_input()` if
+    /// any upstream input hash has changed.
+    pub(crate) fn mark_all_clean_if_warmed(&self) {
+        let mut g = self.inner.write().unwrap();
+        // Only mark clean if at least one output node has a value (i.e. it's a real warm start).
+        let has_output = g.io_nodes.values().any(|n| {
+            n.incoming.and_then(|eid| g.edges.get(&eid))
+                .and_then(|e| if let EdgePayload::Single(sv) = &e.payload { sv.value.as_ref() } else { None })
+                .is_some()
+        });
+        if has_output {
+            for t in g.transform_nodes.values_mut() {
+                t.status = NodeStatus::Clean;
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Read helpers
+    // -----------------------------------------------------------------------
+
+    /// Return all dirty transform node IDs in topological order.
+    pub(crate) fn dirty_transforms_topo(&self) -> Vec<NodeId> {
+        let g = self.inner.read().unwrap();
+        // Build adjacency: transform → transforms it feeds.
+        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
+        for id in g.transform_nodes.keys() { in_degree.entry(*id).or_insert(0); }
+
+        // Build edge index: IoNode → downstream endpoints, so we can traverse
+        // TransformOutput → IoNode → TransformInput indirect paths.
+        let mut io_out_endpoints: HashMap<NodeId, Vec<Endpoint>> = HashMap::new();
+        for edge in g.edges.values() {
+            if let Endpoint::Io(n) = edge.from {
+                io_out_endpoints.entry(n).or_default().push(edge.to);
+            }
+        }
+
+        let mut seen_pairs: std::collections::HashSet<(NodeId, NodeId)> =
+            std::collections::HashSet::new();
+
+        for edge in g.edges.values() {
+            let src_t = match edge.from {
+                Endpoint::TransformOutput { transform, .. } => Some(transform),
+                _ => None,
+            };
+            if let Some(s) = src_t {
+                // Direct TransformOutput → TransformInput.
+                if let Endpoint::TransformInput { transform: d, .. } = edge.to {
+                    if seen_pairs.insert((s, d)) {
+                        adj.entry(s).or_default().push(d);
+                        *in_degree.entry(d).or_insert(0) += 1;
+                    }
+                }
+                // Indirect: TransformOutput → IoNode → TransformInput.
+                if let Endpoint::Io(io_n) = edge.to {
+                    if let Some(downstreams) = io_out_endpoints.get(&io_n) {
+                        for &downstream in downstreams {
+                            if let Endpoint::TransformInput { transform: d, .. } = downstream {
+                                if seen_pairs.insert((s, d)) {
+                                    adj.entry(s).or_default().push(d);
+                                    *in_degree.entry(d).or_insert(0) += 1;
                                 }
                             }
                         }
@@ -517,477 +697,385 @@ impl Graph {
             }
         }
 
-        // Kahn's BFS
-        let mut queue: VecDeque<NodeId> = in_degree.iter()
+        // Kahn's algorithm.
+        let mut queue: std::collections::VecDeque<NodeId> = in_degree
+            .iter()
             .filter(|(_, d)| **d == 0)
-            .map(|(&id, _)| id)
+            .map(|(id, _)| *id)
             .collect();
-        let mut result = Vec::with_capacity(dirty.len());
-        while let Some(nid) = queue.pop_front() {
-            result.push(nid);
-            if let Some(neighbours) = adj.get(&nid) {
-                for &next in neighbours {
-                    let deg = in_degree.entry(next).or_default();
-                    *deg = deg.saturating_sub(1);
+        let mut order = vec![];
+        while let Some(id) = queue.pop_front() {
+            order.push(id);
+            if let Some(nexts) = adj.get(&id) {
+                for &next in nexts {
+                    let deg = in_degree.get_mut(&next).unwrap();
+                    *deg -= 1;
                     if *deg == 0 { queue.push_back(next); }
                 }
             }
         }
-        result
+
+        // Filter to dirty only (preserve topo order).
+        order.into_iter()
+            .filter(|id| g.transform_nodes.get(id).map(|t| t.status.is_dirty()).unwrap_or(false))
+            .collect()
     }
 
-    /// Given an `Endpoint` on the "from" side of an edge, find which
-    /// `TransformNode`(s) produced that edge's value.
-    fn upstream_transform_of_edge(&self, from: &Endpoint) -> Vec<NodeId> {
-        match from {
-            Endpoint::TransformOutput { transform, .. } => vec![*transform],
-            Endpoint::Io(io_id) => {
-                // The IoNode might be fed by a TransformNode output edge.
-                if let Some(node) = self.io_nodes.get(io_id) {
-                    if let Some(eid) = node.incoming {
-                        if let Some(edge) = self.edges.get(&eid) {
-                            return self.upstream_transform_of_edge(&edge.from.clone());
-                        }
+    /// Read the incoming single-value edge for a given transform input slot.
+    /// Returns `None` if no value available yet.
+    pub(crate) fn read_single_input(
+        &self, transform: NodeId, slot: usize,
+    ) -> Option<(Value, ValueHash)> {
+        let g = self.inner.read().unwrap();
+        let edge_ids = g.transform_nodes.get(&transform)?.input_edges.get(slot)?.clone();
+        for eid in &edge_ids {
+            if let Some(edge) = g.edges.get(eid) {
+                if let EdgePayload::Single(sv) = &edge.payload {
+                    if let (Some(v), Some(h)) = (&sv.value, &sv.hash) {
+                        return Some((v.clone(), *h));
                     }
                 }
-                vec![]
             }
-            _ => vec![],
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Edge value access (called by Scheduler)
-    // -----------------------------------------------------------------------
-
-    /// Store a computed value on a Single edge and mark it clean.
-    pub fn store_single_value(&self, eid: EdgeId, value: Value, hash: ValueHash) -> Result<(), GraphError> {
-        let mut edge = self.edges.get_mut(&eid)
-            .ok_or_else(|| GraphError::new(format!("edge {eid:?} not found")))?;
-        match &mut edge.payload {
-            EdgePayload::Single(s) => {
-                s.value = Some(value);
-                s.value_hash = Some(hash);
-                s.dirty = false;
-            }
-            EdgePayload::Collection(_) => {
-                return Err(GraphError::new("store_single_value called on a Collection edge"));
-            }
-        }
-        Ok(())
-    }
-
-    /// Update collection state on a Collection edge (from scheduler after transform run).
-    pub fn store_collection_diff(
-        &self,
-        eid: EdgeId,
-        new_elements: Vec<(crate::collection::ElementKey, Value, ValueHash)>,
-        sorter: &(dyn Fn(&Value, &Value) -> std::cmp::Ordering + Send + Sync),
-    ) -> Result<CollectionDiff, GraphError> {
-        let mut edge = self.edges.get_mut(&eid)
-            .ok_or_else(|| GraphError::new(format!("edge {eid:?} not found")))?;
-        match &mut edge.payload {
-            EdgePayload::Collection(c) => {
-                let old = c.elements.clone();
-                // Replace elements with new ones.
-                c.elements = new_elements.into_iter().map(|(key, value, hash)| {
-                    CollectionElement { key, value, hash, dirty: true, nested: None }
-                }).collect();
-                // Re-sort.
-                c.elements.sort_by(|a, b| sorter(&a.value, &b.value));
-                // Rebuild keys from hash.
-                for el in &mut c.elements {
-                    el.key = el.hash;
-                }
-                c.recompute_full_hash();
-                c.dirty = !c.elements.is_empty();
-                let diff = CollectionDiff::compute(&old, &c.elements);
-                Ok(diff)
-            }
-            EdgePayload::Single(_) => Err(GraphError::new("store_collection_diff on Single edge")),
-        }
-    }
-
-    /// Peek the single value and hash on an edge.
-    pub fn peek_single_value(&self, eid: EdgeId) -> Option<(Value, ValueHash)> {
-        let edge = self.edges.get(&eid)?;
-        match &edge.payload {
-            EdgePayload::Single(s) => {
-                let v = s.value.clone()?;
-                let h = s.value_hash.unwrap_or(0);
-                Some((v, h))
-            }
-            _ => None,
-        }
-    }
-
-    /// Peek the single value of a specific IoNode by reading its incoming edge.
-    pub fn peek_io_value(&self, io_id: NodeId) -> Option<(Value, ValueHash)> {
-        let node = self.io_nodes.get(&io_id)?;
-        match node.kind {
-            IoKind::Input => {
-                // For input nodes, check all outgoing single edges for a value.
-                let outgoing = node.outgoing.clone();
-                drop(node);
-                for eid in outgoing {
-                    if let Some(v) = self.peek_single_value(eid) { return Some(v); }
-                }
-                None
-            }
-            IoKind::Output => {
-                let incoming = node.incoming?;
-                drop(node);
-                self.peek_single_value(incoming)
-            }
-        }
-    }
-
-    /// Get the last-known hash for the value on an edge.
-    pub fn edge_hash(&self, eid: EdgeId) -> Option<ValueHash> {
-        let edge = self.edges.get(&eid)?;
-        match &edge.payload {
-            EdgePayload::Single(s) => s.value_hash,
-            EdgePayload::Collection(c) => Some(c.full_hash),
-        }
-    }
-
-    /// Mark a TransformNode as errored.
-    pub fn store_transform_error(&self, id: NodeId, err: TransformError) -> Result<(), GraphError> {
-        let mut tn = self.transform_nodes.get_mut(&id)
-            .ok_or_else(|| GraphError::new(format!("TransformNode {id} not found")))?;
-        tn.status = NodeStatus::Error(err);
-        Ok(())
-    }
-
-    /// Mark a TransformNode as clean.
-    pub fn mark_transform_clean(&self, id: NodeId) {
-        if let Some(mut tn) = self.transform_nodes.get_mut(&id) {
-            tn.status = NodeStatus::Clean;
-        }
-    }
-
-    /// Get the status of a TransformNode.
-    pub fn transform_status(&self, id: NodeId) -> Option<NodeStatus> {
-        self.transform_nodes.get(&id).map(|t| t.status.clone())
-    }
-
-    /// Get the effective status of any node (backward compat).
-    ///
-    /// For `TransformNode`s: returns the node's own status.
-    /// For `IoNode`s: infers status from the incoming edge's dirty flag and
-    /// the upstream transform's error/dirty state.
-    /// Returns `None` if the node does not exist.
-    pub fn node_status(&self, id: NodeId) -> Option<NodeStatus> {
-        // Try TransformNode first.
-        if let Some(tn) = self.transform_nodes.get(&id) {
-            return Some(tn.status.clone());
-        }
-        // For IoNodes, infer from incoming edge and upstream transform.
-        if let Some(node) = self.io_nodes.get(&id) {
-            if let Some(eid) = node.incoming {
-                drop(node);
-                if let Some(edge) = self.edges.get(&eid) {
-                    // Check upstream transform status.
-                    if let Endpoint::TransformOutput { transform, .. } = &edge.from {
-                        if let Some(tn) = self.transform_nodes.get(transform) {
-                            match tn.status {
-                                NodeStatus::Error(_) => return Some(tn.status.clone()),
-                                NodeStatus::Dirty    => return Some(NodeStatus::Dirty),
-                                NodeStatus::Clean    => {}
-                            }
-                        }
-                    }
-                    let dirty = match &edge.payload {
-                        EdgePayload::Single(s) => s.dirty,
-                        EdgePayload::Collection(c) => c.dirty,
-                    };
-                    return Some(if dirty { NodeStatus::Dirty } else { NodeStatus::Clean });
-                }
-            } else {
-                drop(node);
-            }
-            return Some(NodeStatus::Clean);
         }
         None
     }
 
-    // -----------------------------------------------------------------------
-    // SCC management
-    // -----------------------------------------------------------------------
-
-    /// Recompute SCCs over the TransformNode graph and store legal ones.
-    /// Returns an error if an illegal cycle is detected.
-    pub fn recompute_sccs(&self) -> Result<(), GraphError> {
-        // Build adjacency: T → [downstream TransformNodes via output edges].
-        let mut adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        for t_ref in self.transform_nodes.iter() {
-            let tid = *t_ref.key();
-            adj.entry(tid).or_default();
-            for slot_edges in &t_ref.output_edges {
-                for &eid in slot_edges {
-                    if let Some(edge) = self.edges.get(&eid) {
-                        for downstream in self.downstream_transforms_of_edge(&edge.to) {
-                            adj.entry(tid).or_default().push(downstream);
+    /// Read all collection elements for a given transform input slot.
+    pub(crate) fn read_collection_input(
+        &self, transform: NodeId, slot: usize,
+    ) -> Vec<CollectionElement> {
+        let g = self.inner.read().unwrap();
+        let edge_ids = match g.transform_nodes.get(&transform)
+            .and_then(|t| t.input_edges.get(slot)) {
+            Some(ids) => ids.clone(),
+            None => return vec![],
+        };
+        let mut all = vec![];
+        for eid in &edge_ids {
+            if let Some(edge) = g.edges.get(eid) {
+                match &edge.payload {
+                    EdgePayload::Single(sv) => {
+                        // Single→Collection crossing: treat as one element.
+                        if let (Some(v), Some(h)) = (&sv.value, &sv.hash) {
+                            all.push(CollectionElement {
+                                key: *h, // use hash as key
+                                value: v.clone(), hash: *h, dirty: sv.dirty,
+                            });
                         }
+                    }
+                    EdgePayload::Collection(elems) => {
+                        all.extend_from_slice(elems);
                     }
                 }
             }
         }
-        let all_ids: Vec<NodeId> = adj.keys().copied().collect();
-        let sccs = TarjanScc::new(&adj).run(all_ids);
-        let mut legal_sccs = Vec::new();
-        for scc in sccs {
-            if scc.len() <= 1 {
-                // Check self-loop.
-                let tid = scc[0];
-                let is_self_loop = adj.get(&tid).map(|n| n.contains(&tid)).unwrap_or(false);
-                if !is_self_loop { continue; }
-                // Self-loop: validate back-edge targets Collection slot.
-                self.validate_scc_back_edges(&scc)?;
-                legal_sccs.push(SccGroup::new(scc));
-            } else {
-                self.validate_scc_back_edges(&scc)?;
-                legal_sccs.push(SccGroup::new(scc));
-            }
-        }
-        *self.scc_groups.write() = legal_sccs;
-        Ok(())
+        all
     }
 
-    /// For each back-edge in the SCC, verify it targets a Collection input slot.
-    fn validate_scc_back_edges(&self, scc: &[NodeId]) -> Result<(), GraphError> {
-        let scc_set: HashSet<NodeId> = scc.iter().copied().collect();
-        for &tid in scc {
-            if let Some(tn) = self.transform_nodes.get(&tid) {
-                for (slot_idx, slot_edges) in tn.input_edges.iter().enumerate() {
-                    for &eid in slot_edges {
-                        if let Some(edge) = self.edges.get(&eid) {
-                            let upstream = self.upstream_transform_of_edge(&edge.from);
-                            for u in upstream {
-                                if scc_set.contains(&u) {
-                                    // This is a back-edge. Verify slot is Collection.
-                                    let slot_kind = &tn.transform.schema().inputs[slot_idx].kind;
-                                    if !slot_kind.is_collection() {
-                                        return Err(GraphError::new(format!(
-                                            "illegal cycle: back-edge into TransformNode {tid} \
-                                             slot {slot_idx} targets a Single slot (only Collection \
-                                             slots may form cycles)"
-                                        )));
+    /// Get the transform node for an id (cloned schema for inspection).
+    pub(crate) fn transform_schema(&self, id: NodeId) -> Option<Arc<crate::transform::TransformSchema>> {
+        self.inner.read().unwrap().transform_nodes.get(&id)
+            .map(|t| Arc::clone(&t.transform.schema))
+    }
+
+    /// Get all transform node IDs.
+    pub(crate) fn all_transform_ids(&self) -> Vec<NodeId> {
+        self.inner.read().unwrap().transform_nodes.keys().cloned().collect()
+    }
+
+    /// Get all IoNode IDs (input and output).
+    pub(crate) fn all_io_ids(&self) -> Vec<(NodeId, IoKind)> {
+        self.inner.read().unwrap().io_nodes.values()
+            .map(|n| (n.id, n.kind)).collect()
+    }
+
+    /// Clear all in-memory edge values (Single payloads).
+    /// Called by `Engine::discard()` so that subsequent `get()` calls read
+    /// from storage rather than stale in-memory graph state.
+    pub(crate) fn clear_io_values(&self) {
+        let mut g = self.inner.write().unwrap();
+        for edge in g.edges.values_mut() {
+            if let EdgePayload::Single(sv) = &mut edge.payload {
+                sv.value = None;
+                sv.hash  = None;
+                sv.dirty = false;
+            }
+        }
+        // Mark all transforms dirty so they re-evaluate next update.
+        for t in g.transform_nodes.values_mut() {
+            t.status = NodeStatus::Dirty;
+        }
+    }
+
+    /// Read the outgoing Single edge value of an IoNode (output node).
+    pub(crate) fn peek_output(&self, id: NodeId) -> Option<(Value, ValueHash)> {
+        let g = self.inner.read().unwrap();
+        let node = g.io_nodes.get(&id)?;
+        // Output node has one incoming edge.
+        let eid = node.incoming?;
+        let edge = g.edges.get(&eid)?;
+        match &edge.payload {
+            EdgePayload::Single(sv) => sv.value.as_ref().map(|v| (v.clone(), sv.hash.unwrap_or(0))),
+            _ => None,
+        }
+    }
+
+    /// Store output value on the IoNode (via its incoming edge).
+    pub(crate) fn store_output_on_node(
+        &self, node_id: NodeId, value: Value, hash: ValueHash,
+    ) {
+        let mut g = self.inner.write().unwrap();
+
+        // Write the value to the incoming edge of the IoNode (so peek_output works).
+        if let Some(node) = g.io_nodes.get(&node_id) {
+            if let Some(eid) = node.incoming {
+                if let Some(edge) = g.edges.get_mut(&eid) {
+                    if let EdgePayload::Single(sv) = &mut edge.payload {
+                        sv.value = Some(value.clone());
+                        sv.hash  = Some(hash);
+                        sv.dirty = false;
+                    }
+                }
+            }
+        }
+
+        // Also propagate to all outgoing edges FROM this IoNode,
+        // and dirty any downstream transforms (chained pipelines).
+        let outgoing: Vec<EdgeId> = g.io_nodes.get(&node_id)
+            .map(|n| n.outgoing.clone())
+            .unwrap_or_default();
+
+        let mut dirty_ids: Vec<NodeId> = vec![];
+        for eid in &outgoing {
+            if let Some(edge) = g.edges.get_mut(eid) {
+                match &mut edge.payload {
+                    EdgePayload::Single(sv) => {
+                        if sv.hash.map(|h| h != hash).unwrap_or(true) {
+                            sv.value = Some(value.clone());
+                            sv.hash  = Some(hash);
+                            sv.dirty = true;
+                            if let Endpoint::TransformInput { transform, .. } = edge.to {
+                                dirty_ids.push(transform);
+                            }
+                        }
+                    }
+                    EdgePayload::Collection(_) => {
+                        // Collection output from an IoNode is handled by push_collection_output.
+                    }
+                }
+            }
+        }
+        for t_id in dirty_ids {
+            if let Some(t) = g.transform_nodes.get_mut(&t_id) {
+                t.status = NodeStatus::Dirty;
+            }
+        }
+    }
+
+    /// Mark an input IoNode's outgoing edges as clean after they've been read.
+    pub(crate) fn clear_input_dirty(&self, transform: NodeId, slot: usize) {
+        let mut g = self.inner.write().unwrap();
+        let edge_ids: Vec<EdgeId> = g.transform_nodes.get(&transform)
+            .and_then(|t| t.input_edges.get(slot))
+            .cloned()
+            .unwrap_or_default();
+        for eid in edge_ids {
+            if let Some(edge) = g.edges.get_mut(&eid) {
+                match &mut edge.payload {
+                    EdgePayload::Single(sv) => sv.dirty = false,
+                    EdgePayload::Collection(elems) => {
+                        for el in elems.iter_mut() { el.dirty = false; }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Return a snapshot of the current graph topology for persistence.
+    pub(crate) fn snapshot_topology(&self)
+        -> (Vec<(NodeId, IoKind)>, Vec<(NodeId, String)>, Vec<(Endpoint, Endpoint, bool)>)
+    {
+        let g = self.inner.read().unwrap();
+        let io = g.io_nodes.values().map(|n| (n.id, n.kind)).collect();
+        let tx = g.transform_nodes.values().map(|t| (t.id, t.transform_key.clone())).collect();
+        let ed = g.edges.values().map(|e| (e.from, e.to, e.payload.is_collection())).collect();
+        (io, tx, ed)
+    }
+
+    /// Invoke the erased transform apply function (gives the scheduler access).
+    pub(crate) fn get_erased_transform(&self, id: NodeId) -> Option<ErasedTransform> {
+        self.inner.read().unwrap().transform_nodes.get(&id)
+            .map(|t| t.transform.clone())
+    }
+
+    /// Check whether a transform node exists.
+    pub(crate) fn has_transform(&self, id: NodeId) -> bool {
+        self.inner.read().unwrap().transform_nodes.contains_key(&id)
+    }
+
+    /// Get all output edge endpoint pairs for a transform output slot.
+    pub(crate) fn output_edge_targets(&self, transform: NodeId, slot: usize) -> Vec<(EdgeId, Endpoint)> {
+        let g = self.inner.read().unwrap();
+        g.transform_nodes.get(&transform)
+            .and_then(|t| t.output_edges.get(slot))
+            .map(|eids| eids.iter().filter_map(|&eid| {
+                g.edges.get(&eid).map(|e| (eid, e.to))
+            }).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get the input edge slot kind (is it collection?) for a transform.
+    pub(crate) fn input_slot_is_collection(&self, transform: NodeId, slot: usize) -> bool {
+        let g = self.inner.read().unwrap();
+        if let Some(t) = g.transform_nodes.get(&transform) {
+            if let Some(eids) = t.input_edges.get(slot) {
+                if let Some(&eid) = eids.first() {
+                    if let Some(edge) = g.edges.get(&eid) {
+                        return edge.payload.is_collection();
+                    }
+                }
+            }
+            // Fall back to schema.
+            t.transform.schema.inputs.get(slot).map(|s| s.is_col).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    /// Return all edges (from, to, is_collection) for topology persistence.
+    pub(crate) fn all_edges(&self) -> Vec<(Endpoint, Endpoint, bool)> {
+        self.inner.read().unwrap().edges.values()
+            .map(|e| (e.from, e.to, e.payload.is_collection()))
+            .collect()
+    }
+
+    /// Return the source transform NodeIds that feed a given transform's input slot.
+    /// Traverses through intermediate IoNodes (e.g. T1 → IoNode → T2 slot).
+    pub(crate) fn input_slot_sources(&self, transform: NodeId, slot: usize) -> Vec<NodeId> {
+        let g = self.inner.read().unwrap();
+        let edge_ids = match g.transform_nodes.get(&transform)
+            .and_then(|t| t.input_edges.get(slot)) {
+            Some(ids) => ids.clone(),
+            None => return vec![],
+        };
+        let mut sources = vec![];
+        for eid in edge_ids {
+            if let Some(edge) = g.edges.get(&eid) {
+                match edge.from {
+                    Endpoint::TransformOutput { transform: src, .. } => {
+                        sources.push(src);
+                    }
+                    Endpoint::Io(io_n) => {
+                        // Traverse back through IoNode: find the edge coming INTO io_n.
+                        if let Some(io_node) = g.io_nodes.get(&io_n) {
+                            if let Some(in_eid) = io_node.incoming {
+                                if let Some(in_edge) = g.edges.get(&in_eid) {
+                                    if let Endpoint::TransformOutput { transform: src, .. } = in_edge.from {
+                                        sources.push(src);
                                     }
                                 }
                             }
                         }
                     }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn downstream_transforms_of_edge(&self, to: &Endpoint) -> Vec<NodeId> {
-        match to {
-            Endpoint::TransformInput { transform, .. } => vec![*transform],
-            Endpoint::Io(io_id) => {
-                if let Some(node) = self.io_nodes.get(io_id) {
-                    let outgoing = node.outgoing.clone();
-                    drop(node);
-                    outgoing.into_iter().flat_map(|eid| {
-                        if let Some(edge) = self.edges.get(&eid) {
-                            self.downstream_transforms_of_edge(&edge.to.clone())
-                        } else { vec![] }
-                    }).collect()
-                } else { vec![] }
-            }
-            _ => vec![],
-        }
-    }
-
-    /// Return a snapshot of the current SCC groups.
-    pub fn scc_groups(&self) -> Vec<SccGroup> {
-        self.scc_groups.read().clone()
-    }
-
-    // -----------------------------------------------------------------------
-    // Accessors for scheduler / loader
-    // -----------------------------------------------------------------------
-
-    pub fn transform_node_ids(&self) -> Vec<NodeId> {
-        self.transform_nodes.iter().map(|e| *e.key()).collect()
-    }
-
-    pub fn io_node_ids(&self) -> Vec<NodeId> {
-        self.io_nodes.iter().map(|e| *e.key()).collect()
-    }
-
-    pub fn edge_ids(&self) -> Vec<EdgeId> {
-        self.edges.iter().map(|e| *e.key()).collect()
-    }
-
-    /// Return a clone of a TransformNode's full data (for scheduler).
-    pub fn get_transform_node(&self, id: NodeId) -> Option<dashmap::mapref::one::Ref<'_, NodeId, TransformNode>> {
-        self.transform_nodes.get(&id)
-    }
-
-    pub fn get_transform_node_mut(&self, id: NodeId) -> Option<dashmap::mapref::one::RefMut<'_, NodeId, TransformNode>> {
-        self.transform_nodes.get_mut(&id)
-    }
-
-    pub fn get_io_node(&self, id: NodeId) -> Option<dashmap::mapref::one::Ref<'_, NodeId, IoNode>> {
-        self.io_nodes.get(&id)
-    }
-
-    pub fn get_edge(&self, eid: EdgeId) -> Option<dashmap::mapref::one::Ref<'_, EdgeId, ValueEdge>> {
-        self.edges.get(&eid)
-    }
-
-    pub fn get_edge_mut(&self, eid: EdgeId) -> Option<dashmap::mapref::one::RefMut<'_, EdgeId, ValueEdge>> {
-        self.edges.get_mut(&eid)
-    }
-
-    // -----------------------------------------------------------------------
-    // Node removal
-    // -----------------------------------------------------------------------
-
-    pub fn remove_io_node(&self, id: NodeId) -> bool {
-        let node = match self.io_nodes.remove(&id) {
-            Some((_, n)) => n,
-            None => return false,
-        };
-        // Propagate dirty to downstream transforms before removing edges.
-        for &eid in &node.outgoing {
-            if let Some(edge) = self.edges.get(&eid) {
-                match &edge.to {
-                    Endpoint::TransformInput { transform, .. } => {
-                        self.mark_transform_dirty(*transform);
-                    }
                     _ => {}
                 }
             }
         }
-        for &eid in &node.outgoing {
-            self.edges.remove(&eid);
-        }
-        if let Some(eid) = node.incoming {
-            self.edges.remove(&eid);
-        }
-        true
+        sources
     }
 
-    pub fn remove_transform_node(&self, id: NodeId) -> bool {
-        let node = match self.transform_nodes.remove(&id) {
-            Some((_, n)) => n,
-            None => return false,
+    /// Get last-known hash for a node's output (to detect if recompute changed anything).
+    pub(crate) fn last_output_hash(&self, transform: NodeId, slot: usize) -> Option<ValueHash> {
+        let g = self.inner.read().unwrap();
+        let eids = g.transform_nodes.get(&transform)?.output_edges.get(slot)?;
+        eids.first().and_then(|eid| {
+            g.edges.get(eid).and_then(|e| match &e.payload {
+                EdgePayload::Single(sv) => sv.hash,
+                EdgePayload::Collection(_) => None,
+            })
+        })
+    }
+
+    /// Get the current element keys in a collection output slot.
+    /// Used by fan-out transforms to detect removed elements.
+    pub(crate) fn get_collection_output_keys(&self, transform: NodeId, slot: usize) -> Vec<u64> {
+        let g = self.inner.read().unwrap();
+        let eids = match g.transform_nodes.get(&transform)
+            .and_then(|t| t.output_edges.get(slot)) {
+            Some(ids) => ids.clone(),
+            None => return vec![],
         };
-        // Propagate dirty to downstream nodes via output edges.
-        for slot_edges in &node.output_edges {
-            for &eid in slot_edges {
-                if let Some(edge) = self.edges.get(&eid) {
-                    match &edge.to {
-                        Endpoint::Io(io_id) => { self.propagate_dirty_from_io(*io_id); }
-                        Endpoint::TransformInput { transform, .. } => {
-                            self.mark_transform_dirty(*transform);
-                        }
-                        _ => {}
-                    }
+        let mut keys = vec![];
+        for eid in &eids {
+            if let Some(edge) = g.edges.get(eid) {
+                if let EdgePayload::Collection(elems) = &edge.payload {
+                    keys.extend(elems.iter().map(|e| e.key));
                 }
             }
         }
-        for slot_edges in node.input_edges.iter().chain(node.output_edges.iter()) {
-            for &eid in slot_edges {
-                self.edges.remove(&eid);
-            }
-        }
-        // Invalidate SCC cache.
-        self.scc_groups.write().clear();
-        true
+        keys
     }
-}
-
-impl Default for Graph {
-    fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transform::{Transform, TypedOneToOne};
-    use crate::value::{Value, ValueTypeRegistry};
-    use crate::slot::TransformSchema;
-    use std::sync::Arc;
+    use crate::transform::{TransformSchema, TransformContext, TransformError, Transform};
+    use async_trait::async_trait;
 
-    fn make_registry() -> Arc<ValueTypeRegistry> {
-        let mut r = ValueTypeRegistry::new();
-        r.register_primitives().unwrap();
-        Arc::new(r)
+    struct DummyTransform;
+    #[async_trait]
+    impl crate::transform::Transform for DummyTransform {
+        fn schema() -> TransformSchema where Self: Sized {
+            TransformSchema::new().input::<u32>().output::<u32>()
+        }
+        async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+            let v = *ctx.input::<u32>(0)?;
+            ctx.output(0, v + 1)
+        }
     }
 
-    fn make_double_transform(reg: Arc<ValueTypeRegistry>) -> Transform {
-        Transform::new(Arc::new(TypedOneToOne::new(
-            |n: &i32| { let n = *n; async move { Ok(n * 2) } },
-            reg,
-        )))
-    }
-
-    fn val(reg: &Arc<ValueTypeRegistry>, n: i32) -> (Value, ValueHash) {
-        let v = reg.make_value(n).unwrap();
-        let h = crate::value::hash_bytes(&reg.serialize_value(&v));
-        (v, h)
+    fn make_erased() -> ErasedTransform {
+        ErasedTransform::new(DummyTransform::schema(), DummyTransform)
     }
 
     #[test]
-    fn add_and_connect_nodes() {
+    fn add_nodes_and_edge() {
         let g = Graph::new();
-        let reg = make_registry();
-        let input  = g.add_input_node();
-        let output = g.add_output_node();
-        let t      = g.add_transform_node("double", make_double_transform(reg));
-        let e1 = g.add_single_edge(
-            Endpoint::Io(input),
-            Endpoint::TransformInput { transform: t, slot: 0 },
-        ).unwrap();
-        let e2 = g.add_single_edge(
-            Endpoint::TransformOutput { transform: t, slot: 0 },
-            Endpoint::Io(output),
-        ).unwrap();
-        assert!(g.edges.contains_key(&e1));
-        assert!(g.edges.contains_key(&e2));
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let t = NodeId::new();
+        g.add_input_node(a).unwrap();
+        g.add_output_node(b).unwrap();
+        g.add_transform_node(t, "dummy".into(), make_erased()).unwrap();
+        g.add_edge(Endpoint::Io(a), Endpoint::TransformInput { transform: t, slot: 0 }, false).unwrap();
+        g.add_edge(Endpoint::TransformOutput { transform: t, slot: 0 }, Endpoint::Io(b), false).unwrap();
     }
 
     #[test]
-    fn set_input_marks_transform_dirty() {
+    fn duplicate_node_rejected() {
         let g = Graph::new();
-        let reg = make_registry();
-        let input  = g.add_input_node();
-        let t      = g.add_transform_node("double", make_double_transform(reg.clone()));
-        g.add_single_edge(
-            Endpoint::Io(input),
-            Endpoint::TransformInput { transform: t, slot: 0 },
-        ).unwrap();
-        g.mark_transform_clean(t);
-        let (v, h) = val(&reg, 5);
-        g.set_input(input, v, h).unwrap();
-        assert!(g.transform_status(t).unwrap().is_dirty());
+        let a = NodeId::new();
+        g.add_input_node(a).unwrap();
+        assert!(matches!(g.add_input_node(a), Err(GraphError::DuplicateNode(_))));
     }
 
     #[test]
-    fn dirty_topo_returns_correct_order() {
+    fn dirty_transform_after_set_input() {
         let g = Graph::new();
-        let reg = make_registry();
-        let a = g.add_input_node();
-        let t1 = g.add_transform_node("t1", make_double_transform(reg.clone()));
-        let t2 = g.add_transform_node("t2", make_double_transform(reg.clone()));
-        let out = g.add_output_node();
-        g.add_single_edge(Endpoint::Io(a), Endpoint::TransformInput { transform: t1, slot: 0 }).unwrap();
-        g.add_single_edge(
-            Endpoint::TransformOutput { transform: t1, slot: 0 },
-            Endpoint::TransformInput { transform: t2, slot: 0 },
-        ).unwrap();
-        g.add_single_edge(Endpoint::TransformOutput { transform: t2, slot: 0 }, Endpoint::Io(out)).unwrap();
+        let inp = NodeId::new();
+        let t   = NodeId::new();
+        g.add_input_node(inp).unwrap();
+        g.add_transform_node(t, "d".into(), make_erased()).unwrap();
+        g.add_edge(Endpoint::Io(inp), Endpoint::TransformInput { transform: t, slot: 0 }, false).unwrap();
 
-        let topo = g.dirty_transforms_topo();
-        assert_eq!(topo.len(), 2);
-        let pos_t1 = topo.iter().position(|&x| x == t1).unwrap();
-        let pos_t2 = topo.iter().position(|&x| x == t2).unwrap();
-        assert!(pos_t1 < pos_t2, "t1 must come before t2");
+        let reg = crate::value::ValueTypeRegistry::new();
+        reg.register::<u32>().unwrap();
+        let v = reg.make_value(42u32).unwrap();
+        let h = crate::value::hash_value(&v, &reg);
+        assert!(g.set_input(inp, v, h));
+
+        let dirty = g.dirty_transforms_topo();
+        assert!(dirty.contains(&t));
     }
 }

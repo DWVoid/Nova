@@ -8,6 +8,7 @@
 //! ## Design Decisions
 //!
 //! * **Imports** — every `use` declaration is converted into one
+#![allow(dead_code, unused_imports)]
 //!   [`ImportedName`], preserving the source path, the imported symbol name,
 //!   and the optional local alias.
 //!

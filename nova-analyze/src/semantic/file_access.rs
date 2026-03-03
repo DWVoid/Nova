@@ -25,7 +25,6 @@
 //! multiple transforms (one per file) to share the same VFS instance cheaply.
 //! The Arc also makes the transform `Clone`-able, which is required by the
 //! incremental registry.
-use std::sync::Arc;
 use async_trait::async_trait;
 /// Error returned when a file cannot be read.
 #[derive(Debug, Clone)]

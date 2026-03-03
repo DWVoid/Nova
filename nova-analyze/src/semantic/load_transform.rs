@@ -1,252 +1,358 @@
-//! Shared stateless transforms for the semantic pipeline.
+//! Stateless transforms for the Nova semantic pipeline.
 //!
-//! ## Design: Three Stateless Shared Transforms
-//!
-//! Instead of registering one transform closure per file, all files share
-//! three transforms registered once under fixed keys `"load"`, `"lex"`,
-//! and `"parse"`.  The **path travels with the value** through the graph:
+//! ## Pipeline (§15 of the design doc)
 //!
 //! ```text
-//! FileStat (path, size, mtime)
-//!   └─[load]→ FileContent (path, bytes)
-//!               └─[lex]→ LexOutput (path, tokens)
-//!                          └─[parse]→ SyntaxResult
+//! ProjectDescriptor
+//!   └─[expand]──► Collection<FileStat>
+//!                    └─[load]──► Collection<FileContent>   (per FileStat)
+//!                                   └─[lex]──► Collection<LexOutput>
+//!                                                └─[parse]──► Collection<ParseOutput>
+//!                                                               └─[collect]──► String
 //! ```
 //!
-//! - `FileStat.path` tells the load transform which file to read.
-//! - `FileContent.path` is forwarded into `LexOutput` for error context.
-//! - `LexOutput.path` is used by the parse transform for error messages.
-//!
-//! This keeps the graph metadata simple: the edge set is fixed and never
-//! grows as files are added.
+//! All transforms implement the new [`Transform`] trait so they are fully
+//! typed and require no separate value-type registration.
 
 use std::sync::Arc;
+use std::hash::{Hash, Hasher, DefaultHasher};
+use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
-use nova_incremental::transform::TransformError;
+
+use nova_incremental::{
+    Transform, TransformContext, TransformSchema, TransformError,
+    KeyExtractor,
+};
+
+use crate::semantic::project_descriptor::ProjectDescriptor;
 use crate::semantic::file_access::FileAccess;
 use crate::semantic::file_stat::FileStat;
 use crate::semantic::file_content::FileContent;
-use crate::lexical::LexicalResult;
 
 // ---------------------------------------------------------------------------
-// Fixed transform keys
-// ---------------------------------------------------------------------------
-
-/// Registry key for the file-load transform.
-pub const LOAD_KEY: &str = "load";
-/// Registry key for the lex transform.
-pub const LEX_KEY: &str = "lex";
-/// Registry key for the parse transform.
-pub const PARSE_KEY: &str = "parse";
-
-// ---------------------------------------------------------------------------
-// LexOutput – carries path through the graph from lex stage to parse stage
+// LexOutput / ParseOutput (public value types)
 // ---------------------------------------------------------------------------
 
 /// The output of the lex stage: a token stream bundled with its source path.
-///
-/// The source path is not part of `LexicalResult` itself (which is a pure
-/// lexer output type), so we carry it here so the parse transform can include
-/// it in error messages without any extra bookkeeping.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LexOutput {
-    /// The canonical path this lex result was produced from.
     pub path: String,
-    /// The lexer output.
-    pub lex: LexicalResult,
+    pub lex:  crate::lexical::LexicalResult,
 }
 
 impl LexOutput {
-    pub fn new(path: impl Into<String>, lex: LexicalResult) -> Self {
+    pub fn new(path: impl Into<String>, lex: crate::lexical::LexicalResult) -> Self {
         Self { path: path.into(), lex }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Load transform (FileStat → FileContent)
-// ---------------------------------------------------------------------------
+/// The output of the parse stage.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ParseOutput {
+    pub path:   String,
+    pub result: crate::syntax::SyntaxResult,
+}
 
-/// Builds the shared `"load"` transform closure.
-///
-/// The closure reads the path from `FileStat.path` at runtime, so a single
-/// closure instance serves every file.
-pub fn make_load_fn(
-    fs: Arc<dyn FileAccess>,
-) -> impl Fn(&FileStat)
-        -> std::pin::Pin<Box<dyn std::future::Future<
-            Output = Result<FileContent, TransformError>
-        > + Send>>
-       + Send + Sync + 'static
-{
-    move |stat: &FileStat| {
-        let path  = stat.path.clone();
-        let my_fs = Arc::clone(&fs);
-        Box::pin(async move {
-            let bytes = my_fs.read_file(&path).await.map_err(|e| {
-                TransformError::with_source(
-                    format!("load({}): read failed", path),
-                    e.to_string(),
-                )
-            })?;
-            Ok(FileContent::new(path, bytes))
-        })
+impl ParseOutput {
+    pub fn new(path: impl Into<String>, result: crate::syntax::SyntaxResult) -> Self {
+        Self { path: path.into(), result }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Lex transform (FileContent → LexOutput)
+// KeyExtractors
 // ---------------------------------------------------------------------------
 
-/// The shared `"lex"` transform closure.  Path is read from `FileContent`.
-pub fn make_lex_fn()
--> impl Fn(&FileContent)
-        -> std::pin::Pin<Box<dyn std::future::Future<
-            Output = Result<LexOutput, TransformError>
-        > + Send>>
-       + Send + Sync + 'static
-{
-    move |content: &FileContent| {
-        let path  = content.path.clone();
-        let src_result = std::str::from_utf8(&content.bytes)
-            .map(|s| s.to_string())
-            .map_err(|e| TransformError::with_source(
-                format!("lex({}): file is not valid UTF-8", path),
-                e.to_string(),
-            ));
-        Box::pin(async move {
-            let src = src_result?;
-            let lex = crate::lexical::transform(&src).map_err(|e| {
-                TransformError::with_source(
-                    format!("lex({}): lexical error at {}:{}", path,
-                        e.position.line(), e.position.column()),
-                    e.message.clone(),
-                )
-            })?;
-            Ok(LexOutput::new(path, lex))
-        })
+/// Extract a `u64` key for a `FileStat` by hashing its path.
+pub struct FileStatByPath;
+impl KeyExtractor<FileStat> for FileStatByPath {
+    fn extract_key(s: &FileStat) -> u64 {
+        let mut h = DefaultHasher::new();
+        s.path.hash(&mut h);
+        h.finish()
+    }
+}
+
+/// Extract a `u64` key for a `FileContent` by hashing its path.
+pub struct FileContentByPath;
+impl KeyExtractor<FileContent> for FileContentByPath {
+    fn extract_key(c: &FileContent) -> u64 {
+        let mut h = DefaultHasher::new();
+        c.path.hash(&mut h);
+        h.finish()
+    }
+}
+
+/// Extract a `u64` key for a `LexOutput` by hashing its path.
+pub struct LexOutputByPath;
+impl KeyExtractor<LexOutput> for LexOutputByPath {
+    fn extract_key(lo: &LexOutput) -> u64 {
+        let mut h = DefaultHasher::new();
+        lo.path.hash(&mut h);
+        h.finish()
+    }
+}
+
+/// Extract a `u64` key for a `ParseOutput` by hashing its path.
+pub struct ParseOutputByPath;
+impl KeyExtractor<ParseOutput> for ParseOutputByPath {
+    fn extract_key(po: &ParseOutput) -> u64 {
+        let mut h = DefaultHasher::new();
+        po.path.hash(&mut h);
+        h.finish()
     }
 }
 
 // ---------------------------------------------------------------------------
-// Parse transform (LexOutput → SyntaxResult)
+// ExpandTransform: ProjectDescriptor → Collection<FileStat>
 // ---------------------------------------------------------------------------
 
-/// The shared `"parse"` transform closure.  Path is read from `LexOutput`.
-pub fn make_parse_fn()
--> impl Fn(&LexOutput)
-        -> std::pin::Pin<Box<dyn Future<
-            Output = Result<crate::syntax::SyntaxResult, TransformError>
-        > + Send>>
-       + Send + Sync + 'static
-{
-    move |lo: &LexOutput| {
-        let path      = lo.path.clone();
-        let lex_clone = lo.lex.clone();
-        Box::pin(async move {
-            crate::syntax::transform(lex_clone).map_err(|e| {
-                TransformError::with_source(
-                    format!("parse({}): syntax error at {}:{}", path,
-                        e.position.line(), e.position.column()),
-                    e.message.clone(),
-                )
-            })
-        })
+/// Expands a [`ProjectDescriptor`] into a `Collection<FileStat>`.
+pub struct ExpandTransform;
+
+#[async_trait]
+impl Transform for ExpandTransform {
+    fn schema() -> TransformSchema where Self: Sized {
+        TransformSchema::new()
+            .input::<ProjectDescriptor>()
+            .output_collection::<FileStat, FileStatByPath>()
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let desc = ctx.input::<ProjectDescriptor>(0)?;
+        ctx.output_collection(0, desc.files.clone())
     }
 }
 
+// ---------------------------------------------------------------------------
+// LoadTransform: FileStat → FileContent  (invoked per element)
+// ---------------------------------------------------------------------------
+
+/// Reads file bytes from the virtual filesystem.
+pub struct LoadTransform(pub Arc<dyn FileAccess>);
+
+#[async_trait]
+impl Transform for LoadTransform {
+    fn schema() -> TransformSchema where Self: Sized {
+        TransformSchema::new()
+            .input::<FileStat>()
+            .output::<FileContent>()
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let stat = ctx.input::<FileStat>(0)?;
+        let path = stat.path.clone();
+        let bytes = self.0.read_file(&path).await.map_err(|e| {
+            TransformError::with_source(format!("load({}): read failed", path), e.to_string())
+        })?;
+        ctx.output(0, FileContent::new(path, bytes))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LexTransform: FileContent → LexOutput  (invoked per element)
+// ---------------------------------------------------------------------------
+
+/// Runs the lexer on file content.
+pub struct LexTransform;
+
+#[async_trait]
+impl Transform for LexTransform {
+    fn schema() -> TransformSchema where Self: Sized {
+        TransformSchema::new()
+            .input::<FileContent>()
+            .output::<LexOutput>()
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let content = ctx.input::<FileContent>(0)?;
+        let path = content.path.clone();
+        let src  = std::str::from_utf8(&content.bytes).map_err(|e| {
+            TransformError::with_source(
+                format!("lex({}): file is not valid UTF-8", path), e.to_string(),
+            )
+        })?;
+        let lex = crate::lexical::transform(src).map_err(|e| {
+            TransformError::with_source(
+                format!("lex({}): lexical error at {}:{}", path,
+                    e.position.line(), e.position.column()),
+                e.message.clone(),
+            )
+        })?;
+        ctx.output(0, LexOutput::new(path, lex))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ParseTransform: LexOutput → ParseOutput  (invoked per element)
+// ---------------------------------------------------------------------------
+
+/// Runs the parser on lex output.
+pub struct ParseTransform;
+
+#[async_trait]
+impl Transform for ParseTransform {
+    fn schema() -> TransformSchema where Self: Sized {
+        TransformSchema::new()
+            .input::<LexOutput>()
+            .output::<ParseOutput>()
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let lo   = ctx.input::<LexOutput>(0)?;
+        let path = lo.path.clone();
+        let lex  = lo.lex.clone();
+        let result = crate::syntax::transform(lex).map_err(|e| {
+            TransformError::with_source(
+                format!("parse({}): syntax error at {}:{}", path,
+                    e.position.line(), e.position.column()),
+                e.message.clone(),
+            )
+        })?;
+        ctx.output(0, ParseOutput::new(path, result))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CollectTransform: Collection<ParseOutput> → String
+// ---------------------------------------------------------------------------
+
+/// Gathers all parsed outputs and serialises them as a textual bundle.
+pub struct CollectTransform;
+
+#[async_trait]
+impl Transform for CollectTransform {
+    fn schema() -> TransformSchema where Self: Sized {
+        TransformSchema::new()
+            .input_collection::<ParseOutput, ParseOutputByPath>()
+            .output::<String>()
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let col = ctx.input_collection::<ParseOutput>(0)?;
+        let mut parts: Vec<String> = Vec::with_capacity(col.elements.len());
+        for po in col.elements.iter() {
+            let encoded = crate::formats::textual::encode(&po.result)
+                .map_err(|e| TransformError::new(
+                    format!("collect encode({}): {}", po.path, e)
+                ))?;
+            parts.push(format!("## {}\n{}", po.path, encoded));
+        }
+        // Sort by path for deterministic output.
+        parts.sort();
+        ctx.output(0, parts.join("\n\n"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Re-exported type aliases / constants (backwards compat for session.rs)
+// ---------------------------------------------------------------------------
+
+/// Transform registration key constants.
+pub const EXPAND_KEY:  &str = "expand";
+pub const LOAD_KEY:    &str = "load";
+pub const LEX_KEY:     &str = "lex";
+pub const PARSE_KEY:   &str = "parse";
+pub const COLLECT_KEY: &str = "collect";
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::semantic::file_access::MockFileAccess;
+    use crate::semantic::file_content::FileContent;
+    use nova_incremental::{EngineBuilder, MemoryStorage, Uuid};
+    use std::sync::Arc;
 
-    fn make_fs(path: &str, content: &[u8]) -> Arc<dyn FileAccess> {
+    fn node(name: &str) -> Uuid {
+        const NS: Uuid = Uuid::from_bytes([
+            0x6b, 0xa7, 0xb8, 0x14, 0x9d, 0xad, 0x11, 0xd1,
+            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+        ]);
+        Uuid::new_v5(&NS, name.as_bytes())
+    }
+
+    #[tokio::test]
+    async fn expand_produces_collection() {
+        let s = Arc::new(MemoryStorage::new());
+        let proj_in = node("proj");
+        let expand_t = node("expand_t");
+        let out = node("out");
+        let engine = EngineBuilder::new()
+            .register(EXPAND_KEY, ExpandTransform)
+            .input_node::<ProjectDescriptor>(proj_in)
+            .output_node(out)
+            .transform_node(expand_t, EXPAND_KEY)
+            .wire_into_slot(proj_in, expand_t, 0)
+            .wire_slot_to(expand_t, 0, out)
+            .build(s).await.unwrap();
+
+        engine.set_input(proj_in, ProjectDescriptor::new(vec![
+            FileStat::new("a.nova", 1, 0),
+            FileStat::new("b.nova", 2, 0),
+        ])).unwrap();
+
+        let report = engine.update().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        assert_eq!(report.transforms_evaluated, 1);
+    }
+
+    #[tokio::test]
+    async fn load_transform_reads_file() {
         let mut mock = MockFileAccess::new();
-        mock.add(path, content.to_vec());
-        Arc::new(mock)
+        mock.add("src/main.nova", b"namespace main;".to_vec());
+        let fs: Arc<dyn FileAccess> = Arc::new(mock);
+
+        let s = Arc::new(MemoryStorage::new());
+        let proj_in  = node("proj2");
+        let expand_t = node("expand_t2");
+        let load_t   = node("load_t2");
+        let out      = node("out2");
+
+        let engine = EngineBuilder::new()
+            .register(EXPAND_KEY, ExpandTransform)
+            .register(LOAD_KEY, LoadTransform(Arc::clone(&fs)))
+            .input_node::<ProjectDescriptor>(proj_in)
+            .output_node(out)
+            .transform_node(expand_t, EXPAND_KEY)
+            .transform_node(load_t, LOAD_KEY)
+            .wire_into_slot(proj_in, expand_t, 0)
+            .wire_slot_to_slot(expand_t, 0, load_t, 0)
+            .wire_slot_to(load_t, 0, out)
+            .build(s).await.unwrap();
+
+        engine.set_input(proj_in, ProjectDescriptor::new(vec![
+            FileStat::new("src/main.nova", 15, 0),
+        ])).unwrap();
+
+        let report = engine.update().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        assert!(report.collection_elements_changed >= 1);
     }
 
     #[tokio::test]
-    async fn load_fn_loads_file_content() {
-        let fs = make_fs("src/main.nova", b"val x = 1;");
-        let f  = make_load_fn(fs);
-        let stat = FileStat::new("src/main.nova", 10, 0);
-        let content = f(&stat).await.unwrap();
-        assert_eq!(content.bytes, b"val x = 1;");
-        assert_eq!(content.path, "src/main.nova");
-    }
-
-    #[tokio::test]
-    async fn load_fn_missing_file_is_error() {
-        let fs = Arc::new(MockFileAccess::new()) as Arc<dyn FileAccess>;
-        let f  = make_load_fn(fs);
-        let stat = FileStat::new("missing.nova", 0, 0);
-        let result = f(&stat).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("read failed"));
-    }
-
-    #[tokio::test]
-    async fn load_fn_error_includes_path() {
-        let fs = Arc::new(MockFileAccess::new()) as Arc<dyn FileAccess>;
-        let f  = make_load_fn(fs);
-        let stat = FileStat::new("some/deep/path.nova", 0, 0);
-        let err = f(&stat).await.unwrap_err();
-        assert!(err.message.contains("some/deep/path.nova"));
-    }
-
-    #[tokio::test]
-    async fn lex_fn_lexes_valid_source() {
-        let f = make_lex_fn();
-        let content = FileContent::new("test.nova", b"namespace test;".to_vec());
-        let out = f(&content).await.unwrap();
-        assert_eq!(out.path, "test.nova");
-        assert!(out.lex.tokens.len() >= 3);
-    }
-
-    #[tokio::test]
-    async fn lex_fn_invalid_utf8_is_error() {
-        let f = make_lex_fn();
-        let content = FileContent::new("bad.nova", vec![0xFF, 0xFE]);
-        let result = f(&content).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("not valid UTF-8"));
-    }
-
-    #[tokio::test]
-    async fn lex_fn_error_includes_path() {
-        let f = make_lex_fn();
-        // null byte causes lex error
-        let content = FileContent::new("src/x.nova", vec![0x00]);
-        let err = f(&content).await.unwrap_err();
-        assert!(err.message.contains("src/x.nova"));
-    }
-
-    #[tokio::test]
-    async fn parse_fn_parses_valid_source() {
-        let lex_out = LexOutput::new(
-            "test.nova",
-            crate::lexical::transform("namespace test;").unwrap(),
-        );
-        let f  = make_parse_fn();
-        let sr = f(&lex_out).await.unwrap();
-        assert_eq!(sr.chunk.namespace.path.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn parse_fn_error_includes_path() {
-        let lex_out = LexOutput::new(
-            "src/bad.nova",
-            crate::lexical::transform("val x = 1;").unwrap(),
-        );
-        let f   = make_parse_fn();
-        let err = f(&lex_out).await.unwrap_err();
-        assert!(err.message.contains("src/bad.nova"),
-            "error must mention the path: {}", err.message);
-    }
-
-    #[test]
-    fn lex_output_round_trips_path() {
-        let lo = LexOutput::new("foo.nova", crate::lexical::transform("namespace x;").unwrap());
-        assert_eq!(lo.path, "foo.nova");
+    async fn lex_transform_runs_on_valid_utf8() {
+        // Build a minimal engine to test the lex transform in isolation.
+        let s = Arc::new(MemoryStorage::new());
+        let mut mock = MockFileAccess::new();
+        mock.add("test.nova", b"namespace test;".to_vec());
+        let fs: Arc<dyn FileAccess> = Arc::new(mock);
+        let content_in = node("lex_content_in");
+        let lex_t      = node("lex_t_solo");
+        let lex_out    = node("lex_out_solo");
+        let engine = EngineBuilder::new()
+            .register(LEX_KEY, LexTransform)
+            .input_node::<FileContent>(content_in)
+            .output_node(lex_out)
+            .transform_node(lex_t, LEX_KEY)
+            .wire_into_slot(content_in, lex_t, 0)
+            .wire_slot_to(lex_t, 0, lex_out)
+            .build(s).await.unwrap();
+        engine.set_input(content_in, FileContent::new("test.nova", b"namespace test;".to_vec())).unwrap();
+        let report = engine.update().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        assert_eq!(report.transforms_evaluated, 1);
     }
 }

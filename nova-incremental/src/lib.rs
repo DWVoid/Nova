@@ -1,54 +1,69 @@
-//! # Incremental Computation Graph
+//! `nova-incremental` — incremental computation engine for the Nova compiler.
 //!
-//! A lazy, persistent, parallel incremental computation system built on a
-//! **bipartite graph** of transform nodes and value edges.
-//!
-//! ## Architecture
+//! ## Public API
 //!
 //! ```text
-//! IncrementalEngine          (engine.rs)   – public façade
-//!    ├── Graph               (graph.rs)    – bipartite DAG + dirty flags
-//!    ├── TransformRegistry   (registry.rs) – name → Transform dispatch
-//!    ├── SorterRegistry      (registry.rs) – name → comparator
-//!    ├── LazyLoader          (loader.rs)   – in-memory cache + Storage I/O
-//!    │       └── Arc<dyn Storage>
-//!    └── Scheduler           (scheduler.rs)– wave-parallel + SCC fixed-point
+//! Engine          — sealed runtime (update / get / checkpoint / commit / discard)
+//! EngineBuilder   — static topology declaration
+//! EngineError     — error type from engine operations
+//! UpdateReport    — summary of one update() call
+//! Storage         — trait: implement to supply a custom backend
+//! StorageError    — error type from storage operations
+//! MemoryStorage   — in-memory implementation (for tests / ephemeral use)
+//! Transform       — trait: implement to define a computation step
+//! TransformContext — per-invocation I/O (input() / output() / etc.)
+//! TransformSchema — slot-layout builder (returned by Transform::schema())
+//! TransformError  — error type from transform execution
+//! IncrementalValue — auto-impl marker for types that flow through the graph
+//! KeyExtractor    — derives stable u64 key from a collection element
+//! CollectionInput — typed view of a gathered collection input
+//! CollectionChange — incremental diff for a collection
+//! Uuid            — re-exported for node identity
 //! ```
 //!
-//! ## Key Concepts
-//!
-//! | Concept | File | Summary |
-//! |---------|------|---------|
-//! | `NodeId` | `node_id.rs` | UUID-based stable node identity |
-//! | `Value` | `value.rs` | Type-erased `Arc<dyn Any>` value |
-//! | `TransformFn` | `transform.rs` | Arbitrary-slot async transform trait |
-//! | `SlotInput/Output` | `transform.rs` | Single or Collection slot values |
-//! | `TransformSchema` | `slot.rs` | Slot type/kind declarations |
-//! | `CollectionEdge` | `collection.rs` | Variable-length edge with per-element diff |
-//! | `Graph` | `graph.rs` | Bipartite InputNode/OutputNode/TransformNode graph |
-//! | `Storage` | `storage.rs` | Async key-value trait (user-supplied) |
-//! | `LazyLoader` | `loader.rs` | Two-level value cache (memory + storage) |
-//! | `Scheduler` | `scheduler.rs` | Wave-parallel + SCC fixed-point engine |
-//! | `IncrementalEngine` | `engine.rs` | Single user-facing entry point |
+//! All internal modules are `pub(crate)` only.
 
-pub mod collection;
-pub mod cycle;
-pub mod engine;
-pub mod graph;
-pub mod loader;
-pub mod node_id;
-pub mod registry;
-pub mod scheduler;
-pub mod slot;
-pub mod storage;
-pub mod transform;
-pub mod value;
+mod engine;
+mod graph;
+mod loader;
+mod node_id;
+mod registry;
+mod scheduler;
+mod storage;
+mod transform;
+mod value;
+
+#[cfg(test)]
 mod tests;
 
-pub use engine::{IncrementalEngine, EngineError};
-pub use node_id::NodeId;
+// ---------------------------------------------------------------------------
+// Public re-exports
+// ---------------------------------------------------------------------------
+
+// Engine lifecycle
+pub use engine::Engine;
+pub use engine::EngineBuilder;
+pub use engine::EngineError;
+
+// Update result
 pub use scheduler::UpdateReport;
+
+// Storage backend
+pub use storage::Storage;
+pub use storage::StorageError;
+pub use storage::StorageKey;
+pub use storage::StorageValue;
 pub use storage::MemoryStorage;
+
+// Transform authoring
+pub use transform::Transform;
+pub use transform::TransformContext;
+pub use transform::TransformSchema;
 pub use transform::TransformError;
-pub use slot::{SlotKind, SlotDescriptor, TransformSchema};
-pub use collection::{CollectionDiff, ElementKey};
+pub use transform::IncrementalValue;
+pub use transform::KeyExtractor;
+pub use transform::CollectionInput;
+pub use transform::CollectionChange;
+
+// Stable node identity
+pub use uuid::Uuid;

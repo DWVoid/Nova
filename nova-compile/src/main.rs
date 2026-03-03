@@ -6,15 +6,7 @@
 //! nvc [--project <path>]
 //! ```
 //!
-//! | Flag | Default | Meaning |
-//! |------|---------|---------|
-//! | `--project <path>` | current directory | Path to `bundle.toml` **or** the directory that contains it. |
-//!
-//! If `--project` is not supplied the driver searches upward from the current
-//! working directory for a `bundle.toml`, mirroring how `cargo` finds
-//! `Cargo.toml`.
-//!
-//! # Pipeline (current)
+//! # Pipeline
 //!
 //! ```text
 //! bundle.toml
@@ -23,27 +15,23 @@
 //! stat_source_files()          – real fs::metadata for each file
 //!     │
 //!     ▼
-//! SemanticSession::new()       – backed by FileSystemStorage (loose files)
-//!     │                          and RealFileAccess
+//! SemanticSession::open()      – backed by FileSystemStorage + RealFileAccess
+//!     │  auto-detects warm/cold start
 //!     ▼
 //! session.update_files(stats)  – register / update input nodes
 //!     │
 //!     ▼
-//! session.run().await          – incremental propagation
+//! session.checkpoint()         – begin a checkpoint
+//!     │
+//!     ▼
+//! session.run().await          – incremental propagation (values flush as they compute)
+//!     │
+//!     ▼
+//! session.commit().await       – persist graph topology + all values atomically
 //!     │
 //!     ▼
 //! report printed to stdout
 //! ```
-//!
-//! The incremental state is persisted under
-//! `<project>/target/nova-incremental/` so that a second run of `nvc` on an
-//! unchanged project does zero recomputation.
-//!
-//! # Future work
-//!
-//! Once the semantic, type-checking, and code-generation stages are
-//! implemented, `session.run()` will return richer diagnostics and the driver
-//! will emit object files / bytecode into `<project>/target/`.
 
 mod file_storage;
 mod project;
@@ -60,33 +48,26 @@ use real_fs::RealFileAccess;
 use nova_analyze::semantic::SemanticSession;
 
 // ---------------------------------------------------------------------------
-// CLI argument parsing (hand-rolled, no external dep needed yet)
+// CLI argument parsing
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct Args {
-    /// Path to `bundle.toml` or the directory containing it.
     project: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
-    let mut args = std::env::args().skip(1); // skip the binary name
+    let mut args = std::env::args().skip(1);
     let mut project = None;
-
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--project" | "-p" => {
-                project = Some(PathBuf::from(
-                    args.next().unwrap_or_else(|| {
-                        eprintln!("error: --project requires a path argument");
-                        process::exit(1);
-                    }),
-                ));
+                project = Some(PathBuf::from(args.next().unwrap_or_else(|| {
+                    eprintln!("error: --project requires a path argument");
+                    process::exit(1);
+                })));
             }
-            "--help" | "-h" => {
-                print_usage();
-                process::exit(0);
-            }
+            "--help" | "-h" => { print_usage(); process::exit(0); }
             other => {
                 eprintln!("error: unknown argument '{other}'");
                 print_usage();
@@ -94,7 +75,6 @@ fn parse_args() -> Args {
             }
         }
     }
-
     Args { project }
 }
 
@@ -103,7 +83,6 @@ fn print_usage() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -p, --project <path>   Path to bundle.toml or the project directory");
-    eprintln!("                         (default: search upward from cwd)");
     eprintln!("  -h, --help             Print this help message");
 }
 
@@ -115,120 +94,78 @@ fn print_usage() {
 async fn main() {
     let args = parse_args();
 
-    // ── 1. Locate bundle.toml ─────────────────────────────────────────────
+    // 1. Locate bundle.toml
     let manifest_path = args.project.unwrap_or_else(|| {
         let cwd = std::env::current_dir().unwrap_or_else(|e| {
             eprintln!("error: cannot determine current directory: {e}");
             process::exit(1);
         });
         find_manifest(&cwd).unwrap_or_else(|| {
-            eprintln!(
-                "error: no bundle.toml found in '{}' or any parent directory",
-                cwd.display()
-            );
+            eprintln!("error: no bundle.toml found in '{}' or any parent directory", cwd.display());
             process::exit(1);
         })
     });
 
-    // ── 2. Parse project manifest ─────────────────────────────────────────
+    // 2. Parse project manifest
     let manifest = load_manifest(&manifest_path).unwrap_or_else(|e| {
         eprintln!("error: {e}");
         process::exit(1);
     });
 
-    println!(
-        "nvc: compiling {} v{} ({})",
-        manifest.name,
-        manifest.version,
-        manifest.root.display()
-    );
-    if !manifest.description.is_empty() {
-        println!("     {}", manifest.description);
-    }
+    println!("nvc: compiling {} v{} ({})",
+        manifest.name, manifest.version, manifest.root.display());
+    if !manifest.description.is_empty() { println!("     {}", manifest.description); }
     println!("     {} source file(s)", manifest.source_files.len());
 
-    // ── 3. Set up incremental storage under <project>/target/nova-incremental/
+    // 3. Set up incremental storage
     let storage = Arc::new(FileSystemStorage::new(&manifest.incremental_dir));
     storage.ensure_dir().await.unwrap_or_else(|e| {
-        eprintln!("error: {e}");
-        process::exit(1);
+        eprintln!("error: {e}"); process::exit(1);
     });
+    println!("     incremental cache: {}", manifest.incremental_dir.display());
 
-    println!(
-        "     incremental cache: {}",
-        manifest.incremental_dir.display()
-    );
-
-    // ── 4. Stat every source file ─────────────────────────────────────────
+    // 4. Stat source files
     let stats = stat_source_files(&manifest).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
+        eprintln!("error: {e}"); process::exit(1);
+    });
+
+    // 5. Open the semantic session (auto-detects warm/cold start)
+    let fs = Arc::new(RealFileAccess);
+    let storage_arc: Arc<dyn nova_incremental::Storage> = Arc::clone(&storage) as _;
+    let fs_arc: Arc<dyn nova_analyze::semantic::file_access::FileAccess> = Arc::clone(&fs) as _;
+
+    let session = SemanticSession::open(storage_arc, fs_arc).await.unwrap_or_else(|e| {
+        eprintln!("error: failed to open semantic session: {e}");
         process::exit(1);
     });
 
-    // ── 5. Build the semantic session ─────────────────────────────────────
-    //
-    // If a prior run has already written graph metadata to storage we restore
-    // from it so that the incremental engine can skip nodes whose input hashes
-    // have not changed since the last invocation.  If no prior state exists
-    // (first run, or cache was deleted) we start fresh.
-    let fs = Arc::new(RealFileAccess);
-
-    // Collect the canonical path strings that `SemanticSession::load` needs
-    // in order to reconstruct the per-file transform registry.
-    let known_paths: Vec<&str> = stats.iter().map(|s| s.path.as_str()).collect();
-
-    let mut session = {
-        use nova_incremental::storage::{Storage as _, StorageKey};
-        let has_prior_state = storage
-            .contains(&StorageKey::graph_meta())
-            .await
-            .unwrap_or(false);
-
-        if has_prior_state {
-            println!("nvc: restoring incremental state from cache …");
-            match SemanticSession::load(
-                Arc::clone(&storage) as Arc<dyn nova_incremental::storage::Storage>,
-                Arc::clone(&fs) as Arc<dyn nova_analyze::semantic::file_access::FileAccess>,
-                &known_paths,
-            ).await {
-                Ok(s) => {
-                    println!("     restored successfully");
-                    s
-                }
-                Err(e) => {
-                    eprintln!("warning: could not restore incremental state ({e}), starting fresh");
-                    SemanticSession::new(
-                        Arc::clone(&storage) as Arc<dyn nova_incremental::storage::Storage>,
-                        Arc::clone(&fs) as Arc<dyn nova_analyze::semantic::file_access::FileAccess>,
-                    )
-                }
-            }
-        } else {
-            SemanticSession::new(
-                Arc::clone(&storage) as Arc<dyn nova_incremental::storage::Storage>,
-                Arc::clone(&fs) as Arc<dyn nova_analyze::semantic::file_access::FileAccess>,
-            )
-        }
-    };
-
-    // Register / update / remove files based on the current stat snapshot.
-    // For a restored session this marks only changed files as dirty; for a
-    // fresh session every file is new and will be fully processed.
-    session.update_files(stats).unwrap_or_else(|e| {
+    // 6. Update file set
+    session.set_files(stats).unwrap_or_else(|e| {
         eprintln!("error: failed to register source files: {e:?}");
         process::exit(1);
     });
 
-    // ── 6. Run the incremental update ─────────────────────────────────────
+    // 7. Checkpoint + run + commit
+    session.checkpoint().await.unwrap_or_else(|e| {
+        eprintln!("error: failed to begin checkpoint: {e}");
+        process::exit(1);
+    });
+
     println!("nvc: running incremental update …");
     let report = session.run().await;
 
-    // ── 7. Print report ───────────────────────────────────────────────────
+    // 8. Always commit (preserves partial results for next run)
+    session.commit().await.unwrap_or_else(|e| {
+        eprintln!("warning: failed to commit incremental state: {e}");
+    });
+
+    // 9. Print report
     println!("nvc: update complete");
-    println!("     nodes evaluated  : {}", report.transforms_evaluated);
-    println!("     nodes changed    : {}", report.transforms_changed);
-    println!("     nodes skipped    : {}", report.transforms_skipped);
-    println!("     nodes blocked    : {}", report.transforms_blocked);
+    println!("     transforms evaluated : {}", report.transforms_evaluated);
+    println!("     transforms changed   : {}", report.transforms_changed);
+    println!("     transforms skipped   : {}", report.transforms_skipped);
+    println!("     transforms blocked   : {}", report.transforms_blocked);
+
     if !report.errors.is_empty() {
         eprintln!("nvc: {} error(s) during update:", report.errors.len());
         for (node_id, err) in &report.errors {
@@ -236,17 +173,4 @@ async fn main() {
         }
         process::exit(1);
     }
-
-    // ── 8. Persist graph topology and computed hashes ─────────────────────
-    //
-    // `session.run()` computes values but does NOT write them to storage on
-    // its own — the engine separates computation from persistence so that
-    // callers can decide when (and whether) to commit.  Without this call
-    // every run would appear as a cold start and recompute everything from
-    // scratch.
-    session.save().await.unwrap_or_else(|e| {
-        eprintln!("warning: failed to persist incremental state: {e}");
-        // Non-fatal: the compilation result is still correct, we just lose
-        // the ability to skip unchanged work on the next invocation.
-    });
 }

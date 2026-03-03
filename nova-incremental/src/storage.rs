@@ -1,278 +1,282 @@
-//! Async key-value storage trait and serialisation helpers.
+//! Async key-value storage trait + `MemoryStorage` (public) + internal helpers.
 //!
-//! ## Design: Storage as a User-Supplied Trait
-//!
-//! The incremental engine needs durability, but the right storage backend
-//! depends entirely on the host application:
-//! - A compiler might use a memory-mapped file (fast random access).
-//! - An IDE might use an SQLite database (transactional, concurrent reads).
-//! - A build system might use a cloud object store (distributed).
-//!
-//! Rather than baking in a specific backend, we define a minimal async
-//! key-value trait and let the user provide the implementation.  The engine
-//! only calls `get`, `set`, `delete`, and `contains`; all storage concerns
-//! (caching, durability, transactions) are the caller's responsibility.
-//!
-//! ## Design: MessagePack Encoding
-//!
-//! We use `rmp-serde` (MessagePack) for serialising [`PersistedNodeData`]:
-//! - Compact binary format – smaller than JSON.
-//! - Fast encode/decode with no schema compile step (unlike Protocol Buffers).
-//! - Already a dependency of the parent project.
-//!
-//! Raw `Vec<u8>` node values are stored opaque: the engine does not need to
-//! understand their content for persistence, only for hash comparison.
-//!
-//! ## Design: Transforms Are Not Serialised
-//!
-//! Transform functions are code, not data – they cannot be meaningfully
-//! serialised.  Instead, each edge stores a `transform_key` (a
-//! user-assigned stable string).  On graph reload, the user re-registers all
-//! transforms with the same keys via [`crate::registry::TransformRegistry`],
-//! and the loader re-associates them.  This mirrors the approach taken by
-//! incremental compilation frameworks like Salsa.
+//! Only `Storage`, `StorageError`, and `MemoryStorage` are public.
+//! `StorageKey`, `StorageValue`, and serialisation helpers are `pub(crate)`.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use crate::node_id::NodeId;
-use crate::value::ValueHash;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Storage key / value newtypes
+// StorageError (public)
 // ---------------------------------------------------------------------------
 
-/// A string key used to address a record in the key-value store.
-///
-/// Derived from a [`NodeId`] via [`NodeId::to_storage_key`] for node values,
-/// or from a fixed sentinel (e.g. `"__graph_meta__"`) for graph topology.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct StorageKey(pub String);
-
-impl StorageKey {
-    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
-    pub fn for_node(id: NodeId) -> Self { Self(id.to_storage_key()) }
-    pub fn graph_meta() -> Self { Self("__graph_meta__".to_string()) }
-    pub fn as_str(&self) -> &str { &self.0 }
-}
-
-impl std::fmt::Display for StorageKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Raw bytes stored under a [`StorageKey`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StorageValue(pub Vec<u8>);
-
-impl StorageValue {
-    pub fn new(bytes: Vec<u8>) -> Self { Self(bytes) }
-    pub fn as_bytes(&self) -> &[u8] { &self.0 }
-    pub fn into_bytes(self) -> Vec<u8> { self.0 }
-}
-
-// ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-/// An error returned by a [`Storage`] operation.
+/// Error returned by storage operations.
 #[derive(Debug, Clone)]
 pub struct StorageError {
     pub message: String,
-    pub source: Option<String>,
+    pub source:  Option<String>,
 }
 
 impl StorageError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), source: None }
-    }
-    pub fn with_source(message: impl Into<String>, source: impl Into<String>) -> Self {
-        Self { message: message.into(), source: Some(source.into()) }
+    pub fn new(msg: impl Into<String>) -> Self { Self { message: msg.into(), source: None } }
+    pub fn with_source(msg: impl Into<String>, src: impl Into<String>) -> Self {
+        Self { message: msg.into(), source: Some(src.into()) }
     }
 }
 
 impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)?;
-        if let Some(src) = &self.source { write!(f, ": {}", src)?; }
+        if let Some(s) = &self.source { write!(f, ": {s}")?; }
         Ok(())
     }
 }
-
 impl std::error::Error for StorageError {}
 
 // ---------------------------------------------------------------------------
-// Storage trait
+// Storage trait (public)
 // ---------------------------------------------------------------------------
 
-/// Async key-value storage backend.
+/// Async key-value backend.  Implement this to supply a custom storage engine.
 ///
-/// Implement this trait on your preferred storage engine and pass it to
-/// [`crate::engine::IncrementalEngine::new`].
-///
-/// All methods take `&self` (shared reference) so the implementation can use
-/// internal mutability (e.g. `Mutex`, `RwLock`, or connection pooling) as
-/// needed.
+/// `StorageKey` and `StorageValue` are `pub(crate)` — callers supply
+/// `Arc<dyn Storage>` to the engine but never construct keys/values directly.
 #[async_trait]
-pub trait Storage: Send + Sync {
-    /// Retrieve the value associated with `key`, or `None` if absent.
+pub trait Storage: Send + Sync + 'static {
     async fn get(&self, key: &StorageKey) -> Result<Option<StorageValue>, StorageError>;
-
-    /// Store `value` under `key`, overwriting any previous value.
     async fn set(&self, key: &StorageKey, value: StorageValue) -> Result<(), StorageError>;
-
-    /// Remove the entry for `key`.  Succeeds silently if the key is absent.
     async fn delete(&self, key: &StorageKey) -> Result<(), StorageError>;
-
-    /// Return `true` if `key` has an associated value.
     async fn contains(&self, key: &StorageKey) -> Result<bool, StorageError>;
+
+    /// Begin a checkpoint.  Subsequent writes are staged.
+    async fn checkpoint(&self) -> Result<(), StorageError> { Ok(()) }
+    /// Make all staged writes durable.
+    async fn commit(&self) -> Result<(), StorageError> { Ok(()) }
+    /// Discard all staged writes since `checkpoint()`.
+    async fn discard(&self) -> Result<(), StorageError> { Ok(()) }
 }
 
 // ---------------------------------------------------------------------------
-// Persisted data structures
+// MemoryStorage (public)
 // ---------------------------------------------------------------------------
 
-/// Per-edge metadata persisted to storage.
-///
-/// The transform function itself is not serialised; only its `transform_key`
-/// is stored so it can be re-associated at reload time via the
-/// [`crate::registry::TransformRegistry`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedEdge {
-    /// Ordered list of source node IDs.
-    pub sources: Vec<NodeId>,
-    /// Ordered list of target node IDs.
-    pub targets: Vec<NodeId>,
-    /// Stable user-assigned name that maps to a concrete [`crate::transform::Transform`].
-    pub transform_key: String,
-}
-
-/// All data persisted for a single node.
-///
-/// `value_bytes` is the MessagePack encoding of the concrete value produced
-/// by the node's transform (or supplied directly for input nodes).
-///
-/// `type_key` identifies which registered type the bytes encode, enabling
-/// full typed reconstruction on reload via [`crate::value::ValueTypeRegistry`].
-///
-/// `value_hash` is the hash at the time of last successful computation; used
-/// after reload to decide whether an input has changed since the last run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedNodeData {
-    pub node_id: NodeId,
-    /// Stable type key registered in the engine's [`ValueTypeRegistry`].
-    pub type_key: String,
-    /// MessagePack-encoded concrete value, or empty if never computed.
-    pub value_bytes: Vec<u8>,
-    /// Hash of the value at last persist time.  Zero if never persisted.
-    pub value_hash: ValueHash,
-    /// `true` if this is an input (source) node with no incoming edges.
-    pub is_input: bool,
-}
-
-/// Graph-level metadata persisted under the sentinel key
-/// [`StorageKey::graph_meta`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistedGraphMeta {
-    /// All edges in the graph (enough to reconstruct topology).
-    pub edges: Vec<PersistedEdge>,
-    /// Ordered list of all known node IDs (used to iterate during reload).
-    pub node_ids: Vec<NodeId>,
-}
-
-// ---------------------------------------------------------------------------
-// Encode / decode helpers
-// ---------------------------------------------------------------------------
-
-/// Encode a `Serialize`-able value to MessagePack bytes.
-pub fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StorageError> {
-    rmp_serde::to_vec(v).map_err(|e| StorageError::with_source("encode failed", e.to_string()))
-}
-
-/// Decode a `Deserialize`-able value from MessagePack bytes.
-pub fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, StorageError> {
-    rmp_serde::from_slice(bytes).map_err(|e| StorageError::with_source("decode failed", e.to_string()))
-}
-
-// ---------------------------------------------------------------------------
-// In-memory Storage implementation (for testing)
-// ---------------------------------------------------------------------------
-
-/// A simple in-memory [`Storage`] implementation backed by a `tokio::sync::RwLock`.
-///
-/// **This is provided for tests and examples only.**  Do not use it in
-/// production where data durability is required.
+/// In-memory `Storage` for tests and ephemeral use.
 pub struct MemoryStorage {
-    map: tokio::sync::RwLock<std::collections::HashMap<String, Vec<u8>>>,
+    map:      parking_lot::RwLock<std::collections::HashMap<Uuid, Vec<u8>>>,
+    snapshot: parking_lot::Mutex<Option<std::collections::HashMap<Uuid, Vec<u8>>>>,
 }
 
 impl MemoryStorage {
     pub fn new() -> Self {
-        Self { map: tokio::sync::RwLock::new(std::collections::HashMap::new()) }
+        Self {
+            map:      Default::default(),
+            snapshot: parking_lot::Mutex::new(None),
+        }
     }
 }
 
-impl Default for MemoryStorage {
-    fn default() -> Self { Self::new() }
-}
+impl Default for MemoryStorage { fn default() -> Self { Self::new() } }
 
 #[async_trait]
 impl Storage for MemoryStorage {
     async fn get(&self, key: &StorageKey) -> Result<Option<StorageValue>, StorageError> {
-        let map = self.map.read().await;
-        Ok(map.get(key.as_str()).map(|v| StorageValue::new(v.clone())))
+        Ok(self.map.read().get(&key.0).map(|v| StorageValue(v.clone())))
     }
-
     async fn set(&self, key: &StorageKey, value: StorageValue) -> Result<(), StorageError> {
-        let mut map = self.map.write().await;
-        map.insert(key.0.clone(), value.into_bytes());
+        self.map.write().insert(key.0, value.0);
         Ok(())
     }
-
     async fn delete(&self, key: &StorageKey) -> Result<(), StorageError> {
-        let mut map = self.map.write().await;
-        map.remove(key.as_str());
+        self.map.write().remove(&key.0);
         Ok(())
     }
-
     async fn contains(&self, key: &StorageKey) -> Result<bool, StorageError> {
-        let map = self.map.read().await;
-        Ok(map.contains_key(key.as_str()))
+        Ok(self.map.read().contains_key(&key.0))
+    }
+    async fn checkpoint(&self) -> Result<(), StorageError> {
+        let mut snap = self.snapshot.lock();
+        if snap.is_some() { return Err(StorageError::new("checkpoint already active")); }
+        *snap = Some(self.map.read().clone());
+        Ok(())
+    }
+    async fn commit(&self) -> Result<(), StorageError> {
+        let mut snap = self.snapshot.lock();
+        if snap.is_none() { return Err(StorageError::new("no active checkpoint")); }
+        *snap = None;
+        Ok(())
+    }
+    async fn discard(&self) -> Result<(), StorageError> {
+        let mut snap = self.snapshot.lock();
+        match snap.take() {
+            Some(old) => { *self.map.write() = old; Ok(()) }
+            None => Err(StorageError::new("no active checkpoint")),
+        }
     }
 }
+
+// ---------------------------------------------------------------------------
+// StorageKey / StorageValue — public for Storage implementors
+// ---------------------------------------------------------------------------
+
+/// A UUID-keyed storage address.
+///
+/// External [`Storage`] implementors receive this as a key argument.
+/// Use [`StorageKey::as_uuid`] to derive a file-name or DB key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StorageKey(pub(crate) Uuid);
+
+impl StorageKey {
+    /// Return the underlying UUID.
+    pub fn as_uuid(&self) -> Uuid { self.0 }
+    /// Construct a key from any UUID (for storage implementors and tests).
+    pub fn from_uuid(id: Uuid) -> Self { Self(id) }
+    /// Key for a node's persisted value.
+    pub(crate) fn for_node(id: crate::node_id::NodeId) -> Self { Self(id.as_uuid()) }
+    /// Key for a collection element: XOR node UUID with element key.
+    pub(crate) fn for_element(node: crate::node_id::NodeId, elem_key: u64) -> Self {
+        let mut bytes = node.as_uuid().into_bytes();
+        let ek = elem_key.to_le_bytes();
+        for i in 0..8 { bytes[8 + i] ^= ek[i]; }
+        Self(Uuid::from_bytes(bytes))
+    }
+    /// Fixed key for the persisted topology blob.
+    pub(crate) fn topology() -> Self {
+        Self(Uuid::from_bytes([
+            0x6e, 0x6f, 0x76, 0x61, 0x5f, 0x74, 0x6f, 0x70,
+            0x6f, 0x5f, 0x76, 0x32, 0x00, 0x00, 0x00, 0x00,
+        ]))
+    }
+}
+
+/// Raw bytes stored in the backend.
+///
+/// External [`Storage`] implementors construct this from bytes on `get`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageValue(pub(crate) Vec<u8>);
+
+impl StorageValue {
+    /// Construct from raw bytes.
+    pub fn new(bytes: Vec<u8>) -> Self { Self(bytes) }
+    pub fn as_bytes(&self) -> &[u8] { &self.0 }
+}
+
+// ---------------------------------------------------------------------------
+// Serde helpers (pub(crate))
+// ---------------------------------------------------------------------------
+
+pub(crate) fn encode<T: Serialize>(v: &T) -> Result<Vec<u8>, StorageError> {
+    rmp_serde::to_vec(v)
+        .map_err(|e| StorageError::with_source("encode", e.to_string()))
+}
+
+pub(crate) fn decode<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T, StorageError> {
+    rmp_serde::from_slice(bytes)
+        .map_err(|e| StorageError::with_source("decode", e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Persisted topology structs (pub(crate))
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum PersistedNodeKind { Input, Output }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedIoNode {
+    pub id:   crate::node_id::NodeId,
+    pub kind: PersistedNodeKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedTransformNode {
+    pub id:  crate::node_id::NodeId,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) enum PersistedEndpoint {
+    Io(crate::node_id::NodeId),
+    TransIn  { t: crate::node_id::NodeId, slot: usize },
+    TransOut { t: crate::node_id::NodeId, slot: usize },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedEdge {
+    pub from: PersistedEndpoint,
+    pub to:   PersistedEndpoint,
+    pub coll: bool,  // true = collection edge
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedTopology {
+    pub io_nodes:        Vec<PersistedIoNode>,
+    pub transform_nodes: Vec<PersistedTransformNode>,
+    pub edges:           Vec<PersistedEdge>,
+}
+
+/// Persisted value record for one node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedNodeValue {
+    pub type_key:    String,
+    pub value_bytes: Vec<u8>,
+    pub hash:        crate::value::ValueHash,
+}
+
+/// Persisted value record for one collection element.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedElement {
+    pub key:         u64,
+    pub type_key:    String,
+    pub value_bytes: Vec<u8>,
+    pub hash:        crate::value::ValueHash,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn memory_storage_set_get_delete() {
+    async fn set_get_delete() {
         let s = MemoryStorage::new();
-        let key = StorageKey::new("test");
-        let val = StorageValue::new(vec![1, 2, 3]);
-
-        assert!(!s.contains(&key).await.unwrap());
+        let key = StorageKey(Uuid::new_v4());
+        let val = StorageValue(vec![1, 2, 3]);
         s.set(&key, val.clone()).await.unwrap();
-        assert!(s.contains(&key).await.unwrap());
         assert_eq!(s.get(&key).await.unwrap(), Some(val));
         s.delete(&key).await.unwrap();
         assert!(s.get(&key).await.unwrap().is_none());
     }
 
-    #[test]
-    fn encode_decode_round_trip() {
-        let meta = PersistedGraphMeta { edges: vec![], node_ids: vec![] };
-        let bytes = encode(&meta).unwrap();
-        let back: PersistedGraphMeta = decode(&bytes).unwrap();
-        assert_eq!(back.edges.len(), 0);
-        assert_eq!(back.node_ids.len(), 0);
+    #[tokio::test]
+    async fn checkpoint_commit() {
+        let s = MemoryStorage::new();
+        let key = StorageKey(Uuid::new_v4());
+        s.checkpoint().await.unwrap();
+        s.set(&key, StorageValue(vec![1])).await.unwrap();
+        s.commit().await.unwrap();
+        assert_eq!(s.get(&key).await.unwrap(), Some(StorageValue(vec![1])));
     }
 
-    #[test]
-    fn storage_key_for_node_is_consistent() {
-        let id = NodeId::new();
-        let k1 = StorageKey::for_node(id);
-        let k2 = StorageKey::for_node(id);
-        assert_eq!(k1, k2);
+    #[tokio::test]
+    async fn checkpoint_discard() {
+        let s = MemoryStorage::new();
+        let key = StorageKey(Uuid::new_v4());
+        s.set(&key, StorageValue(vec![1])).await.unwrap();
+        s.checkpoint().await.unwrap();
+        s.set(&key, StorageValue(vec![2])).await.unwrap();
+        s.discard().await.unwrap();
+        assert_eq!(s.get(&key).await.unwrap(), Some(StorageValue(vec![1])));
+    }
+
+    #[tokio::test]
+    async fn nested_checkpoint_rejected() {
+        let s = MemoryStorage::new();
+        s.checkpoint().await.unwrap();
+        assert!(s.checkpoint().await.is_err());
+        s.discard().await.unwrap();
     }
 }

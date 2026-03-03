@@ -1,48 +1,23 @@
-//! Transform and sorter registries.  Internal only.
+//! Transform registry.  Maps string key → `ErasedTransform`.  All `pub(crate)`.
 //!
 //! Users register transforms exclusively via [`crate::engine::IncrementalEngine`]
-//! typed registration methods.  `TransformRegistry` is `pub(crate)` and never
+//! `register_transform` method.  `TransformRegistry` is `pub(crate)` and never
 //! exposed in the public API.
 use std::collections::HashMap;
-use std::sync::Arc;
-use crate::transform::Transform;
-use crate::value::Value;
+use crate::transform::ErasedTransform;
 
-/// Engine-private registry of named [`Transform`] instances.
-#[derive(Default, Clone)]
 pub(crate) struct TransformRegistry {
-    map: HashMap<String, Transform>,
+    map: HashMap<String, ErasedTransform>,
 }
 
 impl TransformRegistry {
     pub(crate) fn new() -> Self { Self { map: HashMap::new() } }
 
-    pub(crate) fn register(&mut self, key: impl Into<String>, transform: Transform) {
-        self.map.insert(key.into(), transform);
+    pub(crate) fn register(&mut self, key: &str, t: ErasedTransform) {
+        self.map.insert(key.to_owned(), t);
     }
 
-    pub(crate) fn get(&self, key: &str) -> Option<&Transform> { self.map.get(key) }
-
-    pub(crate) fn contains(&self, key: &str) -> bool { self.map.contains_key(key) }
-}
-
-/// Comparator function type for collection sorters.
-pub type SorterFn = Arc<dyn Fn(&Value, &Value) -> std::cmp::Ordering + Send + Sync>;
-
-/// Engine-private registry of named sorter comparators.
-#[derive(Default, Clone)]
-pub(crate) struct SorterRegistry {
-    map: HashMap<String, SorterFn>,
-}
-
-impl SorterRegistry {
-    pub(crate) fn new() -> Self { Self { map: HashMap::new() } }
-
-    pub(crate) fn register(&mut self, key: impl Into<String>, f: SorterFn) {
-        self.map.insert(key.into(), f);
-    }
-
-    pub(crate) fn get(&self, key: &str) -> Option<&SorterFn> { self.map.get(key) }
+    pub(crate) fn get(&self, key: &str) -> Option<&ErasedTransform> { self.map.get(key) }
 
     pub(crate) fn contains(&self, key: &str) -> bool { self.map.contains_key(key) }
 }
@@ -50,40 +25,47 @@ impl SorterRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transform::{Transform, TypedOneToOne};
-    use crate::value::ValueTypeRegistry;
+    use crate::transform::{Transform as TransformTrait, TransformSchema,
+                           TransformContext, TransformError, ErasedTransform};
+    use async_trait::async_trait;
 
-    fn make_noop_transform() -> Transform {
-        let mut r = ValueTypeRegistry::new();
-        r.register_primitives().unwrap();
-        let reg = Arc::new(r);
-        Transform::new(Arc::new(TypedOneToOne::new(
-            |n: &i32| { let n = *n; async move { Ok(n) } },
-            reg,
-        )))
+    struct Noop;
+    #[async_trait]
+    impl TransformTrait for Noop {
+        fn schema() -> TransformSchema where Self: Sized {
+            TransformSchema::new().input::<i32>().output::<i32>()
+        }
+        async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+            let v = *ctx.input::<i32>(0)?;
+            ctx.output(0, v)
+        }
+    }
+
+    fn make_erased() -> ErasedTransform {
+        ErasedTransform::new(Noop::schema(), Noop)
     }
 
     #[test]
     fn register_and_get() {
         let mut reg = TransformRegistry::new();
-        reg.register("noop", make_noop_transform());
+        reg.register("noop", make_erased());
         assert!(reg.get("noop").is_some());
         assert!(reg.get("missing").is_none());
     }
 
     #[test]
-    fn contains_returns_correct_result() {
+    fn contains() {
         let mut reg = TransformRegistry::new();
-        reg.register("x", make_noop_transform());
+        reg.register("x", make_erased());
         assert!(reg.contains("x"));
         assert!(!reg.contains("y"));
     }
 
     #[test]
-    fn register_overwrites() {
+    fn overwrite() {
         let mut reg = TransformRegistry::new();
-        reg.register("k", make_noop_transform());
-        reg.register("k", make_noop_transform());
+        reg.register("k", make_erased());
+        reg.register("k", make_erased());
         assert!(reg.get("k").is_some());
     }
 }

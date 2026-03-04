@@ -1,0 +1,300 @@
+//! [`EngineBuilder`] — static topology declaration + [`Engine`] — orchestration.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use uuid::Uuid;
+
+use crate::keys::{NodeId, NodeInstanceKey, SubgraphId, UNIT_INSTANCE};
+use crate::report::UpdateReport;
+use crate::runner::{RunContext, seed_pending_tasks, set_input_value};
+use crate::storage::{Storage, StorageError, StorageValue};
+use crate::task_queue::{ArcSequentialTaskQueue, TaskQueue};
+use crate::topology::TopologyBuilder;
+use crate::transform::{Transform, IncrementalValue, serialize_erased, hash_bytes};
+use crate::value_store::ValueStore;
+use crate::workstate::{WorkState, WorkStateSnapshot};
+use crate::keys::workstate_storage_key;
+
+// ---------------------------------------------------------------------------
+// EngineError
+// ---------------------------------------------------------------------------
+
+/// Error returned by engine construction or operation.
+#[derive(Debug, Clone)]
+pub struct EngineError {
+    pub message: String,
+}
+
+impl EngineError {
+    pub fn new(msg: impl Into<String>) -> Self { Self { message: msg.into() } }
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+impl std::error::Error for EngineError {}
+
+impl From<StorageError> for EngineError {
+    fn from(e: StorageError) -> Self { Self::new(e.to_string()) }
+}
+
+// ---------------------------------------------------------------------------
+// EngineBuilder
+// ---------------------------------------------------------------------------
+
+/// Fluent builder for constructing an [`Engine`].
+pub struct EngineBuilder {
+    topo: TopologyBuilder,
+    cycle_limit: u32,
+}
+
+impl EngineBuilder {
+    pub fn new() -> Self {
+        Self {
+            topo: TopologyBuilder::new(),
+            cycle_limit: 1000,
+        }
+    }
+
+    /// Register a transform instance under `key`.
+    pub fn register<T: Transform>(mut self, key: &str, instance: T) -> Self {
+        self.topo.register_transform(key, instance);
+        self
+    }
+
+    /// Declare an I/O input node with the given UUID.
+    pub fn input_node<T: IncrementalValue>(mut self, id: Uuid) -> Self {
+        self.topo.add_io_input(id);
+        self
+    }
+
+    /// Declare an I/O output node with the given UUID.
+    pub fn output_node(mut self, id: Uuid) -> Self {
+        self.topo.add_io_output(id);
+        self
+    }
+
+    /// Declare a transform node, binding `id` to a registered transform `key`.
+    pub fn transform_node(mut self, id: Uuid, key: &str) -> Self {
+        self.topo.add_transform_node(id, key);
+        self
+    }
+
+    /// Wire an I/O node's output (slot 0) directly to another I/O node's input (slot 0).
+    pub fn wire(mut self, from: Uuid, to: Uuid) -> Self {
+        self.topo.add_edge(from, 0, to, 0);
+        self
+    }
+
+    /// Wire an I/O node's output into a specific input slot of a transform.
+    pub fn wire_into_slot(mut self, from: Uuid, to_transform: Uuid, slot: usize) -> Self {
+        self.topo.add_edge(from, 0, to_transform, slot);
+        self
+    }
+
+    /// Wire a specific output slot of a transform to an I/O node's input (slot 0).
+    pub fn wire_slot_to(mut self, from_transform: Uuid, slot: usize, to: Uuid) -> Self {
+        self.topo.add_edge(from_transform, slot, to, 0);
+        self
+    }
+
+    /// Wire an output slot of one transform into an input slot of another.
+    pub fn wire_slot_to_slot(
+        mut self,
+        from_transform: Uuid, out_slot: usize,
+        to_transform: Uuid, in_slot: usize,
+    ) -> Self {
+        self.topo.add_edge(from_transform, out_slot, to_transform, in_slot);
+        self
+    }
+
+    /// Set the cycle limit (default: 1000).
+    pub fn cycle_limit(mut self, limit: u32) -> Self {
+        self.cycle_limit = limit;
+        self.topo.set_cycle_limit(limit);
+        self
+    }
+
+    /// Consume the builder, validate, and produce an [`Engine`].
+    pub async fn build(self, storage: Arc<dyn Storage>) -> Result<Engine, EngineError> {
+        let topology = self.topo.freeze()
+            .map_err(|errs| EngineError::new(errs.join("; ")))?;
+        let topology = Arc::new(topology);
+        let workstate = Arc::new(WorkState::new());
+        let value_store = Arc::new(ValueStore::new());
+        // TODO(parallel): replace with pool-based TaskQueue
+        let task_queue: Arc<ArcSequentialTaskQueue> = Arc::new(ArcSequentialTaskQueue::new());
+
+        // Attempt warm start.
+        let warmed = try_warm_start(&storage, &workstate, &topology).await;
+        if !warmed {
+            workstate.init_cold(&topology);
+        }
+
+        Ok(Engine {
+            topology,
+            workstate,
+            value_store,
+            task_queue,
+            storage,
+            cycle_limit: self.cycle_limit,
+            checkpoint_active: Arc::new(AtomicBool::new(false)),
+        })
+    }
+}
+
+impl Default for EngineBuilder {
+    fn default() -> Self { Self::new() }
+}
+
+// ---------------------------------------------------------------------------
+// Warm start helper
+// ---------------------------------------------------------------------------
+
+async fn try_warm_start(
+    storage: &Arc<dyn Storage>,
+    workstate: &Arc<WorkState>,
+    topology: &Arc<crate::topology::Topology>,
+) -> bool {
+    let key = workstate_storage_key();
+    let bytes = match storage.get(&key).await {
+        Ok(Some(sv)) => sv.as_bytes().to_vec(),
+        _ => return false,
+    };
+    let snapshot: WorkStateSnapshot = match rmp_serde::from_slice(&bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    workstate.restore(snapshot, topology).await;
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Engine
+// ---------------------------------------------------------------------------
+
+/// The incremental computation engine.
+pub struct Engine {
+    topology:          Arc<crate::topology::Topology>,
+    workstate:         Arc<WorkState>,
+    value_store:       Arc<ValueStore>,
+    task_queue:        Arc<ArcSequentialTaskQueue>,
+    storage:           Arc<dyn Storage>,
+    cycle_limit:       u32,
+    checkpoint_active: Arc<AtomicBool>,
+}
+
+impl Engine {
+    /// Push a new value into an I/O input node identified by `id`.
+    pub fn set_input<T: IncrementalValue>(&self, id: Uuid, value: T) -> Result<(), EngineError> {
+        let node_id = NodeId::from_uuid(id);
+        // Validate node exists and is an input.
+        let _ = self.topology.node(node_id); // panics if not found
+        // Serialize and compute hash synchronously.
+        let bytes = serialize_erased(&value)
+            .map_err(|e| EngineError::new(format!("serialize: {e}")))?;
+        let hash = hash_bytes(&bytes);
+        let erased = std::sync::Arc::new(value) as crate::transform::ErasedValue;
+        let type_name = std::any::type_name::<T>();
+
+        // Schedule the async work (will run in next update).
+        // We store the pending input; actual propagation happens in update().
+        // For simplicity, we run the async set_input synchronously via a one-shot future.
+        // In a fully async API this would be async fn set_input.
+        let topo = Arc::clone(&self.topology);
+        let ws   = Arc::clone(&self.workstate);
+        let vs   = Arc::clone(&self.value_store);
+        let tq   = Arc::clone(&self.task_queue);
+        let cl   = self.cycle_limit;
+        let report = Arc::new(std::sync::Mutex::new(UpdateReport::default()));
+
+        let ctx = RunContext { topology: topo, workstate: ws, value_store: vs,
+                               task_queue: tq, cycle_limit: cl, report };
+
+        // We need to run an async fn from a sync context here.
+        // Use tokio::runtime::Handle to spawn a blocking task.
+        // This is safe because set_input is called outside of async context typically.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                set_input_value(node_id, erased, bytes, hash, type_name, &ctx).await;
+            })
+        });
+
+        Ok(())
+    }
+
+    /// Run incremental update passes until the graph converges.
+    pub async fn update(&self) -> UpdateReport {
+        let report = Arc::new(std::sync::Mutex::new(UpdateReport::default()));
+        let ctx = RunContext {
+            topology:    Arc::clone(&self.topology),
+            workstate:   Arc::clone(&self.workstate),
+            value_store: Arc::clone(&self.value_store),
+            task_queue:  Arc::clone(&self.task_queue),
+            cycle_limit: self.cycle_limit,
+            report:      Arc::clone(&report),
+        };
+
+        seed_pending_tasks(&ctx).await;
+        self.task_queue.drain().await;
+
+        let mutex = Arc::try_unwrap(report)
+            .unwrap_or_else(|_| std::sync::Mutex::new(UpdateReport::default()));
+        mutex.into_inner().unwrap()
+    }
+
+    /// Read the current output value for the node identified by `id`.
+    pub async fn get<T: IncrementalValue>(&self, id: Uuid) -> Result<Option<T>, EngineError> {
+        let node_id = NodeId::from_uuid(id);
+        let key = NodeInstanceKey::new(SubgraphId(0), UNIT_INSTANCE, node_id);
+        let slot_key = key.slot_key(0);
+        if let Some(v) = self.value_store.get::<T>(slot_key) {
+            return Ok(Some((*v).clone()));
+        }
+        // Try loading from storage.
+        // For simplicity (no type registry yet), return None if not in cache.
+        // TODO: implement lazy load from storage with type-erased deserialization.
+        Ok(None)
+    }
+
+    /// Begin a storage checkpoint.
+    pub async fn checkpoint(&self) -> Result<(), EngineError> {
+        if self.checkpoint_active.swap(true, Ordering::SeqCst) {
+            return Err(EngineError::new("checkpoint already active"));
+        }
+        self.storage.checkpoint().await.map_err(EngineError::from)
+    }
+
+    /// Commit all changes since the last checkpoint.
+    pub async fn commit(&self) -> Result<(), EngineError> {
+        if !self.checkpoint_active.swap(false, Ordering::SeqCst) {
+            return Err(EngineError::new("no active checkpoint to commit"));
+        }
+        // Flush value store to storage.
+        self.value_store.flush(self.storage.as_ref()).await.map_err(EngineError::from)?;
+        // Persist workstate snapshot.
+        let snapshot = self.workstate.snapshot().await;
+        let bytes = rmp_serde::to_vec(&snapshot)
+            .map_err(|e| EngineError::new(format!("serialize workstate: {e}")))?;
+        self.storage.set(&workstate_storage_key(), StorageValue::new(bytes))
+            .await.map_err(EngineError::from)?;
+        self.storage.commit().await.map_err(EngineError::from)
+    }
+
+    /// Discard all changes since the last checkpoint.
+    pub async fn discard(&self) -> Result<(), EngineError> {
+        if !self.checkpoint_active.swap(false, Ordering::SeqCst) {
+            return Err(EngineError::new("no active checkpoint to discard"));
+        }
+        self.storage.discard().await.map_err(EngineError::from)?;
+        self.value_store.evict_all();
+        // Reload workstate from storage.
+        let warmed = try_warm_start(&self.storage, &self.workstate, &self.topology).await;
+        if !warmed {
+            self.workstate.init_cold(&self.topology);
+        }
+        Ok(())
+    }
+}

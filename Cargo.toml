@@ -4,7 +4,7 @@ members = [
     "nova-incremental",
     "nova-analyze",
     "nova-compile"
-]
+, "nova-incremental-neo"]
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }

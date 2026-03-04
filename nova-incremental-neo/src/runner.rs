@@ -527,7 +527,7 @@ async fn commit_outputs(
                 }
             }
             ContextOutput::Collection(pairs) => {
-                // Compute diff vs previous element_hashes.
+                // Full collection replacement: compute diff vs previous element_hashes.
                 let prev_hashes = ctx.workstate
                     .get_collection_hashes(key, slot_idx, &ctx.topology).await;
                 let mut new_keys: Vec<u64> = vec![];
@@ -568,6 +568,82 @@ async fn commit_outputs(
                     for (_, hash) in ctx.workstate
                         .get_collection_hashes(key, slot_idx, &ctx.topology).await {
                         h ^= hash; // XOR for order-independent aggregate hash
+                    }
+                    h
+                };
+                ctx.workstate.mark_present(key, slot_idx, agg_hash, &ctx.topology).await;
+
+                if any_element_changed {
+                    changed_any = true;
+                    propagate_dirty(key, slot_idx, ctx).await;
+                }
+            }
+            ContextOutput::CollectionMutations { added, removed, clear } => {
+                // Incremental mutations: apply add/set/remove operations.
+                let mut any_element_changed = false;
+
+                // If clear is set, remove all existing elements first.
+                if clear {
+                    let prev_hashes = ctx.workstate
+                        .get_collection_hashes(key, slot_idx, &ctx.topology).await;
+                    for &old_ek in prev_hashes.keys() {
+                        ctx.value_store.remove_element(ElementKey::new(slot_key, old_ek));
+                    }
+                    ctx.workstate.set_collection_keys(
+                        key, slot_idx, vec![], HashMap::new(), &ctx.topology
+                    ).await;
+                    any_element_changed = true;
+                }
+
+                // Get current state (after potential clear).
+                let mut current_hashes = ctx.workstate
+                    .get_collection_hashes(key, slot_idx, &ctx.topology).await;
+                let mut current_keys: Vec<u64> = current_hashes.keys().copied().collect();
+
+                // Apply removals.
+                for rm_key in &removed {
+                    if current_hashes.remove(rm_key).is_some() {
+                        ctx.value_store.remove_element(ElementKey::new(slot_key, *rm_key));
+                        current_keys.retain(|k| k != rm_key);
+                        any_element_changed = true;
+                    }
+                }
+
+                // Apply additions/updates.
+                for (ek, v) in &added {
+                    let (bytes, hash) = match erased_to_bytes_hash(v) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    let old_hash = current_hashes.get(ek).copied();
+                    let is_new = !current_keys.contains(ek);
+                    
+                    ctx.value_store.set_element_erased(
+                        ElementKey::new(slot_key, *ek), Arc::clone(v), bytes, hash, slot_kind.type_name
+                    );
+                    
+                    if is_new {
+                        current_keys.push(*ek);
+                    }
+                    current_hashes.insert(*ek, hash);
+                    
+                    if old_hash != Some(hash) {
+                        any_element_changed = true;
+                    }
+                }
+
+                // Update workstate.
+                current_keys.sort_unstable();
+                ctx.workstate.set_collection_keys(
+                    key, slot_idx, current_keys, current_hashes, &ctx.topology
+                ).await;
+
+                // Compute aggregate hash.
+                let agg_hash: ValueHash = {
+                    let mut h: ValueHash = 0;
+                    for (_, hash) in ctx.workstate
+                        .get_collection_hashes(key, slot_idx, &ctx.topology).await {
+                        h ^= hash;
                     }
                     h
                 };

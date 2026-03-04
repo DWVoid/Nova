@@ -70,27 +70,151 @@ impl std::fmt::Display for TransformError {
 impl std::error::Error for TransformError {}
 
 // ---------------------------------------------------------------------------
-// CollectionChange / CollectionInput
+// CollectionInput — typed facade for reading collection inputs
 // ---------------------------------------------------------------------------
 
-/// Incremental diff for a collection input slot.
-#[derive(Debug, Clone)]
-pub struct CollectionChange<T> {
-    pub added: Vec<T>,
-    pub changed: Vec<(T, T)>,
-    pub removed: Vec<u64>,
+use std::collections::HashMap;
+
+/// Owned typed facade for a gathered collection input slot.
+///
+/// Provides key-based access to elements and exposes incremental diff information.
+/// The transform can query elements by key, iterate over all elements, or
+/// iterate only over added/changed elements.
+pub struct CollectionInput<T> {
+    /// All current elements, keyed by their extracted key.
+    elements_by_key: HashMap<u64, T>,
+    /// All current keys in sorted order.
+    current_keys: Vec<u64>,
+    /// Keys of elements that were added since last evaluation.
+    added_keys: Vec<u64>,
+    /// Keys of elements whose value changed since last evaluation.
+    changed_keys: Vec<u64>,
+    /// Keys of elements that were removed since last evaluation.
+    removed_keys: Vec<u64>,
 }
 
-impl<T> Default for CollectionChange<T> {
-    fn default() -> Self {
-        Self { added: vec![], changed: vec![], removed: vec![] }
+impl<T> CollectionInput<T> {
+    /// Create a new CollectionInput from the given data.
+    pub(crate) fn new(
+        elements_by_key: HashMap<u64, T>,
+        current_keys: Vec<u64>,
+        added_keys: Vec<u64>,
+        changed_keys: Vec<u64>,
+        removed_keys: Vec<u64>,
+    ) -> Self {
+        Self { elements_by_key, current_keys, added_keys, changed_keys, removed_keys }
+    }
+
+    /// Get a reference to an element by key.
+    pub fn get(&self, key: u64) -> Option<&T> {
+        self.elements_by_key.get(&key)
+    }
+
+    /// Check if an element with the given key exists.
+    pub fn contains(&self, key: u64) -> bool {
+        self.elements_by_key.contains_key(&key)
+    }
+
+    /// Get the number of elements in the collection.
+    pub fn len(&self) -> usize {
+        self.elements_by_key.len()
+    }
+
+    /// Check if the collection is empty.
+    pub fn is_empty(&self) -> bool {
+        self.elements_by_key.is_empty()
+    }
+
+    /// Get all current keys in the collection (sorted).
+    pub fn keys(&self) -> &[u64] {
+        &self.current_keys
+    }
+
+    /// Iterate over all (key, element) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &T)> {
+        self.current_keys.iter().filter_map(move |&k| {
+            self.elements_by_key.get(&k).map(|v| (k, v))
+        })
+    }
+
+    /// Iterate over all elements (without keys).
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.current_keys.iter().filter_map(move |&k| self.elements_by_key.get(&k))
+    }
+
+    /// Get keys of elements that were added since last evaluation.
+    pub fn added_keys(&self) -> &[u64] {
+        &self.added_keys
+    }
+
+    /// Get keys of elements whose value changed since last evaluation.
+    pub fn changed_keys(&self) -> &[u64] {
+        &self.changed_keys
+    }
+
+    /// Get keys of elements that were removed since last evaluation.
+    pub fn removed_keys(&self) -> &[u64] {
+        &self.removed_keys
+    }
+
+    /// Iterate over elements that were added since last evaluation.
+    pub fn added(&self) -> impl Iterator<Item = &T> {
+        self.added_keys.iter().filter_map(move |&k| self.elements_by_key.get(&k))
+    }
+
+    /// Iterate over elements that changed since last evaluation.
+    pub fn changed(&self) -> impl Iterator<Item = &T> {
+        self.changed_keys.iter().filter_map(move |&k| self.elements_by_key.get(&k))
+    }
+
+    /// Check if this collection has any changes (added, changed, or removed).
+    pub fn has_changes(&self) -> bool {
+        !self.added_keys.is_empty() || !self.changed_keys.is_empty() || !self.removed_keys.is_empty()
     }
 }
 
-/// Typed view of a gathered collection input slot.
-pub struct CollectionInput<'a, T> {
-    pub elements: &'a [T],
-    pub diff: &'a CollectionChange<T>,
+// ---------------------------------------------------------------------------
+// CollectionOutputBuilder — typed facade for mutating collection outputs
+// ---------------------------------------------------------------------------
+
+/// Builder for incrementally mutating a collection output slot.
+///
+/// Allows the transform to add, set, or remove individual elements without
+/// rebuilding the entire collection. The engine tracks mutations and computes
+/// the actual diff during commit.
+pub struct CollectionOutputBuilder<'a, T: IncrementalValue> {
+    slot: usize,
+    ctx: &'a mut TransformContext,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<'a, T: IncrementalValue> CollectionOutputBuilder<'a, T> {
+    pub(crate) fn new(slot: usize, ctx: &'a mut TransformContext) -> Self {
+        Self { slot, ctx, _phantom: std::marker::PhantomData }
+    }
+
+    /// Add a new element to the collection.
+    /// The key is extracted via the registered KeyExtractor.
+    pub fn add(&mut self, element: T) -> Result<(), TransformError> {
+        self.ctx.add_collection_element::<T>(self.slot, element)
+    }
+
+    /// Set or replace an element with a specific key.
+    /// Use this when you know the key and want to ensure a specific value.
+    pub fn set(&mut self, key: u64, element: T) -> Result<(), TransformError> {
+        self.ctx.set_collection_element::<T>(self.slot, key, element)
+    }
+
+    /// Remove an element by key.
+    /// If the element doesn't exist, this is a no-op.
+    pub fn remove(&mut self, key: u64) -> Result<(), TransformError> {
+        self.ctx.remove_collection_element(self.slot, key)
+    }
+
+    /// Clear all elements from the collection.
+    pub fn clear(&mut self) -> Result<(), TransformError> {
+        self.ctx.clear_collection(self.slot)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +354,15 @@ pub(crate) enum ContextInput {
 pub(crate) enum ContextOutput {
     Single(ErasedValue),
     Collection(Vec<(u64, ErasedValue)>),
+    /// Incremental mutations for collection output.
+    CollectionMutations {
+        /// Elements to add/set (key, value).
+        added: Vec<(u64, ErasedValue)>,
+        /// Keys to remove.
+        removed: Vec<u64>,
+        /// Whether to clear all existing elements first.
+        clear: bool,
+    },
     /// Transform did not write to this slot.
     Absent,
 }
@@ -292,11 +425,14 @@ impl TransformContext {
         }
     }
 
-    /// Read collection input slot `slot` as [`CollectionInput<T>`].
+    /// Read collection input slot `slot` as an owned [`CollectionInput<T>`].
+    ///
+    /// Returns a typed facade that provides key-based access to elements
+    /// and exposes incremental diff information (added, changed, removed keys).
     pub fn input_collection<T: IncrementalValue>(
         &self,
         slot: usize,
-    ) -> Result<CollectionInput<'_, T>, TransformError> {
+    ) -> Result<CollectionInput<T>, TransformError> {
         let kind = self.slot_kinds_in.get(slot)
             .ok_or_else(|| TransformError::new(format!("input slot {slot}: out of range")))?;
         if !kind.is_collection {
@@ -311,48 +447,33 @@ impl TransformContext {
             )));
         }
         match self.inputs.get(slot) {
-            Some(ContextInput::Collection { elements, keys: _, dirty_keys, removed_keys }) => {
-                // Downcast all elements into a typed slice.
-                // We use a thread-local scratch buffer to avoid allocations in the common
-                // path where the transform just reads; but for simplicity in this iteration
-                // we allocate.
-                let typed_elements: Vec<&T> = elements.iter()
-                    .map(|e| e.downcast_ref::<T>()
-                        .expect("collection element type mismatch"))
-                    .collect();
-                // We can't return &[T] from &Vec<&T> directly, so we store a Vec<T> scratch.
-                // This is a known limitation; in a future iteration we can pre-box as &[T].
-                // For now return via a helper that stores in the context.
-                // DESIGN NOTE: CollectionInput borrows from self, so we need typed storage.
-                // We store the typed elements in a Box leaked into the ContextInput — this
-                // is safe for the lifetime of this context. However, for simplicity we
-                // return an error and note this requires refactoring.
-                //
-                // Actually, let us just re-downcast inline. The lifetime is 'self so we
-                // can return references into the ErasedValue Arcs which are held in self.inputs.
-                let _ = typed_elements; // drop the Vec<&T>
-
-                // Build diff from dirty/removed keys.
-                // We don't have the old values here for "changed" — the runner will have
-                // pre-split into added vs changed. For this iteration, dirty_keys = added.
-                let added: Vec<T> = elements.iter()
-                    .zip(/* keys info not directly accessible here */ std::iter::repeat(0u64))
-                    .filter_map(|(e, _)| e.downcast_ref::<T>().cloned())
-                    .collect::<Vec<T>>();
-                // For now expose the simple form: elements slice rebuilt, diff from added/removed.
-                // A proper implementation would store typed scratch in the context.
-                // This is tracked as CHANGES.md item.
-                let _ = added;
-
-                // Return a simplified view using zero-copy downcast refs.
-                // Limitation: we can't return &[T] from &[Arc<dyn Any>] without a scratch buffer.
-                // For the initial implementation, we store the typed scratch in a Box<[T]>
-                // that the context owns. We need to restructure TransformContext for this.
-                // CHANGES: input_collection needs a pre-typed scratch buffer — see CHANGES.md.
-                Err(TransformError::new("input_collection: not yet fully implemented — see CHANGES.md"))
+            Some(ContextInput::Collection { elements, keys, dirty_keys, removed_keys }) => {
+                // Build a typed HashMap from the erased elements.
+                let mut elements_by_key: HashMap<u64, T> = HashMap::with_capacity(elements.len());
+                for (i, e) in elements.iter().enumerate() {
+                    let typed = e.downcast_ref::<T>()
+                        .expect("collection element type mismatch")
+                        .clone();
+                    let key = keys.get(i).copied().unwrap_or(0);
+                    elements_by_key.insert(key, typed);
+                }
+                Ok(CollectionInput::new(
+                    elements_by_key,
+                    keys.clone(),
+                    dirty_keys.clone(),
+                    vec![], // changed_keys - would need old values to compute
+                    removed_keys.clone(),
+                ))
             }
             Some(ContextInput::Absent) | None => {
-                Err(TransformError::new(format!("input slot {slot}: no collection available")))
+                // Return an empty CollectionInput for absent slots.
+                Ok(CollectionInput::new(
+                    HashMap::new(),
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                ))
             }
             _ => Err(TransformError::new(format!("input slot {slot}: unexpected single value")))
         }
@@ -382,6 +503,9 @@ impl TransformContext {
     }
 
     /// Write a collection to output slot `slot`.
+    ///
+    /// This replaces the entire collection. For incremental updates,
+    /// use [`output_collection_builder`](Self::output_collection_builder) instead.
     pub fn output_collection<T: IncrementalValue>(
         &mut self,
         slot: usize,
@@ -410,6 +534,156 @@ impl TransformContext {
             })
             .collect();
         self.outputs[slot] = ContextOutput::Collection(pairs);
+        Ok(())
+    }
+
+    /// Get a builder for incrementally mutating a collection output slot.
+    ///
+    /// This allows adding, setting, or removing individual elements without
+    /// rebuilding the entire collection. More efficient for large collections
+    /// with small deltas.
+    pub fn output_collection_builder<T: IncrementalValue>(
+        &mut self,
+        slot: usize,
+    ) -> Result<CollectionOutputBuilder<'_, T>, TransformError> {
+        let kind = self.slot_kinds_out.get(slot)
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: out of range")))?;
+        if !kind.is_collection {
+            return Err(TransformError::new(format!(
+                "output slot {slot}: not a collection — use output()"
+            )));
+        }
+        if kind.type_id != TypeId::of::<T>() {
+            return Err(TransformError::new(format!(
+                "output slot {slot}: type mismatch (schema: {}, requested: {})",
+                kind.type_name, std::any::type_name::<T>()
+            )));
+        }
+        Ok(CollectionOutputBuilder::new(slot, self))
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal methods for CollectionOutputBuilder
+    // -----------------------------------------------------------------------
+
+    /// Add an element to a collection output slot (called by CollectionOutputBuilder).
+    pub(crate) fn add_collection_element<T: IncrementalValue>(
+        &mut self,
+        slot: usize,
+        element: T,
+    ) -> Result<(), TransformError> {
+        let kind = self.slot_kinds_out.get(slot)
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: out of range")))?;
+        let extract_key = kind.extract_key
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: missing KeyExtractor")))?;
+        let erased: ErasedValue = Arc::new(element);
+        let key = extract_key(erased.as_ref());
+        
+        // Initialize or update the CollectionMutations variant.
+        match &mut self.outputs[slot] {
+            ContextOutput::Absent => {
+                self.outputs[slot] = ContextOutput::CollectionMutations {
+                    added: vec![(key, erased)],
+                    removed: vec![],
+                    clear: false,
+                };
+            }
+            ContextOutput::CollectionMutations { added, .. } => {
+                added.push((key, erased));
+            }
+            _ => {
+                return Err(TransformError::new(format!(
+                    "output slot {slot}: already written as full collection"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Set an element with a specific key in a collection output slot.
+    pub(crate) fn set_collection_element<T: IncrementalValue>(
+        &mut self,
+        slot: usize,
+        key: u64,
+        element: T,
+    ) -> Result<(), TransformError> {
+        let kind = self.slot_kinds_out.get(slot)
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: out of range")))?;
+        if kind.type_id != TypeId::of::<T>() {
+            return Err(TransformError::new(format!(
+                "output slot {slot}: type mismatch"
+            )));
+        }
+        let erased: ErasedValue = Arc::new(element);
+        
+        match &mut self.outputs[slot] {
+            ContextOutput::Absent => {
+                self.outputs[slot] = ContextOutput::CollectionMutations {
+                    added: vec![(key, erased)],
+                    removed: vec![],
+                    clear: false,
+                };
+            }
+            ContextOutput::CollectionMutations { added, .. } => {
+                // Remove from removed if present, then add.
+                added.push((key, erased));
+            }
+            _ => {
+                return Err(TransformError::new(format!(
+                    "output slot {slot}: already written as full collection"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove an element by key from a collection output slot.
+    pub(crate) fn remove_collection_element(
+        &mut self,
+        slot: usize,
+        key: u64,
+    ) -> Result<(), TransformError> {
+        match &mut self.outputs[slot] {
+            ContextOutput::Absent => {
+                self.outputs[slot] = ContextOutput::CollectionMutations {
+                    added: vec![],
+                    removed: vec![key],
+                    clear: false,
+                };
+            }
+            ContextOutput::CollectionMutations { removed, .. } => {
+                removed.push(key);
+            }
+            _ => {
+                return Err(TransformError::new(format!(
+                    "output slot {slot}: already written as full collection"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear all elements from a collection output slot.
+    pub(crate) fn clear_collection(&mut self, slot: usize) -> Result<(), TransformError> {
+        match &mut self.outputs[slot] {
+            ContextOutput::Absent => {
+                self.outputs[slot] = ContextOutput::CollectionMutations {
+                    added: vec![],
+                    removed: vec![],
+                    clear: true,
+                };
+            }
+            ContextOutput::CollectionMutations { clear, added, removed } => {
+                *clear = true;
+                added.clear();
+                removed.clear();
+            }
+            _ => {
+                return Err(TransformError::new(format!(
+                    "output slot {slot}: already written as full collection"
+                )));
+            }
+        }
         Ok(())
     }
 }

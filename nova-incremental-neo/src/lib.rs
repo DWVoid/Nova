@@ -48,6 +48,6 @@ pub use transform::TransformError;
 pub use transform::IncrementalValue;
 pub use transform::KeyExtractor;
 pub use transform::CollectionInput;
-pub use transform::CollectionChange;
+pub use transform::CollectionOutputBuilder;
 
 pub use uuid::Uuid;

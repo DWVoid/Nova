@@ -260,11 +260,13 @@ impl TopologyBuilder {
             let (kind, inputs, outputs) = match &pn.kind {
                 PendingNodeKind::IoInput => (NodeKind::IoInput, vec![], vec![
                     // I/O input has one implicit single output slot (the value it holds).
+                    // The deserialize fn is unused for I/O nodes - values are set externally.
                     SlotKind {
                         type_id: std::any::TypeId::of::<()>(), // placeholder; any type flows
                         type_name: "<io-input>",
                         is_collection: false,
                         extract_key: None,
+                        deserialize: |_| Err("I/O input slots cannot be deserialized".to_string()),
                     }
                 ]),
                 PendingNodeKind::IoOutput => (NodeKind::IoOutput, vec![
@@ -273,6 +275,7 @@ impl TopologyBuilder {
                         type_name: "<io-output>",
                         is_collection: false,
                         extract_key: None,
+                        deserialize: |_| Err("I/O output slots cannot be deserialized".to_string()),
                     }
                 ], vec![]),
                 PendingNodeKind::Transform(key) => {

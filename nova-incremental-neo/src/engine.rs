@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use uuid::Uuid;
 
 use crate::keys::{NodeId, NodeInstanceKey, SubgraphId, UNIT_INSTANCE, workstate_storage_key};
@@ -10,9 +11,22 @@ use crate::runner::{RunContext, seed_pending_tasks, set_input_value};
 use crate::storage::{Storage, StorageError, StorageValue};
 use crate::task_queue::{SequentialTaskQueue, TaskQueue};
 use crate::topology::TopologyBuilder;
-use crate::transform::{Transform, IncrementalValue, serialize_erased, hash_bytes};
+use crate::transform::{Transform, IncrementalValue, serialize_erased, hash_bytes, ErasedValue};
 use crate::value_store::ValueStore;
-use crate::workstate::{WorkState, WorkStateSnapshot};
+use crate::workstate::{WorkState, WorkStateSnapshot, ValueHash};
+
+// ---------------------------------------------------------------------------
+// PendingInput — deferred input for async processing
+// ---------------------------------------------------------------------------
+
+/// A pending input value waiting to be processed during `update()`.
+struct PendingInput {
+    node_id: NodeId,
+    erased: ErasedValue,
+    bytes: Vec<u8>,
+    hash: ValueHash,
+    type_name: &'static str,
+}
 
 // ---------------------------------------------------------------------------
 // EngineError
@@ -182,6 +196,7 @@ impl EngineBuilder {
             storage,
             cycle_limit: self.cycle_limit,
             checkpoint_active: Arc::new(AtomicBool::new(false)),
+            pending_inputs: Mutex::new(Vec::new()),
         })
     }
 }
@@ -226,13 +241,15 @@ pub struct Engine {
     storage:           Arc<dyn Storage>,
     cycle_limit:       u32,
     checkpoint_active: Arc<AtomicBool>,
+    /// Pending inputs accumulated by `set_input`, drained by `update`.
+    pending_inputs:    Mutex<Vec<PendingInput>>,
 }
 
 impl Engine {
     /// Push a new value into an I/O input node identified by `id`.
     ///
-    /// Must be called from within a Tokio runtime. See CHANGES.md CHANGE-4
-    /// for the rationale and a planned alternative.
+    /// This method is synchronous and does not require a Tokio runtime context.
+    /// The input is accumulated and will be processed during the next `update()` call.
     pub fn set_input<T: IncrementalValue>(&self, id: Uuid, value: T) -> Result<(), EngineError> {
         let node_id = NodeId::from_uuid(id);
         let _ = self.topology.node(node_id); // validate existence
@@ -242,20 +259,35 @@ impl Engine {
         let erased = Arc::new(value) as crate::transform::ErasedValue;
         let type_name = std::any::type_name::<T>();
 
-        let ctx = self.make_run_context();
-        // Run the async dirty propagation synchronously.
-        // See CHANGES.md CHANGE-4 for a planned non-blocking alternative.
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                set_input_value(node_id, erased, bytes, hash, type_name, &ctx).await;
-            })
+        // Accumulate the input for async processing during update().
+        // This avoids the need for block_in_place and removes the Tokio runtime requirement.
+        let mut pending = self.pending_inputs.lock().unwrap();
+        pending.push(PendingInput {
+            node_id,
+            erased,
+            bytes,
+            hash,
+            type_name,
         });
         Ok(())
     }
 
     /// Run all pending transforms until the graph converges.
+    ///
+    /// First processes any pending inputs accumulated by `set_input()`,
+    /// then runs all pending transforms.
     pub async fn update(&self) -> UpdateReport {
         let ctx = self.make_run_context();
+        
+        // Drain and process pending inputs.
+        let pending: Vec<PendingInput> = {
+            let mut guard = self.pending_inputs.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+        for input in pending {
+            set_input_value(input.node_id, input.erased, input.bytes, input.hash, input.type_name, &ctx).await;
+        }
+        
         seed_pending_tasks(&ctx).await;
         ctx.task_queue.drain().await;
         let mutex = Arc::try_unwrap(ctx.report)

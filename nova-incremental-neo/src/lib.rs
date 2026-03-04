@@ -7,7 +7,8 @@
 //! UpdateReport
 //! Storage, StorageError, StorageKey, StorageValue, MemoryStorage
 //! Transform, TransformContext, TransformRegisterContext, TransformError
-//! IncrementalValue, KeyExtractor, CollectionInput, CollectionChange
+//! IncrementalValue, KeyExtractor, CollectionInput, CollectionOutputBuilder
+//! TaskQueue, SequentialTaskQueue
 //! Uuid
 //! ```
 

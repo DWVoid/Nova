@@ -122,7 +122,8 @@ impl ValueStore {
     /// Get a typed reference to a cached single value (cache hit only).
     pub(crate) fn get<T: IncrementalValue>(&self, key: SlotStateKey) -> Option<Arc<T>> {
         self.single.get(&key).and_then(|e| {
-            Arc::clone(&e.value).downcast::<T>().ok()
+            // Use as_any for downcast since ErasedValue is now Arc<dyn TypedErasedValue>
+            e.value.as_any().downcast_ref::<T>().map(|v| Arc::new(v.clone()))
         })
     }
 

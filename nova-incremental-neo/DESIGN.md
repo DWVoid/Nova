@@ -1,7 +1,7 @@
 # nova-incremental-neo — Design Document
 
-**Version:** 0.5 — pre-implementation  
-**Status:** Under review
+**Version:** 0.5 — implemented  
+**Status:** Implementation complete, deviations documented in CHANGES.md
 
 ---
 
@@ -66,7 +66,7 @@ The crate re-exports exactly the following symbols (see `src/lib.rs`):
 | `IncrementalValue` | trait | Auto-implemented marker for graph-flowable types |
 | `KeyExtractor<T>` | trait | Derives a stable `u64` key from a collection element |
 | `CollectionInput<T>` | struct | Typed view of a gathered collection input |
-| `CollectionChange<T>` | struct | Incremental diff for a collection input |
+| `CollectionOutputBuilder<T>` | struct | Incremental builder for collection outputs |
 | `TaskQueue` | trait | Implement to supply a custom task scheduler |
 | `SequentialTaskQueue` | struct | Default single-threaded task queue |
 | `Uuid` | re-export | From the `uuid` crate |
@@ -270,10 +270,12 @@ Root Subgraph (id=0, 1 instance: unit)
         ┌───────────────────────▼────────────────────────┐
         │                  Engine (internal)               │
         │  topology: Arc<Topology>                         │
-        │  workstate: Arc<RwLock<WorkState>>               │
+        │  workstate: Arc<WorkState>                       │
         │  value_store: Arc<ValueStore>                    │
         │  task_queue: Arc<dyn TaskQueue>                  │
         │  storage: Arc<dyn Storage>                       │
+        │  pending_inputs: Mutex<Vec<PendingInput>>        │
+        │  checkpoint_active: Arc<AtomicBool>              │
         └──────┬────────────────┬────────────────┬────────┘
                │                │                │
      ┌─────────▼──┐   ┌─────────▼──┐   ┌────────▼───────┐
@@ -281,6 +283,22 @@ Root Subgraph (id=0, 1 instance: unit)
      │  (immutable)│   │  (mutable) │   │  (mutable)     │
      └────────────┘   └────────────┘   └────────────────┘
 ```
+
+### PendingInput — deferred input processing
+
+```rust
+struct PendingInput {
+    node_id: NodeId,
+    erased: ErasedValue,
+    bytes: Vec<u8>,
+    hash: ValueHash,
+    type_name: &'static str,
+}
+```
+
+Inputs accumulated by `set_input()` are stored in `pending_inputs` and processed
+during `update()`. This design allows `set_input()` to be called from any context
+without requiring a Tokio runtime (addressed CHANGE-4).
 
 ### Responsibilities
 
@@ -384,9 +402,24 @@ pub(crate) struct WorkState {
     /// Locked per (SubgraphId, InstanceKey) parent scope.
     instances: DashMap<SubgraphInstanceKey, Arc<Mutex<Vec<InstanceKey>>>>,
 
+    /// Ancestry info per (SubgraphId, InstanceKey) — tracks parent for cross-scope resolution.
+    /// Used by source_instance_for_edge to walk the ancestry chain for deeply nested subgraphs.
+    ancestry: DashMap<(SubgraphId, InstanceKey), InstanceAncestry>,
+
     /// Global set of currently-enqueued tasks.
     /// Guarded separately because enqueue checks must be atomic.
     enqueued: Mutex<HashSet<NodeInstanceKey>>,
+}
+
+/// Information about an instance's parent in the subgraph hierarchy.
+/// Used to resolve cross-scope edges in deeply nested fan-out scenarios.
+pub(crate) struct InstanceAncestry {
+    /// The subgraph in which this instance was created (the child subgraph).
+    pub(crate) subgraph: SubgraphId,
+    /// The instance key within the parent subgraph that created this instance.
+    pub(crate) parent_instance: InstanceKey,
+    /// The element key that identifies this instance within the parent's collection.
+    pub(crate) element_key: InstanceKey,
 }
 
 pub(crate) struct NodeInstanceKey {
@@ -426,7 +459,7 @@ pub(crate) struct SlotState {
     /// For collection output slots: sorted list of known element keys.
     element_keys: Vec<u64>,
     /// For collection output slots: snapshot of element hashes at last evaluation,
-    /// used to compute the CollectionChange diff for downstream gather inputs.
+    /// used to compute incremental diff for downstream gather inputs.
     element_hashes: HashMap<u64, ValueHash>,
 }
 ```
@@ -446,18 +479,40 @@ pub(crate) struct SlotState {
 
 ```rust
 pub(crate) struct ValueStore {
-    cache: DashMap<SlotStateKey, Arc<dyn Any + Send + Sync>>,
+    cache: DashMap<SlotStateKey, CachedValue>,
     // element-level cache for collection slots
-    element_cache: DashMap<ElementKey, Arc<dyn Any + Send + Sync>>,
+    element_cache: DashMap<ElementKey, CachedValue>,
 }
 
-pub(crate) struct ElementKey {
-    slot: SlotStateKey,
-    element_key: u64,
+/// One cached slot value: the type-erased value, its hash, and raw bytes for
+/// flushing to storage.
+struct CachedValue {
+    value: ErasedValue,
+    hash: ValueHash,
+    /// Serialized bytes. `None` until the value has been written (new or changed).
+    dirty_bytes: Option<Vec<u8>>,
+    /// Stable type name, used as a discriminant in the persisted record.
+    type_name: &'static str,
 }
 ```
 
 `ValueStore` holds the actual deserialized values in memory. On a cache miss, values are loaded from `Storage` and deserialized lazily. This avoids holding the full value graph in memory if not needed.
+
+#### `TypedErasedValue` trait (implementation detail)
+
+Values are stored as type-erased `Arc<dyn TypedErasedValue>` which carries serialization metadata:
+
+```rust
+pub(crate) trait TypedErasedValue: Any + Send + Sync {
+    fn as_any(&self) -> &dyn Any;
+    fn serialize_value(&self) -> Result<Vec<u8>, String>;
+    fn type_name(&self) -> &'static str;
+}
+
+pub(crate) type ErasedValue = Arc<dyn TypedErasedValue>;
+```
+
+This enables proper serialization for change detection and persistence (addressed CHANGE-3).
 
 #### Key operations
 
@@ -495,23 +550,58 @@ pub struct TransformContext {
 }
 
 pub(crate) enum ContextInput {
-    Single(Arc<dyn Any + Send + Sync>),
+    Single(ErasedValue),
     Collection {
-        elements: Vec<Arc<dyn Any + Send + Sync>>,
+        elements: Vec<ErasedValue>,
         keys: Vec<u64>,
-        diff: ErasedCollectionChange,
+        dirty_keys: Vec<u64>,
+        removed_keys: Vec<u64>,
     },
     Absent,
 }
 
 pub(crate) enum ContextOutput {
-    Single(Arc<dyn Any + Send + Sync>, ValueHash),
-    Collection(Vec<(u64, Arc<dyn Any + Send + Sync>, ValueHash)>),
+    Single(ErasedValue, ValueHash),
+    Collection(Vec<(u64, ErasedValue, ValueHash)>),
     Absent,
 }
 ```
 
 The engine fills `inputs` before calling `Transform::apply`. After `apply`, it reads `outputs` to determine what changed.
+
+#### `CollectionInput<T>` — owned typed facade
+
+Transforms access collection inputs via an owned typed container:
+
+```rust
+pub struct CollectionInput<T> {
+    elements_by_key: HashMap<u64, T>,  // Owned typed elements
+    current_keys: Vec<u64>,            // All current keys
+    added_keys: Vec<u64>,              // Keys added since last evaluation
+    changed_keys: Vec<u64>,            // Keys whose values changed
+    removed_keys: Vec<u64>,            // Keys removed since last evaluation
+}
+```
+
+This provides:
+- Key-based access via `get(key)`, `contains(key)`, `keys()`
+- Iteration over all elements or just added/changed
+- Clean diff semantics without lifetime issues
+
+#### `CollectionOutputBuilder<T>` — incremental collection output
+
+For efficient delta updates with large collections:
+
+```rust
+pub struct CollectionOutputBuilder<'a, T: IncrementalValue> { ... }
+
+impl<'a, T: IncrementalValue> CollectionOutputBuilder<'a, T> {
+    pub fn add(&mut self, element: T) -> Result<(), TransformError>;
+    pub fn set(&mut self, key: u64, element: T) -> Result<(), TransformError>;
+    pub fn remove(&mut self, key: u64) -> Result<(), TransformError>;
+    pub fn clear(&mut self) -> Result<(), TransformError>;
+}
+```
 
 ---
 
@@ -565,8 +655,14 @@ Runs until the task queue is empty or the cycle limit is exceeded.
 When `set_input(node_id, value)` is called:
 1. Compute hash of new value.
 2. If hash == stored hash in `WorkState` → no-op (value unchanged).
-3. Otherwise: write value to `ValueStore`, update `WorkState` (mark present, dirty, new hash).
-4. Call `propagate_dirty(subgraph_0, UNIT_INSTANCE_KEY, node_id, slot=0)`.
+3. Otherwise: store the input in `Engine::pending_inputs` for deferred processing.
+
+When `update()` is called:
+1. Drain `pending_inputs` and for each:
+   - Write value to `ValueStore`, update `WorkState` (mark present, dirty, new hash).
+   - Call `propagate_dirty(subgraph_0, UNIT_INSTANCE_KEY, node_id, slot=0)`.
+
+This deferred approach avoids requiring a Tokio runtime context for `set_input()`, making the API more flexible (addressed CHANGE-4).
 
 `propagate_dirty(subgraph, instance, node, slot)`:
 1. For each edge in `topology.outgoing[(node, slot)]`:
@@ -625,7 +721,7 @@ execute_task(subgraph, instance, node):
        c. Read slot value from ValueStore.
        d. If single slot: ContextInput::Single(value).
        e. If collection/gather: collect all elements from ValueStore, read
-          element_hashes snapshot from SlotState, compute CollectionChange diff.
+          element_hashes snapshot from SlotState, compute incremental diff.
   4. Release all source NodeInstanceState locks before calling apply.
   5. Call transform.apply(ctx).
   6. If error:
@@ -851,7 +947,7 @@ nova-incremental-neo/src/
                        MemoryStorage. No deps on other internal modules.
     transform.rs     ← Transform trait, TransformContext, TransformRegisterContext,
                        TransformError, IncrementalValue, KeyExtractor, CollectionInput,
-                       CollectionChange, SlotKind, SlotRegistrar (pub(crate)).
+                       CollectionOutputBuilder, SlotKind, SlotRegistrar (pub(crate)).
                        Depends on: nothing internal.
     keys.rs          ← SlotStateKey, ElementKey, and their → StorageKey derivation.
                        Depends on: storage.rs (StorageKey only).

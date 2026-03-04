@@ -17,10 +17,10 @@ use crate::task_queue::{SendBoxFuture, TaskQueue};
 use crate::topology::{Topology, EdgeKind, NodeKind};
 use crate::transform::{
     TransformContext, ContextInput, ContextOutput, ErasedValue,
-    TransformError,
+    TransformError, hash_bytes,
 };
 use crate::value_store::ValueStore;
-use crate::workstate::{WorkState, ValueHash, source_instance_for_edge};
+use crate::workstate::{WorkState, ValueHash};
 
 // ---------------------------------------------------------------------------
 // RunContext — shared references passed to all runner functions
@@ -432,7 +432,7 @@ async fn build_context(
             continue;
         };
         let edge = ctx.topology.edge(edge_id);
-        let src_instance = source_instance_for_edge(edge, key.instance, &ctx.topology);
+        let src_instance = ctx.workstate.resolve_source_instance(edge, key.instance, &ctx.topology);
         let src_sg = ctx.topology.node(edge.from_node).subgraph;
         let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
         let src_slot_key = src_key.slot_key(edge.from_slot);
@@ -677,18 +677,10 @@ async fn commit_outputs(
 
 /// Serialise a type-erased value to msgpack bytes and compute its hash.
 ///
-/// The caller must ensure the value was boxed as a type implementing
-/// `serde::Serialize`. Since we stored it as `Arc<T>` where `T: IncrementalValue`,
-/// we need to use a vtable approach.
-///
-/// CHANGES: This requires the ErasedValue to carry a serialize fn pointer.
-/// For the initial implementation we return an error; see CHANGES.md.
-fn erased_to_bytes_hash(_v: &ErasedValue) -> Result<(Vec<u8>, ValueHash), String> {
-    // TODO: ErasedValue needs to carry serialization capability.
-    // This is tracked as CHANGES.md item #2.
-    // For now we produce a deterministic placeholder hash based on the pointer.
-    // Cast fat pointer to thin pointer then to u64 (fat pointers cannot cast directly).
-    let ptr = Arc::as_ptr(_v) as *const () as u64;
-    let bytes = ptr.to_le_bytes().to_vec();
-    Ok((bytes, ptr))
+/// Uses the `SerializableValue` trait's `to_bytes()` method which is
+/// implemented for all `IncrementalValue` types.
+fn erased_to_bytes_hash(v: &ErasedValue) -> Result<(Vec<u8>, ValueHash), String> {
+    let bytes = v.to_bytes()?;
+    let hash = hash_bytes(&bytes);
+    Ok((bytes, hash))
 }

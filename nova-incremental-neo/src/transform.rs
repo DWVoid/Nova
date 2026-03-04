@@ -5,7 +5,7 @@
 //! - [`TransformContext`] — typed I/O passed to [`Transform::apply`].
 //! - [`TransformRegisterContext`] — slot-declaration DSL (sealed, not externally implementable).
 //! - [`TransformError`], [`IncrementalValue`], [`KeyExtractor`],
-//!   [`CollectionInput`], [`CollectionChange`].
+//!   [`CollectionInput`], [`CollectionOutputBuilder`].
 //!
 //! All internal machinery is `pub(crate)` only.
 
@@ -221,6 +221,9 @@ impl<'a, T: IncrementalValue> CollectionOutputBuilder<'a, T> {
 // SlotKind — internal slot descriptor
 // ---------------------------------------------------------------------------
 
+/// Function type for deserializing bytes into an ErasedValue.
+pub(crate) type DeserializeFn = fn(&[u8]) -> Result<ErasedValue, String>;
+
 /// Minimal type descriptor for one slot. `pub(crate)` only.
 #[derive(Clone, Debug)]
 pub(crate) struct SlotKind {
@@ -229,6 +232,8 @@ pub(crate) struct SlotKind {
     pub(crate) is_collection: bool,
     /// For collection output slots: extracts a stable `u64` key from a boxed value.
     pub(crate) extract_key: Option<fn(&dyn Any) -> u64>,
+    /// Deserialize bytes into ErasedValue for this slot's type.
+    pub(crate) deserialize: DeserializeFn,
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +278,7 @@ impl TransformRegisterContext for SlotRegistrar {
             type_name: std::any::type_name::<T>(),
             is_collection: false,
             extract_key: None,
+            deserialize: make_deserialize_fn::<T>(),
         });
     }
     fn input_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self) {
@@ -281,6 +287,7 @@ impl TransformRegisterContext for SlotRegistrar {
             type_name: std::any::type_name::<T>(),
             is_collection: true,
             extract_key: None,
+            deserialize: make_deserialize_fn::<T>(),
         });
     }
     fn output<T: IncrementalValue>(&mut self) {
@@ -289,6 +296,7 @@ impl TransformRegisterContext for SlotRegistrar {
             type_name: std::any::type_name::<T>(),
             is_collection: false,
             extract_key: None,
+            deserialize: make_deserialize_fn::<T>(),
         });
     }
     fn output_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self) {
@@ -301,16 +309,45 @@ impl TransformRegisterContext for SlotRegistrar {
                     .expect("KeyExtractor: type mismatch at runtime");
                 K::extract_key(t)
             }),
+            deserialize: make_deserialize_fn::<T>(),
         });
     }
 }
 
 // ---------------------------------------------------------------------------
-// Erased value helpers
+// SerializableValue trait — object-safe serialization
+// ---------------------------------------------------------------------------
+
+/// Object-safe trait for values that can be serialized to bytes.
+/// All `IncrementalValue` types automatically implement this via blanket impl.
+pub trait SerializableValue: Any + Send + Sync {
+    /// Downcast to `dyn Any` for type checking.
+    fn as_any(&self) -> &dyn Any;
+    /// Serialize this value to msgpack bytes.
+    fn to_bytes(&self) -> Result<Vec<u8>, String>;
+    /// Get the type name for this value.
+    fn type_name(&self) -> &'static str;
+}
+
+impl<T: IncrementalValue> SerializableValue for T {
+    fn as_any(&self) -> &dyn Any { self }
+    fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        rmp_serde::to_vec(self).map_err(|e| e.to_string())
+    }
+    fn type_name(&self) -> &'static str { std::any::type_name::<T>() }
+}
+
+// ---------------------------------------------------------------------------
+// Erased value type alias
 // ---------------------------------------------------------------------------
 
 /// A heap-allocated, type-erased value that can flow through the graph.
-pub(crate) type ErasedValue = Arc<dyn Any + Send + Sync>;
+/// Uses `SerializableValue` trait to enable serialization via `to_bytes()`.
+pub(crate) type ErasedValue = Arc<dyn SerializableValue>;
+
+// ---------------------------------------------------------------------------
+// Serialization helpers
+// ---------------------------------------------------------------------------
 
 /// Serialize an erased value to msgpack bytes.
 pub(crate) fn serialize_erased<T: IncrementalValue>(value: &T) -> Result<Vec<u8>, String> {
@@ -329,6 +366,14 @@ pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut h);
     h.finish()
+}
+
+/// Helper to create a deserialize function for a specific type.
+pub(crate) fn make_deserialize_fn<T: IncrementalValue>() -> DeserializeFn {
+    |bytes| {
+        let v: T = rmp_serde::from_slice(bytes).map_err(|e| e.to_string())?;
+        Ok(Arc::new(v) as ErasedValue)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +460,7 @@ impl TransformContext {
         }
         match self.inputs.get(slot) {
             Some(ContextInput::Single(v)) => {
-                v.downcast_ref::<T>()
+                v.as_any().downcast_ref::<T>()
                     .ok_or_else(|| TransformError::new(format!("input slot {slot}: downcast failed")))
             }
             Some(ContextInput::Absent) | None => {
@@ -451,7 +496,7 @@ impl TransformContext {
                 // Build a typed HashMap from the erased elements.
                 let mut elements_by_key: HashMap<u64, T> = HashMap::with_capacity(elements.len());
                 for (i, e) in elements.iter().enumerate() {
-                    let typed = e.downcast_ref::<T>()
+                    let typed = e.as_any().downcast_ref::<T>()
                         .expect("collection element type mismatch")
                         .clone();
                     let key = keys.get(i).copied().unwrap_or(0);

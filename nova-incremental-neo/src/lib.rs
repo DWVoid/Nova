@@ -38,6 +38,9 @@ pub use storage::StorageKey;
 pub use storage::StorageValue;
 pub use storage::MemoryStorage;
 
+pub use task_queue::TaskQueue;
+pub use task_queue::SequentialTaskQueue;
+
 pub use transform::Transform;
 pub use transform::TransformContext;
 pub use transform::TransformRegisterContext;

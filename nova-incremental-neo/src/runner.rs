@@ -13,7 +13,7 @@ use crate::keys::{
     UNIT_INSTANCE,
 };
 use crate::report::UpdateReport;
-use crate::task_queue::{ArcSequentialTaskQueue, TaskFn, TaskQueue};
+use crate::task_queue::{SendBoxFuture, TaskQueue};
 use crate::topology::{Topology, EdgeKind, NodeKind};
 use crate::transform::{
     TransformContext, ContextInput, ContextOutput, ErasedValue,
@@ -31,7 +31,7 @@ pub(crate) struct RunContext {
     pub(crate) topology:    Arc<Topology>,
     pub(crate) workstate:   Arc<WorkState>,
     pub(crate) value_store: Arc<ValueStore>,
-    pub(crate) task_queue:  Arc<ArcSequentialTaskQueue>,
+    pub(crate) task_queue:  Arc<Box<dyn TaskQueue>>,
     pub(crate) cycle_limit: u32,
     /// Uses std::sync::Mutex (not tokio::sync::Mutex) so the future remains Send.
     pub(crate) report:      Arc<std::sync::Mutex<UpdateReport>>,
@@ -63,7 +63,7 @@ pub(crate) async fn seed_pending_tasks(ctx: &RunContext) {
     for &nid in &root.topo_order {
         let key = NodeInstanceKey::new(SubgraphId(0), UNIT_INSTANCE, nid);
         if ctx.workstate.is_pending(key, &ctx.topology).await {
-            try_enqueue_task(key, ctx).await;
+            try_enqueue_task(key, ctx);
         }
     }
 }
@@ -129,7 +129,7 @@ pub(crate) async fn propagate_dirty(
                     // Mark the destination's relevant output slot as dirty via
                     // its source slot (which is now dirty — already done for src).
                     if ctx.workstate.is_pending(dest_key, &ctx.topology).await {
-                        try_enqueue_task(dest_key, ctx).await;
+                        try_enqueue_task(dest_key, ctx);
                     }
                 }
             }
@@ -216,7 +216,7 @@ async fn handle_fan_out_change(
         let root_nid = child_subgraph_root(child_sg, &ctx.topology);
         if let Some(root) = root_nid {
             let root_key = NodeInstanceKey::new(child_sg, InstanceKey(ek), root);
-            try_enqueue_task(root_key, ctx).await;
+            try_enqueue_task(root_key, ctx);
         }
     }
 
@@ -239,7 +239,7 @@ async fn handle_fan_out_change(
                 let root_key = NodeInstanceKey::new(child_sg, InstanceKey(ek), root);
                 // Mark the boundary input slot dirty for this instance.
                 ctx.workstate.mark_dirty(root_key, 0, &ctx.topology).await;
-                try_enqueue_task(root_key, ctx).await;
+                try_enqueue_task(root_key, ctx);
             }
         }
     }
@@ -278,7 +278,7 @@ async fn propagate_instance_removal(
                     let dest_key = NodeInstanceKey::new(parent_sg, parent_instance, edge.to_node);
                     ctx.workstate.mark_dirty(dest_key, edge.to_slot, &ctx.topology).await;
                     if ctx.workstate.is_pending(dest_key, &ctx.topology).await {
-                        try_enqueue_task(dest_key, ctx).await;
+                        try_enqueue_task(dest_key, ctx);
                     }
                 }
             }
@@ -318,14 +318,14 @@ pub(crate) async fn propagate_error(
 // try_enqueue_task
 // ---------------------------------------------------------------------------
 
-/// Checks WorkState deduplication and pushes a task closure onto the queue.
-pub(crate) async fn try_enqueue_task(key: NodeInstanceKey, ctx: &RunContext) {
-    if !ctx.workstate.try_enqueue(key, &ctx.topology).await { return; }
+/// Checks WorkState deduplication and enqueues a Send future onto the task queue.
+pub(crate) fn try_enqueue_task(key: NodeInstanceKey, ctx: &RunContext) {
+    if !ctx.workstate.try_enqueue(key, &ctx.topology) { return; }
     let ctx2 = ctx.clone();
-    let task: TaskFn = Box::new(move || Box::pin(async move {
+    let fut: SendBoxFuture = Box::pin(async move {
         execute_task(key, &ctx2).await;
-    }));
-    ctx.task_queue.enqueue(task);
+    });
+    ctx.task_queue.enqueue(fut);
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +401,7 @@ pub(crate) async fn execute_task(key: NodeInstanceKey, ctx: &RunContext) {
 async fn finish(key: NodeInstanceKey, ctx: &RunContext) {
     let still_pending = ctx.workstate.finish_execute(key, &ctx.topology).await;
     if still_pending {
-        try_enqueue_task(key, ctx).await;
+        try_enqueue_task(key, ctx); // sync — no longer async, breaks the call cycle
     }
 }
 

@@ -97,7 +97,8 @@ pub(crate) struct WorkState {
     /// Known child instance keys per (SubgraphId, parent InstanceKey).
     instances: DashMap<SubgraphInstanceKey, Arc<Mutex<Vec<InstanceKey>>>>,
     /// Tasks currently in the queue but not yet executing.
-    enqueued: Mutex<HashSet<NodeInstanceKey>>,
+    /// Uses `std::sync::Mutex` so `try_enqueue` is sync (breaking async call cycles).
+    enqueued: std::sync::Mutex<HashSet<NodeInstanceKey>>,
 }
 
 impl WorkState {
@@ -105,7 +106,7 @@ impl WorkState {
         Self {
             node_states: DashMap::new(),
             instances:   DashMap::new(),
-            enqueued:    Mutex::new(HashSet::new()),
+            enqueued:    std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -265,16 +266,26 @@ impl WorkState {
 
     /// Try to enqueue `key`. Returns `true` if successfully added to the queue.
     /// Returns `false` if already enqueued or currently executing.
-    pub(crate) async fn try_enqueue(
+    ///
+    /// This is a **synchronous** function — the `enqueued` set uses
+    /// `std::sync::Mutex`, which breaks the async call cycle between
+    /// `try_enqueue_task` and `execute_task`.
+    pub(crate) fn try_enqueue(
         &self,
         key: NodeInstanceKey,
         topology: &Topology,
     ) -> bool {
-        let mut enqueued = self.enqueued.lock().await;
+        let mut enqueued = self.enqueued.lock().unwrap();
         if enqueued.contains(&key) { return false; }
-        // Check executing flag.
+        // Check executing flag using try_lock (non-blocking).
+        // If the lock is held, the task is currently executing — don't re-enqueue.
         if let Some(state_arc) = self.node_states.get(&key) {
-            if state_arc.lock().await.executing { return false; }
+            if let Ok(guard) = state_arc.try_lock() {
+                if guard.executing { return false; }
+            } else {
+                // Lock is held — task is executing. Don't enqueue.
+                return false;
+            }
         }
         enqueued.insert(key);
         true
@@ -288,8 +299,7 @@ impl WorkState {
         topology: &Topology,
     ) -> bool {
         {
-            let mut enqueued = self.enqueued.lock().await;
-            enqueued.remove(&key);
+            self.enqueued.lock().unwrap().remove(&key);
         }
         let state_arc = self.get_or_create(key, topology);
         let mut guard = state_arc.lock().await;

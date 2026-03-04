@@ -1,6 +1,6 @@
 # nova-incremental-neo — Design Document
 
-**Version:** 0.3 — pre-implementation  
+**Version:** 0.5 — pre-implementation  
 **Status:** Under review
 
 ---
@@ -67,6 +67,8 @@ The crate re-exports exactly the following symbols (see `src/lib.rs`):
 | `KeyExtractor<T>` | trait | Derives a stable `u64` key from a collection element |
 | `CollectionInput<T>` | struct | Typed view of a gathered collection input |
 | `CollectionChange<T>` | struct | Incremental diff for a collection input |
+| `TaskQueue` | trait | Implement to supply a custom task scheduler |
+| `SequentialTaskQueue` | struct | Default single-threaded task queue |
 | `Uuid` | re-export | From the `uuid` crate |
 
 ### 2.1 Transform Authoring
@@ -107,7 +109,8 @@ let engine = EngineBuilder::new()
     .wire_into_slot(file_node_id, lex_node_id, 0)         // file → lex.input[0]
     .wire_slot_to(lex_node_id, 0, ast_node_id)            // lex.output[0] → ast output
     .cycle_limit(500)
-    .build(Arc::new(MemoryStorage::new()))
+    .with_storage(Arc::new(MemoryStorage::new()))
+    .build()
     .await?;
 ```
 
@@ -154,6 +157,60 @@ When a **collection output slot** is wired to a **single-value input slot**, thi
 - Edges must be type-compatible (`TypeId` of the source slot's element type must equal the destination slot's element type).
 
 ---
+
+
+## 3b. Task Queue
+
+The `TaskQueue` controls how the engine schedules node execution during an
+`update()` call.
+
+### `TaskQueue` Trait
+
+```rust
+pub trait TaskQueue: Send + Sync {
+    /// Enqueue a `Send + 'static` future for execution.
+    /// May be called from within a running task.
+    fn enqueue(&self, fut: Pin<Box<dyn Future<Output = ()> + Send + 'static>>);
+
+    /// Run all enqueued tasks until the queue reaches a stable empty state
+    /// (queue empty AND no task currently executing).
+    fn drain(&self) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+}
+```
+
+`TaskQueue: Send + Sync` ensures that [`Engine`] is `Send`, making it compatible
+with `tokio::spawn`.
+
+Task futures passed to `enqueue` must be `Send + 'static`. In the engine
+internals, `execute_task` satisfies this because:
+- All `RunContext` fields (`Topology`, `WorkState`, `ValueStore`) are `Arc<T>`
+  where `T: Send + Sync`.
+- `tokio::sync::MutexGuard` (used in `WorkState`) is `Send`.
+- `std::sync::Mutex` guards are never held across `.await` points.
+- The enqueue deduplication set (`WorkState::enqueued`) uses `std::sync::Mutex`,
+  making `try_enqueue_task` a **sync function** — breaking the async call cycle
+  that would otherwise prevent `execute_task` from being `Send`.
+
+### `SequentialTaskQueue`
+
+The built-in default. Runs tasks one at a time in FIFO order using an
+`Arc<std::sync::Mutex<VecDeque<SendBoxFuture>>>`.
+
+Supply via the builder:
+```rust
+// Use default:
+EngineBuilder::new()
+    .with_storage(storage)
+    .build()
+    .await?;
+
+// Supply a custom queue:
+EngineBuilder::new()
+    .with_storage(storage)
+    .with_task_queue(MyParallelQueue::new())
+    .build()
+    .await?;
+```
 
 ## 4. Subgraph Model
 
@@ -411,36 +468,8 @@ pub(crate) struct ElementKey {
 - `flush(storage)` — serialize and write all dirty cache entries to storage.
 - `evict(key)` — remove from cache (forces reload from storage next access).
 
-### 6.5 `TaskQueue` Trait
 
-```rust
-pub(crate) trait TaskQueue: Send + Sync {
-    /// Enqueue an async task for execution.
-    /// The task is a self-contained closure returning a future.
-    fn enqueue(&self, task: Box<dyn FnOnce() -> BoxFuture<'static, ()> + Send + 'static>);
-
-    /// Block until all currently-enqueued tasks have completed.
-    /// Called by `Engine::update` to detect convergence.
-    async fn drain(&self);
-}
-
-type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-```
-
-The default `SequentialTaskQueue` maintains an internal `VecDeque` and executes tasks one at a time in `drain()`. A future `TokioTaskQueue` can spawn each task onto the Tokio runtime.
-
-The `Engine` holds `Arc<dyn TaskQueue>`. The `TaskQueue` implementation does **not** know anything about node state; all state management happens inside the closure passed to `enqueue`.
-
-**`drain()` semantics:** `drain()` runs tasks until the queue reaches a *stable empty state* — meaning the queue is empty **and** no task currently running is about to enqueue more work. Concretely:
-- `drain()` repeatedly dequeues and executes pending tasks.
-- Enqueuing is **allowed at any time**, including from within a running task (this is how dirty-propagation triggers downstream tasks).
-- `drain()` does not return until: (a) the queue is empty AND (b) no task is currently executing (i.e., no further enqueues can come from in-flight work).
-- In the sequential implementation this is trivially satisfied: `drain()` processes tasks in FIFO order; any task that enqueues new work causes those new tasks to be processed before `drain()` returns.
-- In a parallel implementation, `drain()` must use a counter of in-flight tasks and return only when both the queue and the in-flight counter are zero simultaneously.
-
-**Parallel safety:** because tasks can run concurrently (in a parallel `TaskQueue`), all state access inside a task goes through the fine-grained `NodeInstanceState` locks described in Section 6.3. The `executing` flag and the `begin_execute`/`finish_execute` protocol ensure that a node with an in-flight execution cannot be re-enqueued until it completes (see Section 8.7).
-
-### 6.6 `ErasedTransform` (internal)
+### 6.5 `ErasedTransform` (internal)
 
 ```rust
 pub(crate) trait ErasedTransform: Send + Sync {
@@ -455,7 +484,7 @@ pub(crate) trait ErasedTransform: Send + Sync {
 
 `ErasedTransform` is a `dyn`-safe wrapper over the generic `Transform` trait. Produced during `EngineBuilder::build` and stored in `NodeDesc::kind`.
 
-### 6.7 `TransformContext` (public, internal fields)
+### 6.6 `TransformContext` (public, internal fields)
 
 ```rust
 pub struct TransformContext {

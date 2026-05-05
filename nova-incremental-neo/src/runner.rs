@@ -120,14 +120,20 @@ pub(crate) async fn propagate_dirty(
             }
             EdgeKind::Single | EdgeKind::Collection => {
                 let dest_sg = ctx.topology.node(edge.to_node).subgraph;
-                // Determine which instances of the destination need updating.
                 let dest_instances = instances_for_dest(
                     dest_sg, src.subgraph, src.instance, ctx
                 ).await;
                 for dest_instance in dest_instances {
                     let dest_key = NodeInstanceKey::new(dest_sg, dest_instance, edge.to_node);
-                    // Mark the destination's relevant output slot as dirty via
-                    // its source slot (which is now dirty — already done for src).
+
+                    // Back-edges (dest is topologically before source, used for
+                    // collector patterns): enqueue unconditionally. The collector
+                    // must re-run to gather new elements from the back-edge.
+                    if edge.is_back_edge {
+                        try_enqueue_task(dest_key, ctx);
+                        continue;
+                    }
+
                     if ctx.workstate.is_pending(dest_key, &ctx.topology).await {
                         try_enqueue_task(dest_key, ctx);
                     }
@@ -158,6 +164,9 @@ async fn instances_for_dest(
 
 /// Called when a collection output slot feeding a subgraph boundary changes.
 /// Diffs old vs new element keys and creates/removes/re-triggers instances.
+///
+/// The new element set is read from [`WorkState`]'s `element_keys` (updated by
+/// [`commit_outputs`]) and [`ValueStore`] (already written before propagation).
 async fn handle_fan_out_change(
     child_sg: SubgraphId,
     parent_instance: InstanceKey,
@@ -172,39 +181,26 @@ async fn handle_fan_out_change(
         src_slot,
     );
 
-    // Get current element keys from WorkState.
     let src_node_key = NodeInstanceKey::new(
         ctx.topology.node(src_node).subgraph,
         parent_instance,
         src_node,
     );
+
+    // Get old element hashes from WorkState (snapshot taken before commit_outputs wrote).
     let old_hashes = ctx.workstate.get_collection_hashes(src_node_key, src_slot, &ctx.topology).await;
     let old_keys: std::collections::HashSet<u64> = old_hashes.keys().copied().collect();
 
-    // Get new element keys from ValueStore.
-    let new_elements = ctx.value_store.get_all_elements_erased(
-        slot_key,
-        &old_keys.iter().copied().collect::<Vec<_>>(),
-    );
-    // TODO: need the actual new element keys from the collection output.
-    // For now, collect them from what's in the ValueStore for this slot.
-    // The runner will need to be called with the actual new element list after
-    // a transform writes a collection output.
-
-    // This function is called from propagate_dirty after a collection slot changes.
-    // The new elements are already in ValueStore. We re-read them.
-    // New keys = all element keys currently in the ValueStore for this slot.
+    // Get current element keys from WorkState (updated by commit_outputs via set_collection_keys).
+    let state_arc = ctx.workstate.get_or_create(src_node_key, &ctx.topology);
     let new_elements_with_hashes: Vec<(u64, ValueHash)> = {
-        let mut result = vec![];
-        // Walk the known keys from workstate (updated after transform wrote output).
-        let state_arc = ctx.workstate.get_or_create(src_node_key, &ctx.topology);
         let guard = state_arc.lock().await;
-        for &ek in &guard.output_slots[src_slot].element_keys {
-            if let Some((_, h)) = ctx.value_store.get_element_erased(ElementKey::new(slot_key, ek)) {
-                result.push((ek, h));
-            }
-        }
-        result
+        guard.output_slots[src_slot].element_keys.iter()
+            .filter_map(|&ek| {
+                ctx.value_store.get_element_erased(ElementKey::new(slot_key, ek))
+                    .map(|(_, h)| (ek, h))
+            })
+            .collect()
     };
 
     let new_keys: std::collections::HashSet<u64> =
@@ -266,7 +262,6 @@ async fn propagate_instance_removal(
     let parent_sg = sg_desc.parent.unwrap_or(SubgraphId(0));
 
     for &nid in &sg_desc.topo_order {
-        let node_key = NodeInstanceKey::new(child_sg, instance, nid);
         let node_desc = ctx.topology.node(nid);
         for slot_idx in 0..node_desc.output_slots.len() {
             let outgoing = ctx.topology.outgoing_edges(nid, slot_idx);
@@ -427,55 +422,84 @@ async fn build_context(
     let mut inputs: Vec<ContextInput> = Vec::with_capacity(node_desc.input_slots.len());
 
     for (slot_idx, slot_kind) in node_desc.input_slots.iter().enumerate() {
-        let Some(edge_id) = ctx.topology.incoming_edge(key.node, slot_idx) else {
+        let edge_ids = ctx.topology.incoming_edges(key.node, slot_idx);
+        if edge_ids.is_empty() {
             inputs.push(ContextInput::Absent);
             continue;
-        };
-        let edge = ctx.topology.edge(edge_id);
-        let src_instance = ctx.workstate.resolve_source_instance(edge, key.instance, &ctx.topology);
-        let src_sg = ctx.topology.node(edge.from_node).subgraph;
-        let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
-        let src_slot_key = src_key.slot_key(edge.from_slot);
+        }
 
         if slot_kind.is_collection {
-            // Gather: collect all elements for this slot.
-            let prev_hashes = ctx.workstate
-                .get_collection_hashes(src_key, edge.from_slot, &ctx.topology).await;
-            let state_arc = ctx.workstate.get_or_create(src_key, &ctx.topology);
-            let element_keys = {
-                let guard = state_arc.lock().await;
-                guard.output_slots.get(edge.from_slot)
-                    .map(|s| s.element_keys.clone())
-                    .unwrap_or_default()
-            };
-            let all_elems = ctx.value_store.get_all_elements_erased(src_slot_key, &element_keys);
-            let mut elements: Vec<ErasedValue> = Vec::with_capacity(all_elems.len());
-            let mut keys: Vec<u64>     = Vec::with_capacity(all_elems.len());
-            let mut dirty_keys: Vec<u64>  = vec![];
-            let mut removed_keys: Vec<u64> = vec![];
+            // Gather: collect elements from ALL incoming edges and merge by key.
+            // Later sources overwrite earlier ones for the same key (deterministic
+            // by edge definition order).
+            let mut merged_elements: std::collections::HashMap<u64, (ErasedValue, ValueHash)> = std::collections::HashMap::new();
+            let mut all_dirty_keys: Vec<u64> = vec![];
+            let mut all_removed_keys: Vec<u64> = vec![];
 
-            for (ek, v, h) in all_elems {
-                elements.push(v);
-                keys.push(ek);
-                let old = prev_hashes.get(&ek).copied();
-                if old.is_none() || old != Some(h) {
-                    dirty_keys.push(ek);
+            for &edge_id in edge_ids {
+                let edge = ctx.topology.edge(edge_id);
+                let src_instance = ctx.workstate.resolve_source_instance(edge, key.instance, &ctx.topology);
+                let src_sg = ctx.topology.node(edge.from_node).subgraph;
+                let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
+                let src_slot_key = src_key.slot_key(edge.from_slot);
+
+                let prev_hashes = ctx.workstate
+                    .get_collection_hashes(src_key, edge.from_slot, &ctx.topology).await;
+
+                let state_arc = ctx.workstate.get_or_create(src_key, &ctx.topology);
+                let element_keys = {
+                    let guard = state_arc.lock().await;
+                    guard.output_slots.get(edge.from_slot)
+                        .map(|s| s.element_keys.clone())
+                        .unwrap_or_default()
+                };
+
+                let all_elems = ctx.value_store.get_all_elements_erased(src_slot_key, &element_keys);
+                for (ek, v, h) in all_elems {
+                    merged_elements.insert(ek, (v, h));
+                    let old = prev_hashes.get(&ek).copied();
+                    if old.is_none() || old != Some(h) {
+                        if !all_dirty_keys.contains(&ek) {
+                            all_dirty_keys.push(ek);
+                        }
+                    }
+                }
+                // Track removed keys per source.
+                for &old_key in prev_hashes.keys() {
+                    if !element_keys.contains(&old_key) {
+                        if !all_removed_keys.contains(&old_key) {
+                            all_removed_keys.push(old_key);
+                        }
+                    }
                 }
             }
-            for &old_key in prev_hashes.keys() {
-                if !keys.contains(&old_key) {
-                    removed_keys.push(old_key);
+
+            let mut elements: Vec<ErasedValue> = Vec::with_capacity(merged_elements.len());
+            let mut keys: Vec<u64> = Vec::with_capacity(merged_elements.len());
+            let mut sorted_keys: Vec<u64> = merged_elements.keys().copied().collect();
+            sorted_keys.sort_unstable();
+            for &ek in &sorted_keys {
+                if let Some((v, _)) = merged_elements.get(&ek) {
+                    elements.push(Arc::clone(v));
+                    keys.push(ek);
                 }
             }
 
             inputs.push(ContextInput::Collection {
                 elements,
                 keys,
-                dirty_keys,
-                removed_keys,
+                dirty_keys: all_dirty_keys,
+                removed_keys: all_removed_keys,
             });
         } else {
-            // Single value.
+            // Single value: must have exactly one incoming edge.
+            let edge_id = edge_ids[0];
+            let edge = ctx.topology.edge(edge_id);
+            let src_instance = ctx.workstate.resolve_source_instance(edge, key.instance, &ctx.topology);
+            let src_sg = ctx.topology.node(edge.from_node).subgraph;
+            let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
+            let src_slot_key = src_key.slot_key(edge.from_slot);
+
             match ctx.value_store.get_erased(src_slot_key) {
                 Some((v, _)) => inputs.push(ContextInput::Single(v)),
                 None => inputs.push(ContextInput::Absent),
@@ -520,6 +544,7 @@ async fn commit_outputs(
                 if old_hash != Some(hash) {
                     ctx.value_store.set_erased(slot_key, v, bytes, hash, slot_kind.type_name);
                     ctx.workstate.mark_present(key, slot_idx, hash, &ctx.topology).await;
+                    ctx.workstate.mark_dirty(key, slot_idx, &ctx.topology).await;
                     changed_any = true;
                     propagate_dirty(key, slot_idx, ctx).await;
                 } else {
@@ -574,6 +599,7 @@ async fn commit_outputs(
                 ctx.workstate.mark_present(key, slot_idx, agg_hash, &ctx.topology).await;
 
                 if any_element_changed {
+                    ctx.workstate.mark_dirty(key, slot_idx, &ctx.topology).await;
                     changed_any = true;
                     propagate_dirty(key, slot_idx, ctx).await;
                 }
@@ -650,6 +676,7 @@ async fn commit_outputs(
                 ctx.workstate.mark_present(key, slot_idx, agg_hash, &ctx.topology).await;
 
                 if any_element_changed {
+                    ctx.workstate.mark_dirty(key, slot_idx, &ctx.topology).await;
                     changed_any = true;
                     propagate_dirty(key, slot_idx, ctx).await;
                 }

@@ -783,3 +783,356 @@ pub trait Transform: Send + Sync + 'static {
     /// Execute one invocation. Use `?` to propagate [`TransformError`].
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // SlotRegistrar tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_slot_registrar_inputs_outputs() {
+        let mut reg = SlotRegistrar::new();
+        reg.input::<u64>();
+        reg.input_collection::<u64, TestExtractor>();
+        reg.output::<String>();
+        reg.output_collection::<u64, TestExtractor>();
+
+        assert_eq!(reg.inputs.len(), 2);
+        assert_eq!(reg.outputs.len(), 2);
+        assert!(!reg.inputs[0].is_collection);
+        assert!(reg.inputs[1].is_collection);
+        assert!(!reg.outputs[0].is_collection);
+        assert!(reg.outputs[1].is_collection);
+        assert_eq!(reg.inputs[0].type_id, TypeId::of::<u64>());
+        assert_eq!(reg.inputs[1].type_id, TypeId::of::<u64>());
+        assert_eq!(reg.outputs[0].type_id, TypeId::of::<String>());
+        assert_eq!(reg.outputs[1].type_id, TypeId::of::<u64>());
+    }
+
+    struct TestExtractor;
+    impl KeyExtractor<u64> for TestExtractor {
+        fn extract_key(item: &u64) -> u64 { *item }
+    }
+
+    // -----------------------------------------------------------------------
+    // TransformContext tests
+    // -----------------------------------------------------------------------
+
+    fn make_single_context(input_val: u64) -> TransformContext {
+        let erased: ErasedValue = Arc::new(input_val);
+        TransformContext::new(
+            vec![ContextInput::Single(erased)],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: false,
+                extract_key: None,
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: false,
+                extract_key: None,
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        )
+    }
+
+    fn make_collection_context(
+        elements: Vec<(u64, u64)>,
+    ) -> TransformContext {
+        let keys: Vec<u64> = elements.iter().map(|(k, _)| *k).collect();
+        let erased: Vec<ErasedValue> = elements.iter()
+            .map(|(_, v)| Arc::new(*v) as ErasedValue).collect();
+        TransformContext::new(
+            vec![ContextInput::Collection {
+                elements: erased,
+                keys: keys.clone(),
+                dirty_keys: keys.clone(),
+                removed_keys: vec![],
+            }],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| {
+                    *a.downcast_ref::<u64>().unwrap()
+                }),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn test_context_single_input() {
+        let ctx = make_single_context(42);
+        assert_eq!(*ctx.input::<u64>(0).unwrap(), 42);
+    }
+
+    #[test]
+    fn test_context_input_type_mismatch_error() {
+        let ctx = make_single_context(42);
+        let err = ctx.input::<String>(0).unwrap_err();
+        assert!(err.message.contains("type mismatch"));
+    }
+
+    #[test]
+    fn test_context_input_out_of_range() {
+        let ctx = make_single_context(42);
+        let err = ctx.input::<u64>(5).unwrap_err();
+        assert!(err.message.contains("out of range"));
+    }
+
+    #[test]
+    fn test_context_input_collection_as_single_error() {
+        let ctx = make_collection_context(vec![(1, 10)]);
+        let err = ctx.input::<u64>(0).unwrap_err();
+        assert!(err.message.contains("collection"));
+    }
+
+    #[test]
+    fn test_context_output() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: false,
+                extract_key: None,
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        ctx.output(0, 42u64).unwrap();
+        match &ctx.outputs[0] {
+            ContextOutput::Single(v) => {
+                let val = v.as_any().downcast_ref::<u64>().unwrap();
+                assert_eq!(*val, 42);
+            }
+            _ => panic!("expected Single"),
+        }
+    }
+
+    #[test]
+    fn test_context_output_collection() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| *a.downcast_ref::<u64>().unwrap()),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        ctx.output_collection(0, vec![3u64, 1u64, 2u64]).unwrap();
+        match &ctx.outputs[0] {
+            ContextOutput::Collection(pairs) => {
+                assert_eq!(pairs.len(), 3);
+                // Keys from ByValue: 3, 1, 2
+                let mut keys: Vec<u64> = pairs.iter().map(|(k, _)| *k).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, vec![1, 2, 3]);
+            }
+            _ => panic!("expected Collection"),
+        }
+    }
+
+    #[test]
+    fn test_context_output_type_mismatch() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: false,
+                extract_key: None,
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        let err = ctx.output::<String>(0, "hello".to_string()).unwrap_err();
+        assert!(err.message.contains("type mismatch"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CollectionInput tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_collection_input_basic() {
+        let mut elements = std::collections::HashMap::new();
+        elements.insert(1u64, 10u64);
+        elements.insert(2u64, 20u64);
+        let ci = CollectionInput::new(
+            elements,
+            vec![1, 2],
+            vec![1],
+            vec![],
+            vec![],
+        );
+        assert_eq!(ci.len(), 2);
+        assert!(ci.contains(1));
+        assert!(!ci.contains(3));
+        assert_eq!(*ci.get(1).unwrap(), 10);
+        assert!(ci.has_changes());
+    }
+
+    #[test]
+    fn test_collection_input_empty() {
+        let ci: CollectionInput<u64> = CollectionInput::new(
+            std::collections::HashMap::new(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(ci.is_empty());
+        assert_eq!(ci.len(), 0);
+        assert!(!ci.has_changes());
+    }
+
+    #[test]
+    fn test_collection_input_diff_info() {
+        let mut elements = std::collections::HashMap::new();
+        elements.insert(1u64, 10u64);
+        elements.insert(3u64, 30u64);
+        let ci = CollectionInput::new(
+            elements,
+            vec![1, 3],
+            vec![1],       // added
+            vec![],        // changed
+            vec![2],       // removed
+        );
+        assert_eq!(ci.added_keys(), &[1]);
+        assert_eq!(ci.removed_keys(), &[2]);
+        assert!(ci.changed_keys().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // CollectionOutputBuilder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_collection_builder_add() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| *a.downcast_ref::<u64>().unwrap()),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        {
+            let mut builder = ctx.output_collection_builder::<u64>(0).unwrap();
+            builder.add(10u64).unwrap();
+            builder.add(20u64).unwrap();
+        }
+        match &ctx.outputs[0] {
+            ContextOutput::CollectionMutations { added, .. } => {
+                assert_eq!(added.len(), 2);
+                assert_eq!(added[0].0, 10);
+                assert_eq!(added[1].0, 20);
+            }
+            _ => panic!("expected CollectionMutations"),
+        }
+    }
+
+    #[test]
+    fn test_collection_builder_remove() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| *a.downcast_ref::<u64>().unwrap()),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        {
+            let mut builder = ctx.output_collection_builder::<u64>(0).unwrap();
+            builder.remove(42).unwrap();
+        }
+        match &ctx.outputs[0] {
+            ContextOutput::CollectionMutations { removed, .. } => {
+                assert_eq!(removed, &[42]);
+            }
+            _ => panic!("expected CollectionMutations"),
+        }
+    }
+
+    #[test]
+    fn test_collection_builder_clear() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| *a.downcast_ref::<u64>().unwrap()),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        {
+            let mut builder = ctx.output_collection_builder::<u64>(0).unwrap();
+            builder.clear().unwrap();
+            builder.add(99u64).unwrap();
+        }
+        match &ctx.outputs[0] {
+            ContextOutput::CollectionMutations { added, clear, .. } => {
+                assert!(*clear);
+                assert_eq!(added.len(), 1);
+                assert_eq!(added[0].0, 99);
+            }
+            _ => panic!("expected CollectionMutations"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // TransformError tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_transform_error_display() {
+        let err = TransformError::new("something broke");
+        assert_eq!(err.to_string(), "something broke");
+
+        let err2 = TransformError::with_source("outer", "inner");
+        assert_eq!(err2.to_string(), "outer: inner");
+    }
+
+    // -----------------------------------------------------------------------
+    // IncrementalValue blanket
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_u64_is_incremental_value() {
+        fn check<T: IncrementalValue>() {}
+        check::<u64>();
+        check::<String>();
+        check::<i32>();
+    }
+
+    // -----------------------------------------------------------------------
+    // hash_bytes determinism
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hash_bytes_deterministic() {
+        let bytes = b"hello world";
+        assert_eq!(hash_bytes(bytes), hash_bytes(bytes));
+        assert_ne!(hash_bytes(b"hello"), hash_bytes(b"world"));
+    }
+}

@@ -86,6 +86,81 @@ impl SequentialTaskQueue {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_enqueue_drain_order() {
+        let q = SequentialTaskQueue::new();
+        let order = Arc::new(std::sync::Mutex::new(vec![]));
+
+        q.enqueue(Box::pin({
+            let order = Arc::clone(&order);
+            async move { order.lock().unwrap().push(1); }
+        }));
+        q.enqueue(Box::pin({
+            let order = Arc::clone(&order);
+            async move { order.lock().unwrap().push(2); }
+        }));
+        q.enqueue(Box::pin({
+            let order = Arc::clone(&order);
+            async move { order.lock().unwrap().push(3); }
+        }));
+
+        q.drain().await;
+        assert_eq!(*order.lock().unwrap(), vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_drain_empty() {
+        let q = SequentialTaskQueue::new();
+        q.drain().await; // should not hang
+    }
+
+    #[tokio::test]
+    async fn test_nested_enqueue() {
+        let q = Arc::new(SequentialTaskQueue::new());
+        let order = Arc::new(std::sync::Mutex::new(vec![]));
+
+        let q_clone = Arc::clone(&q);
+        q.enqueue(Box::pin({
+            let order = Arc::clone(&order);
+            async move {
+                order.lock().unwrap().push(1);
+                q_clone.enqueue(Box::pin({
+                    let order = Arc::clone(&order);
+                    async move { order.lock().unwrap().push(2); }
+                }));
+            }
+        }));
+
+        q.drain().await;
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_drain_reentrant() {
+        let q = Arc::new(SequentialTaskQueue::new());
+        let order = Arc::new(std::sync::Mutex::new(vec![]));
+
+        let q1 = Arc::clone(&q);
+        q.enqueue(Box::pin({
+            let order = Arc::clone(&order);
+            async move {
+                order.lock().unwrap().push(1);
+                q1.enqueue(Box::pin({
+                    let order = Arc::clone(&order);
+                    async move { order.lock().unwrap().push(2); }
+                }));
+            }
+        }));
+
+        q.drain().await;
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+}
+
 impl Default for SequentialTaskQueue {
     fn default() -> Self {
         Self::new()

@@ -160,3 +160,97 @@ impl Storage for MemoryStorage {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_set() {
+        let store = MemoryStorage::new();
+        let key = StorageKey::from_uuid(Uuid::new_v4());
+        let val = StorageValue::new(vec![1, 2, 3]);
+        store.set(&key, val.clone()).await.unwrap();
+        let got = store.get(&key).await.unwrap().unwrap();
+        assert_eq!(got, val);
+    }
+
+    #[tokio::test]
+    async fn test_get_missing() {
+        let store = MemoryStorage::new();
+        let key = StorageKey::from_uuid(Uuid::new_v4());
+        assert!(store.get(&key).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete() {
+        let store = MemoryStorage::new();
+        let key = StorageKey::from_uuid(Uuid::new_v4());
+        store.set(&key, StorageValue::new(vec![1])).await.unwrap();
+        assert!(store.contains(&key).await.unwrap());
+        store.delete(&key).await.unwrap();
+        assert!(!store.contains(&key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_contains() {
+        let store = MemoryStorage::new();
+        let key = StorageKey::from_uuid(Uuid::new_v4());
+        assert!(!store.contains(&key).await.unwrap());
+        store.set(&key, StorageValue::new(vec![1])).await.unwrap();
+        assert!(store.contains(&key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_overwrite() {
+        let store = MemoryStorage::new();
+        let key = StorageKey::from_uuid(Uuid::new_v4());
+        store.set(&key, StorageValue::new(vec![1])).await.unwrap();
+        store.set(&key, StorageValue::new(vec![2, 3])).await.unwrap();
+        let got = store.get(&key).await.unwrap().unwrap();
+        assert_eq!(got.as_bytes(), &[2, 3]);
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_commit_discard() {
+        let store = MemoryStorage::new();
+        let key = StorageKey::from_uuid(Uuid::new_v4());
+        store.set(&key, StorageValue::new(vec![1])).await.unwrap();
+        store.checkpoint().await.unwrap();
+        store.set(&key, StorageValue::new(vec![2])).await.unwrap();
+        store.discard().await.unwrap();
+        let got = store.get(&key).await.unwrap().unwrap();
+        assert_eq!(got.as_bytes(), &[1]);
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_commit_persists() {
+        let store = MemoryStorage::new();
+        let key = StorageKey::from_uuid(Uuid::new_v4());
+        store.set(&key, StorageValue::new(vec![1])).await.unwrap();
+        store.checkpoint().await.unwrap();
+        store.set(&key, StorageValue::new(vec![2])).await.unwrap();
+        store.commit().await.unwrap();
+        let got = store.get(&key).await.unwrap().unwrap();
+        assert_eq!(got.as_bytes(), &[2]);
+    }
+
+    #[tokio::test]
+    async fn test_double_checkpoint_error() {
+        let store = MemoryStorage::new();
+        store.checkpoint().await.unwrap();
+        assert!(store.checkpoint().await.unwrap_err().message.contains("already"));
+    }
+
+    #[tokio::test]
+    async fn test_commit_without_checkpoint_error() {
+        let store = MemoryStorage::new();
+        assert!(store.commit().await.unwrap_err().message.contains("no active"));
+    }
+
+    #[tokio::test]
+    async fn test_discard_without_checkpoint_error() {
+        let store = MemoryStorage::new();
+        assert!(store.discard().await.unwrap_err().message.contains("no active"));
+    }
+}

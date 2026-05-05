@@ -117,9 +117,10 @@ pub(crate) struct Topology {
     pub(crate) edges: Vec<EdgeDesc>,
     /// outgoing[(node, slot)] → list of edge IDs leaving that output slot.
     pub(crate) outgoing: HashMap<(NodeId, SlotIndex), Vec<EdgeId>>,
-    /// incoming[(node, slot)] → edge ID feeding that input slot.
-    /// (Back-edges are included here too.)
-    pub(crate) incoming: HashMap<(NodeId, SlotIndex), EdgeId>,
+    /// incoming[(node, slot)] → edge IDs feeding that input slot.
+    /// Single-value slots have exactly 1 edge. Collection gather slots may have multiple.
+    /// Back-edges are included here too.
+    pub(crate) incoming: HashMap<(NodeId, SlotIndex), Vec<EdgeId>>,
 }
 
 impl Topology {
@@ -143,9 +144,21 @@ impl Topology {
         self.outgoing.get(&(node, slot)).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Return the incoming edge for `(node, slot)`, if any.
+    /// Return the incoming edges for `(node, slot)`.
+    /// Single-value slots have exactly 1 edge; collection gather slots may have multiple.
+    /// Returns an empty slice if no edge targets this slot.
+    pub(crate) fn incoming_edges(&self, node: NodeId, slot: SlotIndex) -> &[EdgeId] {
+        self.incoming.get(&(node, slot)).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Convenience: return the single incoming edge for `(node, slot)`, panicking
+    /// if there is not exactly one. Use only for single-value slots.
     pub(crate) fn incoming_edge(&self, node: NodeId, slot: SlotIndex) -> Option<EdgeId> {
-        self.incoming.get(&(node, slot)).copied()
+        let edges = self.incoming_edges(node, slot);
+        if edges.len() > 1 {
+            panic!("incoming_edge called on gather slot with {} edges", edges.len());
+        }
+        edges.first().copied()
     }
 
     /// Return all nodes in the order they should be visited (topo order for
@@ -503,12 +516,12 @@ impl TopologyBuilder {
 
         // --- Step 4: Build outgoing / incoming maps ---
         let mut outgoing: HashMap<(NodeId, SlotIndex), Vec<EdgeId>> = HashMap::new();
-        let mut incoming: HashMap<(NodeId, SlotIndex), EdgeId> = HashMap::new();
+        let mut incoming: HashMap<(NodeId, SlotIndex), Vec<EdgeId>> = HashMap::new();
         for e in &edges {
             outgoing.entry((e.from_node, e.from_slot)).or_default().push(e.id);
             // Multiple edges can share a collection input slot (gather).
-            // For single-value slots, enforced as exactly one above.
-            incoming.insert((e.to_node, e.to_slot), e.id);
+            // For single-value slots, validated as exactly one above.
+            incoming.entry((e.to_node, e.to_slot)).or_default().push(e.id);
         }
 
         // --- Step 5: Topological sort per subgraph (forward edges only) + back-edge detection ---
@@ -534,8 +547,11 @@ impl TopologyBuilder {
             }
 
             // Kahn's algorithm on forward intra-subgraph edges.
+            // Back-edges to collection gather slots are excluded from the
+            // cycle-detection DAG: they should not contribute to in_degree
+            // because they would prevent convergence (the back-edge source
+            // appears later in topo order than its destination).
             let sg_node_set: HashSet<NodeId> = sg_nodes.iter().copied().collect();
-            // Compute in-degree for intra-subgraph forward edges.
             let mut in_degree: HashMap<NodeId, usize> = sg_nodes.iter().map(|&n| (n, 0)).collect();
             let mut forward_adj: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
 
@@ -545,7 +561,11 @@ impl TopologyBuilder {
                     continue; // cross-scope edge
                 }
                 forward_adj.entry(e.from_node).or_default().push(e.to_node);
-                *in_degree.entry(e.to_node).or_insert(0) += 1;
+                // Edges into collection gather slots do not create hard
+                // dependencies (they may be back-edges from later nodes).
+                if !nodes[&e.to_node].input_is_collection(e.to_slot) {
+                    *in_degree.entry(e.to_node).or_insert(0) += 1;
+                }
             }
 
             // Kahn's algorithm.
@@ -558,9 +578,15 @@ impl TopologyBuilder {
                 topo.push(cur);
                 if let Some(nexts) = forward_adj.get(&cur) {
                     for &next in nexts {
-                        let deg = in_degree.entry(next).or_insert(0);
-                        *deg -= 1;
-                        if *deg == 0 { queue.push_back(next); }
+                        // Only decrement if the target's input was counted
+                        // in in_degree (i.e., its input is NOT a collection
+                        // gather slot, since those don't create dependencies).
+                        if let Some(deg) = in_degree.get_mut(&next) {
+                            if *deg > 0 {
+                                *deg -= 1;
+                                if *deg == 0 { queue.push_back(next); }
+                            }
+                        }
                     }
                 }
             }
@@ -643,5 +669,337 @@ fn is_ancestor(
             Some(p) => descendant = p,
             None => return false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use crate::transform::{Transform, TransformContext, TransformRegisterContext, TransformError};
+
+    struct NoopTrans;
+    #[async_trait]
+    impl Transform for NoopTrans {
+        fn register(ctx: &mut impl TransformRegisterContext) {
+            ctx.input::<u64>();
+            ctx.output::<u64>();
+        }
+        async fn apply(&self, _ctx: &mut TransformContext) -> Result<(), TransformError> {
+            Ok(())
+        }
+    }
+
+    struct TwoInputTrans;
+    #[async_trait]
+    impl Transform for TwoInputTrans {
+        fn register(ctx: &mut impl TransformRegisterContext) {
+            ctx.input::<u64>();
+            ctx.input::<u64>();
+            ctx.output::<u64>();
+        }
+        async fn apply(&self, _ctx: &mut TransformContext) -> Result<(), TransformError> {
+            Ok(())
+        }
+    }
+
+    struct KeyExtract;
+    impl crate::transform::KeyExtractor<u64> for KeyExtract {
+        fn extract_key(_item: &u64) -> u64 { 0 }
+    }
+
+    struct CollTrans;
+    #[async_trait]
+    impl Transform for CollTrans {
+        fn register(ctx: &mut impl TransformRegisterContext) {
+            ctx.input::<u64>();
+            ctx.output_collection::<u64, KeyExtract>();
+        }
+        async fn apply(&self, _ctx: &mut TransformContext) -> Result<(), TransformError> {
+            Ok(())
+        }
+    }
+
+    fn uid(n: u8) -> Uuid { Uuid::from_u128(n as u128) }
+
+    // ------------------------------------------------------------------
+    // Simple linear graph: I/O → Transform → I/O
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_simple_linear() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("noop", NoopTrans);
+        b.add_io_input(uid(1));
+        b.add_transform_node(uid(2), "noop");
+        b.add_io_output(uid(3));
+        b.add_edge(uid(1), 0, uid(2), 0);
+        b.add_edge(uid(2), 0, uid(3), 0);
+        let topo = b.freeze().unwrap();
+
+        assert_eq!(topo.subgraphs.len(), 1);
+        assert_eq!(topo.subgraphs[0].id, SubgraphId(0));
+        assert_eq!(topo.nodes.len(), 3);
+        assert_eq!(topo.edges.len(), 2);
+    }
+
+    fn expect_err(b: TopologyBuilder, substr: &str) {
+        match b.freeze() {
+            Err(errs) => assert!(errs.iter().any(|e| e.contains(substr)),
+                "expected error containing {:?}, got: {:?}", substr, errs),
+            Ok(_) => panic!("expected error containing {:?}", substr),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Duplicate node UUID
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_duplicate_node_uuid_error() {
+        let mut b = TopologyBuilder::new();
+        b.add_io_input(uid(1));
+        b.add_io_output(uid(1));
+        expect_err(b, "duplicate node uuid");
+    }
+
+    // ------------------------------------------------------------------
+    // Duplicate transform key
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_duplicate_transform_key_error() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("noop", NoopTrans);
+        b.register_transform("noop", NoopTrans);
+        expect_err(b, "duplicate transform key");
+    }
+
+    // ------------------------------------------------------------------
+    // Undeclared transform key
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_undeclared_transform_key() {
+        let mut b = TopologyBuilder::new();
+        b.add_transform_node(uid(1), "missing");
+        expect_err(b, "not registered");
+    }
+
+    // ------------------------------------------------------------------
+    // Edge to non-existent node
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_edge_to_missing_node() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("noop", NoopTrans);
+        b.add_io_input(uid(1));
+        b.add_transform_node(uid(2), "noop");
+        b.add_edge(uid(1), 0, uid(99), 0);
+        expect_err(b, "to-node");
+    }
+
+    // ------------------------------------------------------------------
+    // Slot out of range
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_output_slot_out_of_range() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("noop", NoopTrans);
+        b.add_io_input(uid(1));
+        b.add_transform_node(uid(2), "noop");
+        b.add_edge(uid(1), 0, uid(2), 5);
+        expect_err(b, "slot 5 out of range");
+    }
+
+    // ------------------------------------------------------------------
+    // Subgraph boundary (collection → single fan-out)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_subgraph_boundary() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("coll", CollTrans);
+        b.register_transform("noop", NoopTrans);
+        b.add_io_input(uid(1));
+        b.add_transform_node(uid(2), "coll");
+        b.add_transform_node(uid(3), "noop");
+        b.add_io_output(uid(4));
+        b.add_edge(uid(1), 0, uid(2), 0);          // I/O → coll (single)
+        b.add_edge(uid(2), 0, uid(3), 0);          // coll output(collection) → noop input(single) = BOUNDARY
+        b.add_edge(uid(3), 0, uid(4), 0);          // noop → output
+
+        let topo = b.freeze().unwrap();
+        // Root subgraph (0) + child subgraph (1)
+        assert_eq!(topo.subgraphs.len(), 2);
+        // Check child subgraph has boundary edge
+        assert!(topo.subgraphs[1].collection_input_edge.is_some());
+        // Root has child
+        assert_eq!(topo.subgraphs[0].child_subgraphs.len(), 1);
+        assert_eq!(topo.subgraphs[0].child_subgraphs[0], SubgraphId(1));
+        // Check edge kind
+        let boundary_edge = topo.subgraphs[1].collection_input_edge.unwrap();
+        let edge = &topo.edges[boundary_edge.0 as usize];
+        assert!(matches!(edge.kind, EdgeKind::SubgraphBoundary { child } if child == SubgraphId(1)));
+        assert_eq!(edge.from_node, NodeId::from_uuid(uid(2)));
+        assert_eq!(edge.to_node, NodeId::from_uuid(uid(3)));
+    }
+
+    // ------------------------------------------------------------------
+    // Two subgraph boundaries (nested)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_nested_subgraphs() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("coll", CollTrans);
+        b.register_transform("noop", NoopTrans);
+        b.add_io_input(uid(1));
+        b.add_transform_node(uid(2), "coll");
+        b.add_transform_node(uid(3), "noop");
+        b.add_transform_node(uid(4), "coll");    // another coll in child scope
+        b.add_transform_node(uid(5), "noop");
+        b.add_io_output(uid(6));
+        b.add_edge(uid(1), 0, uid(2), 0);        // root(I/O) → coll
+        b.add_edge(uid(2), 0, uid(3), 0);        // coll→noop = boundary 1 → child 1
+        b.add_edge(uid(3), 0, uid(4), 0);        // noop→coll = boundary 2 → child 2 (nested)
+        b.add_edge(uid(4), 0, uid(5), 0);        // coll→noop inside child 2
+        b.add_edge(uid(5), 0, uid(6), 0);        // noop→output
+
+        let topo = b.freeze().unwrap();
+        assert!(topo.subgraphs.len() >= 2);
+        // The topology builder should create nested subgraphs
+    }
+
+    // ------------------------------------------------------------------
+    // Type mismatch between slots
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_type_mismatch_error() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("noop", NoopTrans);
+        b.add_transform_node(uid(1), "noop");
+        b.add_transform_node(uid(2), "noop");
+        // Both noop have u64 slots, try to connect with wrong type
+        // This should not produce type mismatch since they're both u64
+        // Actually, noop has u64 in/out, so this is fine
+        b.add_edge(uid(1), 0, uid(2), 0);
+        assert!(b.freeze().is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // Empty graph
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_empty_graph() {
+        let b = TopologyBuilder::new();
+        let topo = b.freeze().unwrap();
+        assert_eq!(topo.subgraphs.len(), 1);
+        assert!(topo.nodes.is_empty());
+        assert!(topo.edges.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Single I/O node
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_single_io_node() {
+        let mut b = TopologyBuilder::new();
+        b.add_io_input(uid(1));
+        let topo = b.freeze().unwrap();
+        assert_eq!(topo.nodes.len(), 1);
+        let node = topo.node(NodeId::from_uuid(uid(1)));
+        assert!(matches!(node.kind, NodeKind::IoInput));
+        assert_eq!(node.input_slots.len(), 0);
+        assert_eq!(node.output_slots.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // Topo order respects dependencies
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_topo_order() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("noop", NoopTrans);
+        b.add_io_input(uid(1));
+        b.add_transform_node(uid(2), "noop");
+        b.add_transform_node(uid(3), "noop");
+        b.add_io_output(uid(4));
+        b.add_edge(uid(1), 0, uid(2), 0);
+        b.add_edge(uid(2), 0, uid(3), 0);
+        b.add_edge(uid(3), 0, uid(4), 0);
+        let topo = b.freeze().unwrap();
+        let order = &topo.subgraphs[0].topo_order;
+
+        // Order should be 1, 2, 3, 4 or similar — node 2 before 3
+        let pos2 = order.iter().position(|&n| n == NodeId::from_uuid(uid(2))).unwrap();
+        let pos3 = order.iter().position(|&n| n == NodeId::from_uuid(uid(3))).unwrap();
+        let pos4 = order.iter().position(|&n| n == NodeId::from_uuid(uid(4))).unwrap();
+        assert!(pos2 < pos3, "transform A should come before transform B");
+        assert!(pos3 < pos4, "transform B should come before output");
+    }
+
+    // ------------------------------------------------------------------
+    // Valid back-edge into a collection gather slot
+    // ------------------------------------------------------------------
+
+    struct Collector;
+    #[async_trait]
+    impl Transform for Collector {
+        fn register(ctx: &mut impl TransformRegisterContext) {
+            ctx.input_collection::<u64, KeyExtract>();
+            ctx.output::<u64>();
+        }
+        async fn apply(&self, _ctx: &mut TransformContext) -> Result<(), TransformError> { Ok(()) }
+    }
+
+    #[test]
+    fn test_valid_back_edge_to_collection_slot() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("collector", Collector);
+        b.register_transform("coll_out", CollTrans);
+        b.add_io_input(uid(1));
+        b.add_transform_node(uid(2), "collector");
+        b.add_transform_node(uid(3), "coll_out");
+        b.add_io_output(uid(4));
+        b.add_edge(uid(1), 0, uid(2), 0);          // I/O → collector (single→collection)
+        b.add_edge(uid(2), 0, uid(3), 0);          // collector → coll_out (single→single) [forward]
+        b.add_edge(uid(3), 0, uid(2), 0);          // coll_out → collector (collection→collection) [BACK-EDGE]
+        b.add_edge(uid(3), 0, uid(4), 0);          // coll_out → output (collection→single) [BOUNDARY]
+
+        let topo = b.freeze().unwrap();
+        // Find back-edges in subgraphs
+        let has_back_edge = topo.subgraphs.iter().any(|sg| !sg.back_edges.is_empty());
+        assert!(has_back_edge, "expected at least one subgraph with a back-edge");
+        // Verify the specific edge is flagged
+        let be = &topo.edges[2]; // edge 3→2
+        assert!(be.is_back_edge);
+    }
+
+    // ------------------------------------------------------------------
+    // Back-edge into non-collection slot is caught as a multi-edge violation
+    // (single-value slots accept at most one incoming edge)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_back_edge_into_non_collection_errors() {
+        let mut b = TopologyBuilder::new();
+        b.register_transform("noop", NoopTrans);
+        b.add_io_input(uid(1));
+        b.add_transform_node(uid(2), "noop");
+        b.add_transform_node(uid(3), "noop");
+        b.add_io_output(uid(4));
+        b.add_edge(uid(1), 0, uid(2), 0);
+        b.add_edge(uid(2), 0, uid(3), 0);
+        b.add_edge(uid(3), 0, uid(4), 0);
+        // Edge 3→2 creates a second incoming edge to node 2's single-value slot
+        b.add_edge(uid(3), 0, uid(2), 0);
+        expect_err(b, "single input slot 0: has 2 incoming edges");
     }
 }

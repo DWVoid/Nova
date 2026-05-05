@@ -10,7 +10,7 @@ use crate::report::UpdateReport;
 use crate::runner::{RunContext, seed_pending_tasks, set_input_value};
 use crate::storage::{Storage, StorageError, StorageValue};
 use crate::task_queue::{SequentialTaskQueue, TaskQueue};
-use crate::topology::TopologyBuilder;
+use crate::topology::{TopologyBuilder, NodeKind};
 use crate::transform::{Transform, IncrementalValue, serialize_erased, hash_bytes, ErasedValue};
 use crate::value_store::ValueStore;
 use crate::workstate::{WorkState, WorkStateSnapshot, ValueHash};
@@ -274,11 +274,16 @@ impl Engine {
 
     /// Run all pending transforms until the graph converges.
     ///
-    /// First processes any pending inputs accumulated by `set_input()`,
+    /// First resets per-cycle state (dirty flags, execution counts),
+    /// then processes any pending inputs accumulated by `set_input()`,
     /// then runs all pending transforms.
     pub async fn update(&self) -> UpdateReport {
         let ctx = self.make_run_context();
-        
+
+        // Reset per-cycle state: clear dirty flags and execution counts.
+        // This ensures only inputs that actually changed this cycle are marked dirty.
+        ctx.workstate.reset_cycle();
+
         // Drain and process pending inputs.
         let pending: Vec<PendingInput> = {
             let mut guard = self.pending_inputs.lock().unwrap();
@@ -296,15 +301,53 @@ impl Engine {
     }
 
     /// Read the current value for the node identified by `id`.
+    /// For I/O output nodes, resolves backwards through the incoming edge
+    /// to find the actual source slot. Loads from storage on cache miss.
     pub async fn get<T: IncrementalValue>(&self, id: Uuid) -> Result<Option<T>, EngineError> {
         let node_id = NodeId::from_uuid(id);
-        let key = NodeInstanceKey::new(SubgraphId(0), UNIT_INSTANCE, node_id);
-        let slot_key = key.slot_key(0);
+        let node_desc = self.topology.node(node_id);
+
+        // Determine the actual source slot key. For output nodes, follow
+        // the incoming edge backward to the transform's output slot.
+        let source_key = match &node_desc.kind {
+            NodeKind::IoOutput => {
+                let edge_ids = self.topology.incoming_edges(node_id, 0);
+                match edge_ids.first() {
+                    Some(&edge_id) => {
+                        let edge = self.topology.edge(edge_id);
+                        let src_sg = self.topology.node(edge.from_node).subgraph;
+                        NodeInstanceKey::new(src_sg, UNIT_INSTANCE, edge.from_node)
+                    }
+                    None => return Ok(None),
+                }
+            }
+            _ => NodeInstanceKey::new(SubgraphId(0), UNIT_INSTANCE, node_id),
+        };
+        let slot_key = source_key.slot_key(0);
+
+        // Check cache first.
         if let Some(v) = self.value_store.get::<T>(slot_key) {
             return Ok(Some((*v).clone()));
         }
-        // TODO: lazy load from storage (CHANGE-3 prerequisite).
-        Ok(None)
+
+        // Lazy load from storage.
+        let deserialize = |bytes: &[u8]| -> Result<ErasedValue, String> {
+            let v: T = rmp_serde::from_slice(bytes)
+                .map_err(|e| format!("{e}"))?;
+            Ok(Arc::new(v) as ErasedValue)
+        };
+        let type_name = std::any::type_name::<T>();
+        match self.value_store.load_erased(slot_key, self.storage.as_ref(), deserialize, type_name).await {
+            Ok(Some((erased, _))) => {
+                let typed = erased.as_any()
+                    .downcast_ref::<T>()
+                    .ok_or_else(|| EngineError::new("type mismatch on storage load"))?
+                    .clone();
+                Ok(Some(typed))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(EngineError::new(format!("storage load: {e}"))),
+        }
     }
 
     /// Begin a storage checkpoint.

@@ -214,6 +214,9 @@ impl ValueStore {
     }
 
     /// Get all cached elements for a collection slot, sorted by element key.
+    /// If an element key is known but missing from cache (warm start), it will
+    /// not appear in the result and must be recomputed by the transform.
+    /// TODO: add lazy deserialization from storage for collection elements.
     pub(crate) fn get_all_elements_erased(
         &self,
         slot: SlotStateKey,
@@ -300,5 +303,138 @@ impl ValueStore {
         self.dirty_single.clear();
         self.dirty_elements.clear();
         self.dirty_indexes.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+    use crate::keys::{SubgraphId, InstanceKey, NodeId};
+
+    fn slot_key(n: u8) -> SlotStateKey {
+        SlotStateKey::new(SubgraphId(0), InstanceKey(0), NodeId::from_uuid(Uuid::from_u128(n as u128)), 0)
+    }
+
+    fn elem_key(sk: SlotStateKey, ek: u64) -> ElementKey {
+        ElementKey::new(sk, ek)
+    }
+
+    // -----------------------------------------------------------------------
+    // Single value tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_get_single() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        vs.set::<u64>(sk, 42).unwrap();
+        let got = vs.get::<u64>(sk);
+        assert_eq!(got.map(|v| *v), Some(42));
+    }
+
+    #[test]
+    fn test_get_missing_single() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        let got = vs.get::<u64>(sk);
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn test_set_get_erased() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        let erased: ErasedValue = Arc::new(42u64);
+        vs.set_erased(sk, erased, vec![0x2a], 42, "u64");
+        let got = vs.get_erased(sk);
+        assert!(got.is_some());
+    }
+
+    #[test]
+    fn test_overwrite_single() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        vs.set::<u64>(sk, 10).unwrap();
+        vs.set::<u64>(sk, 20).unwrap();
+        assert_eq!(vs.get::<u64>(sk).map(|v| *v), Some(20));
+    }
+
+    // -----------------------------------------------------------------------
+    // Collection element tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_get_collection_element() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        let ek = elem_key(sk, 42);
+        vs.set_element::<u64>(ek, 100).unwrap();
+        let got = vs.get_element_erased(ek);
+        assert!(got.is_some());
+        assert_eq!(got.unwrap().1, hash_bytes(&rmp_serde::to_vec(&100u64).unwrap()));
+    }
+
+    #[test]
+    fn test_remove_collection_element() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        let ek = elem_key(sk, 42);
+        vs.set_element::<u64>(ek, 100).unwrap();
+        assert!(vs.get_element_erased(ek).is_some());
+        vs.remove_element(ek);
+        assert!(vs.get_element_erased(ek).is_none());
+    }
+
+    #[test]
+    fn test_get_all_elements() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        vs.set_element::<u64>(elem_key(sk, 1), 10).unwrap();
+        vs.set_element::<u64>(elem_key(sk, 2), 20).unwrap();
+        vs.set_element::<u64>(elem_key(sk, 3), 30).unwrap();
+        let all = vs.get_all_elements_erased(sk, &[1, 2, 3]);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_get_all_elements_partial() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        vs.set_element::<u64>(elem_key(sk, 1), 10).unwrap();
+        // Only request key 2 (not stored)
+        let all = vs.get_all_elements_erased(sk, &[1, 2]);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Flush to storage
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_flush_single_to_storage() {
+        let vs = ValueStore::new();
+        let store = crate::storage::MemoryStorage::new();
+        let sk = slot_key(1);
+        vs.set::<u64>(sk, 42).unwrap();
+        vs.flush(&store).await.unwrap();
+        // Verify in storage
+        let storage_key = sk.to_storage_key();
+        assert!(store.contains(&storage_key).await.unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // Evict
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_evict_all() {
+        let vs = ValueStore::new();
+        let sk = slot_key(1);
+        vs.set::<u64>(sk, 42).unwrap();
+        assert!(vs.get::<u64>(sk).is_some());
+        vs.evict_all();
+        assert!(vs.get::<u64>(sk).is_none());
     }
 }

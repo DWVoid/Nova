@@ -61,8 +61,10 @@ pub(crate) struct NodeInstanceState {
     /// True while a task for this node instance is currently executing.
     pub(crate) executing: bool,
     /// Set to true when `try_enqueue` is called while `executing=true`.
-    /// `finish_execute` checks this to decide whether to re-enqueue.
     pub(crate) re_enqueue_requested: bool,
+    /// Set by `propagate_instance_removal` to bypass the is_pending re-check
+    /// in execute_task step 2 (needed for cross-scope gather after child removal).
+    pub(crate) force_execute: bool,
 }
 
 impl NodeInstanceState {
@@ -72,6 +74,7 @@ impl NodeInstanceState {
             execution_count: 0,
             executing: false,
             re_enqueue_requested: false,
+            force_execute: false,
         }
     }
 
@@ -255,7 +258,8 @@ impl WorkState {
     ///
     /// For each input slot, resolves all source output slots via topology and
     /// checks their [`SlotState`]. Back-edges do not block readiness.
-    /// For collection gather slots, all sources must be ready.
+    /// For cross-scope single→collection edges (subgraph output gather),
+    /// readiness is satisfied if at least one child instance has produced output.
     pub(crate) async fn is_ready(
         &self,
         key: NodeInstanceKey,
@@ -265,25 +269,45 @@ impl WorkState {
         for (slot_idx, _) in node_desc.input_slots.iter().enumerate() {
             let edge_ids = topology.incoming_edges(key.node, slot_idx);
             if edge_ids.is_empty() {
-                // No incoming edge for this slot — cannot be ready unless absent is ok.
-                // An unconnected slot means the transform can't get its input.
                 return false;
             }
             for &edge_id in edge_ids {
                 let edge = topology.edge(edge_id);
-                if edge.is_back_edge { continue; } // back-edges don't block readiness
+                if edge.is_back_edge { continue; }
 
-                let src_instance = self.resolve_source_instance(edge, key.instance, topology);
-                let src_key = NodeInstanceKey::new(
-                    topology.node(edge.from_node).subgraph,
-                    src_instance,
-                    edge.from_node,
-                );
-                let src_state = self.get_or_create(src_key, topology);
-                let guard = src_state.lock().await;
-                let slot_state = &guard.output_slots[edge.from_slot];
-                if !slot_state.present || slot_state.error {
-                    return false;
+                let src_sg = topology.node(edge.from_node).subgraph;
+                if src_sg != key.subgraph && !topology.node(edge.from_node).output_is_collection(edge.from_slot) {
+                    let child_instances = self.instance_keys(src_sg, key.instance).await;
+                    if child_instances.is_empty() {
+                        return false;
+                    }
+                    let mut any_present = false;
+                    for &inst in &child_instances {
+                        let src_key = NodeInstanceKey::new(src_sg, inst, edge.from_node);
+                        if let Some(state_arc) = self.node_states.get(&src_key) {
+                            let guard = state_arc.lock().await;
+                            if guard.output_slots[edge.from_slot].present && !guard.output_slots[edge.from_slot].error {
+                                any_present = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !any_present {
+                        return false;
+                    }
+                } else {
+                    let src_instance = self.resolve_source_instance(edge, key.instance, topology);
+                    let src_key = NodeInstanceKey::new(
+                        topology.node(edge.from_node).subgraph,
+                        src_instance,
+                        edge.from_node,
+                    );
+                    let src_state = self.get_or_create(src_key, topology);
+                    let guard = src_state.lock().await;
+                    let slot_state = &guard.output_slots[edge.from_slot];
+                    if !slot_state.present || slot_state.error {
+                        return false;
+                    }
                 }
             }
         }
@@ -304,15 +328,28 @@ impl WorkState {
                 let edge = topology.edge(edge_id);
                 if edge.is_back_edge { continue; }
 
-                let src_instance = self.resolve_source_instance(edge, key.instance, topology);
-                let src_key = NodeInstanceKey::new(
-                    topology.node(edge.from_node).subgraph,
-                    src_instance,
-                    edge.from_node,
-                );
-                let src_state = self.get_or_create(src_key, topology);
-                let guard = src_state.lock().await;
-                if guard.output_slots[edge.from_slot].dirty { return true; }
+                let src_sg = topology.node(edge.from_node).subgraph;
+                if src_sg != key.subgraph && !topology.node(edge.from_node).output_is_collection(edge.from_slot) {
+                    // Cross-scope single→collection gather: check any child instance dirty.
+                    let child_instances = self.instance_keys(src_sg, key.instance).await;
+                    for &inst in &child_instances {
+                        let src_key = NodeInstanceKey::new(src_sg, inst, edge.from_node);
+                        if let Some(state_arc) = self.node_states.get(&src_key) {
+                            let guard = state_arc.lock().await;
+                            if guard.output_slots[edge.from_slot].dirty { return true; }
+                        }
+                    }
+                } else {
+                    let src_instance = self.resolve_source_instance(edge, key.instance, topology);
+                    let src_key = NodeInstanceKey::new(
+                        topology.node(edge.from_node).subgraph,
+                        src_instance,
+                        edge.from_node,
+                    );
+                    let src_state = self.get_or_create(src_key, topology);
+                    let guard = src_state.lock().await;
+                    if guard.output_slots[edge.from_slot].dirty { return true; }
+                }
             }
         }
         false
@@ -472,13 +509,26 @@ impl WorkState {
         key: NodeInstanceKey,
         slot: SlotIndex,
         keys: Vec<u64>,
-        hashes: HashMap<u64, ValueHash>,
         topology: &Topology,
     ) {
         let state = self.get_or_create(key, topology);
         let mut guard = state.lock().await;
         if let Some(ss) = guard.output_slots.get_mut(slot) {
             ss.element_keys = keys;
+        }
+    }
+
+    /// Update element hashes after propagate_dirty has consumed the old ones.
+    pub(crate) async fn update_collection_hashes(
+        &self,
+        key: NodeInstanceKey,
+        slot: SlotIndex,
+        hashes: HashMap<u64, ValueHash>,
+        topology: &Topology,
+    ) {
+        let state = self.get_or_create(key, topology);
+        let mut guard = state.lock().await;
+        if let Some(ss) = guard.output_slots.get_mut(slot) {
             ss.element_hashes = hashes;
         }
     }

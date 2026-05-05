@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher, DefaultHasher};
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 
-use nova_incremental::{
+use nova_incremental_neo::{
     Transform, TransformContext, TransformRegisterContext, TransformError,
     KeyExtractor,
 };
@@ -225,8 +225,8 @@ impl Transform for CollectTransform {
 
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
         let col = ctx.input_collection::<ParseOutput>(0)?;
-        let mut parts: Vec<String> = Vec::with_capacity(col.elements.len());
-        for po in col.elements.iter() {
+        let mut parts: Vec<String> = Vec::with_capacity(col.len());
+        for po in col.values() {
             let encoded = crate::formats::textual::encode(&po.result)
                 .map_err(|e| TransformError::new(
                     format!("collect encode({}): {}", po.path, e)
@@ -258,7 +258,7 @@ mod tests {
     use super::*;
     use crate::semantic::file_access::MockFileAccess;
     use crate::semantic::file_content::FileContent;
-    use nova_incremental::{EngineBuilder, MemoryStorage, Uuid};
+    use nova_incremental_neo::{EngineBuilder, MemoryStorage, Uuid};
     use std::sync::Arc;
 
     fn node(name: &str) -> Uuid {
@@ -282,7 +282,7 @@ mod tests {
             .transform_node(expand_t, EXPAND_KEY)
             .wire_into_slot(proj_in, expand_t, 0)
             .wire_slot_to(expand_t, 0, out)
-            .build(s).await.unwrap();
+            .with_storage(s).build().await.unwrap();
 
         engine.set_input(proj_in, ProjectDescriptor::new(vec![
             FileStat::new("a.nova", 1, 0),
@@ -316,7 +316,7 @@ mod tests {
             .wire_into_slot(proj_in, expand_t, 0)
             .wire_slot_to_slot(expand_t, 0, load_t, 0)
             .wire_slot_to(load_t, 0, out)
-            .build(s).await.unwrap();
+            .with_storage(s).build().await.unwrap();
 
         engine.set_input(proj_in, ProjectDescriptor::new(vec![
             FileStat::new("src/main.nova", 15, 0),
@@ -344,7 +344,7 @@ mod tests {
             .transform_node(lex_t, LEX_KEY)
             .wire_into_slot(content_in, lex_t, 0)
             .wire_slot_to(lex_t, 0, lex_out)
-            .build(s).await.unwrap();
+            .with_storage(s).build().await.unwrap();
         engine.set_input(content_in, FileContent::new("test.nova", b"namespace test;".to_vec())).unwrap();
         let report = engine.update().await;
         assert!(report.is_ok(), "{:?}", report.errors);

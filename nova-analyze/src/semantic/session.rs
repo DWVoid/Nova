@@ -19,8 +19,8 @@
 use std::sync::Arc;
 use uuid::Uuid;
 
-use nova_incremental::{Engine, EngineBuilder, EngineError, UpdateReport};
-use nova_incremental::Storage;
+use nova_incremental_neo::{Engine, EngineBuilder, EngineError, UpdateReport};
+use nova_incremental_neo::Storage;
 
 use crate::semantic::file_access::FileAccess;
 use crate::semantic::file_stat::FileStat;
@@ -146,7 +146,8 @@ async fn build_engine(
         .wire_slot_to_slot(lex_transform_id(),     0, parse_transform_id(),   0)
         .wire_slot_to_slot(parse_transform_id(),   0, collect_transform_id(), 0)
         .wire_slot_to(collect_transform_id(), 0, bundle_output_id())
-        .build(storage)
+        .with_storage(storage)
+        .build()
         .await
 }
 
@@ -156,7 +157,7 @@ async fn build_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nova_incremental::MemoryStorage;
+    use nova_incremental_neo::MemoryStorage;
     use crate::semantic::file_access::MockFileAccess;
 
     fn make_fs(files: &[(&str, &str)]) -> Arc<dyn FileAccess> {

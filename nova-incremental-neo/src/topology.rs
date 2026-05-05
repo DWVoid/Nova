@@ -461,18 +461,19 @@ impl TopologyBuilder {
             subgraph_parent[sg_idx] = Some(parent_sg);
 
             // BFS: assign all nodes reachable from root via non-boundary forward edges.
+            // Edges into collection gather slots exit the subgraph (subgraph output)
+            // and are NOT followed — they keep the target in its parent scope.
             node_subgraph.insert(root_nid, sg_id);
             let mut queue: VecDeque<NodeId> = VecDeque::new();
             queue.push_back(root_nid);
             while let Some(cur) = queue.pop_front() {
-                // Find all forward non-boundary edges leaving cur.
                 for e in edges.iter() {
                     if e.from_node != cur { continue; }
                     if matches!(e.kind, EdgeKind::SubgraphBoundary { .. }) { continue; }
-                    // Only propagate within the same scope.
+                    // Edges into collection gather slots exit the subgraph.
+                    if nodes[&e.to_node].input_is_collection(e.to_slot) { continue; }
                     let to_sg = *node_subgraph.get(&e.to_node).unwrap_or(&SubgraphId(0));
                     if to_sg == SubgraphId(0) {
-                        // Not yet assigned to a child scope; assign it.
                         node_subgraph.insert(e.to_node, sg_id);
                         queue.push_back(e.to_node);
                     }

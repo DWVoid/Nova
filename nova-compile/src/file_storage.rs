@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use nova_incremental::{Storage, StorageKey, StorageValue, StorageError};
+use nova_incremental_neo::{Storage, StorageKey, StorageValue, StorageError};
 
 // ---------------------------------------------------------------------------
 // FileSystemStorage
@@ -210,7 +210,7 @@ impl Storage for FileSystemStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nova_incremental::Uuid;
+    use nova_incremental_neo::Uuid;
 
     fn new_key() -> StorageKey { StorageKey::from_uuid(Uuid::new_v4()) }
 

@@ -115,7 +115,6 @@ pub(crate) async fn propagate_dirty(
 
         match &edge.kind {
             EdgeKind::SubgraphBoundary { child } => {
-                // Fan-out: the source slot is a collection; push element changes.
                 handle_fan_out_change(*child, src.instance, src.node, slot, ctx).await;
             }
             EdgeKind::Single | EdgeKind::Collection => {
@@ -154,8 +153,24 @@ async fn instances_for_dest(
     if dest_sg == src_sg {
         return vec![src_instance];
     }
-    // Ancestor changed → all child instances must re-evaluate.
-    ctx.workstate.instance_keys(dest_sg, src_instance).await
+    // Check if dest_sg is an ancestor of src_sg (child→parent edge).
+    // Walk src_sg's parent chain to see if we reach dest_sg.
+    let mut cur = src_sg;
+    let dest_is_ancestor = loop {
+        match ctx.topology.subgraphs[cur.0 as usize].parent {
+            Some(p) if p == dest_sg => break true,
+            Some(p) => cur = p,
+            None => break false,
+        }
+    };
+    if dest_is_ancestor {
+        // Child instance changed → trigger the single parent instance.
+        // build_context will enumerate all child instances for the gather.
+        vec![crate::keys::UNIT_INSTANCE]
+    } else {
+        // Parent/ancestor changed → all child instances need re-evaluation.
+        ctx.workstate.instance_keys(dest_sg, src_instance).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +229,7 @@ async fn handle_fan_out_change(
             let root_key = NodeInstanceKey::new(child_sg, InstanceKey(ek), root);
             try_enqueue_task(root_key, ctx);
         }
+        ctx.report.lock().unwrap().collection_elements_changed += 1;
     }
 
     // Removed elements.
@@ -269,12 +285,17 @@ async fn propagate_instance_removal(
                 let edge = ctx.topology.edge(edge_id);
                 let dest_sg = ctx.topology.node(edge.to_node).subgraph;
                 if dest_sg == parent_sg {
-                    // This is a subgraph output edge. Mark parent node dirty.
                     let dest_key = NodeInstanceKey::new(parent_sg, parent_instance, edge.to_node);
                     ctx.workstate.mark_dirty(dest_key, edge.to_slot, &ctx.topology).await;
-                    if ctx.workstate.is_pending(dest_key, &ctx.topology).await {
-                        try_enqueue_task(dest_key, ctx);
+                    // Set force_execute to bypass the is_pending re-check in
+                    // execute_task step 2. Without this, child instance removal
+                    // would be missed because child outputs are clean.
+                    {
+                        let state = ctx.workstate.get_or_create(dest_key, &ctx.topology);
+                        let mut guard = state.lock().await;
+                        guard.force_execute = true;
                     }
+                    try_enqueue_task(dest_key, ctx);
                 }
             }
         }
@@ -329,11 +350,22 @@ pub(crate) fn try_enqueue_task(key: NodeInstanceKey, ctx: &RunContext) {
 
 /// Execute the transform for one node instance.
 pub(crate) async fn execute_task(key: NodeInstanceKey, ctx: &RunContext) {
-    // Step 1: claim execution.
     if !ctx.workstate.begin_execute(key, &ctx.topology).await { return; }
 
-    // Step 2: re-check pending.
-    if !ctx.workstate.is_pending(key, &ctx.topology).await {
+    // Step 1b: check force_execute flag (set by propagate_instance_removal
+    // to bypass is_pending for cross-scope gather after child removal).
+    let forced = {
+        let state = ctx.workstate.get_or_create(key, &ctx.topology);
+        let mut guard = state.lock().await;
+        if guard.force_execute {
+            guard.force_execute = false;
+            true
+        } else {
+            false
+        }
+    };
+
+    if !forced && !ctx.workstate.is_pending(key, &ctx.topology).await {
         finish(key, ctx).await;
         return;
     }
@@ -440,35 +472,56 @@ async fn build_context(
                 let edge = ctx.topology.edge(edge_id);
                 let src_instance = ctx.workstate.resolve_source_instance(edge, key.instance, &ctx.topology);
                 let src_sg = ctx.topology.node(edge.from_node).subgraph;
-                let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
-                let src_slot_key = src_key.slot_key(edge.from_slot);
+                let src_node_desc = ctx.topology.node(edge.from_node);
+                let src_slot_is_collection = src_node_desc.output_slots[edge.from_slot].is_collection;
 
-                let prev_hashes = ctx.workstate
-                    .get_collection_hashes(src_key, edge.from_slot, &ctx.topology).await;
-
-                let state_arc = ctx.workstate.get_or_create(src_key, &ctx.topology);
-                let element_keys = {
-                    let guard = state_arc.lock().await;
-                    guard.output_slots.get(edge.from_slot)
-                        .map(|s| s.element_keys.clone())
-                        .unwrap_or_default()
-                };
-
-                let all_elems = ctx.value_store.get_all_elements_erased(src_slot_key, &element_keys);
-                for (ek, v, h) in all_elems {
-                    merged_elements.insert(ek, (v, h));
-                    let old = prev_hashes.get(&ek).copied();
-                    if old.is_none() || old != Some(h) {
-                        if !all_dirty_keys.contains(&ek) {
-                            all_dirty_keys.push(ek);
+                if src_sg != key.subgraph && !src_slot_is_collection {
+                    // Cross-scope single→collection gather: a node in a child subgraph
+                    // produces single outputs per instance. Enumerate all child instances
+                    // and gather each as an element, keyed by instance element key.
+                    let child_instances = ctx.workstate.instance_keys(src_sg, src_instance).await;
+                    for &child_inst in &child_instances {
+                        let inst_node_key = NodeInstanceKey::new(src_sg, child_inst, edge.from_node);
+                        let inst_slot_key = inst_node_key.slot_key(edge.from_slot);
+                        if let Some((v, h)) = ctx.value_store.get_erased(inst_slot_key) {
+                            let ek = child_inst.0;
+                            merged_elements.insert(ek, (v, h));
+                            if !all_dirty_keys.contains(&ek) {
+                                all_dirty_keys.push(ek);
+                            }
                         }
                     }
-                }
-                // Track removed keys per source.
-                for &old_key in prev_hashes.keys() {
-                    if !element_keys.contains(&old_key) {
-                        if !all_removed_keys.contains(&old_key) {
-                            all_removed_keys.push(old_key);
+                } else {
+                    // Normal collection→collection gather.
+                    let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
+                    let src_slot_key = src_key.slot_key(edge.from_slot);
+
+                    let prev_hashes = ctx.workstate
+                        .get_collection_hashes(src_key, edge.from_slot, &ctx.topology).await;
+
+                    let state_arc = ctx.workstate.get_or_create(src_key, &ctx.topology);
+                    let element_keys = {
+                        let guard = state_arc.lock().await;
+                        guard.output_slots.get(edge.from_slot)
+                            .map(|s| s.element_keys.clone())
+                            .unwrap_or_default()
+                    };
+
+                    let all_elems = ctx.value_store.get_all_elements_erased(src_slot_key, &element_keys);
+                    for (ek, v, h) in all_elems {
+                        merged_elements.insert(ek, (v, h));
+                        let old = prev_hashes.get(&ek).copied();
+                        if old.is_none() || old != Some(h) {
+                            if !all_dirty_keys.contains(&ek) {
+                                all_dirty_keys.push(ek);
+                            }
+                        }
+                    }
+                    for &old_key in prev_hashes.keys() {
+                        if !element_keys.contains(&old_key) {
+                            if !all_removed_keys.contains(&old_key) {
+                                all_removed_keys.push(old_key);
+                            }
                         }
                     }
                 }
@@ -492,17 +545,34 @@ async fn build_context(
                 removed_keys: all_removed_keys,
             });
         } else {
-            // Single value: must have exactly one incoming edge.
+            // Single value.
             let edge_id = edge_ids[0];
             let edge = ctx.topology.edge(edge_id);
-            let src_instance = ctx.workstate.resolve_source_instance(edge, key.instance, &ctx.topology);
             let src_sg = ctx.topology.node(edge.from_node).subgraph;
-            let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
-            let src_slot_key = src_key.slot_key(edge.from_slot);
+            let src_node_desc = ctx.topology.node(edge.from_node);
+            let src_slot_is_collection = src_node_desc.output_slots[edge.from_slot].is_collection;
 
-            match ctx.value_store.get_erased(src_slot_key) {
-                Some((v, _)) => inputs.push(ContextInput::Single(v)),
-                None => inputs.push(ContextInput::Absent),
+            if src_slot_is_collection && src_sg != key.subgraph {
+                // SubgraphBoundary: the source is a collection in the parent scope.
+                // Resolve the parent instance, then read the specific element
+                // keyed by this child instance's element key.
+                let element_key = key.instance.0;
+                let src_instance = ctx.workstate.resolve_source_instance(edge, key.instance, &ctx.topology);
+                let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
+                let src_slot_key = src_key.slot_key(edge.from_slot);
+                let elem_key = ElementKey::new(src_slot_key, element_key);
+                match ctx.value_store.get_element_erased(elem_key) {
+                    Some((v, _)) => inputs.push(ContextInput::Single(v)),
+                    None => inputs.push(ContextInput::Absent),
+                }
+            } else {
+                let src_instance = ctx.workstate.resolve_source_instance(edge, key.instance, &ctx.topology);
+                let src_key = NodeInstanceKey::new(src_sg, src_instance, edge.from_node);
+                let src_slot_key = src_key.slot_key(edge.from_slot);
+                match ctx.value_store.get_erased(src_slot_key) {
+                    Some((v, _)) => inputs.push(ContextInput::Single(v)),
+                    None => inputs.push(ContextInput::Absent),
+                }
             }
         }
     }
@@ -584,15 +654,16 @@ async fn commit_outputs(
                 }
 
                 new_keys.sort_unstable();
+                // Step 1: Update element keys only (NOT hashes — propagate_dirty
+                // needs the OLD hashes to compute the diff).
                 ctx.workstate.set_collection_keys(
-                    key, slot_idx, new_keys, new_hashes, &ctx.topology
+                    key, slot_idx, new_keys, &ctx.topology
                 ).await;
 
                 let agg_hash: ValueHash = {
                     let mut h: ValueHash = 0;
-                    for (_, hash) in ctx.workstate
-                        .get_collection_hashes(key, slot_idx, &ctx.topology).await {
-                        h ^= hash; // XOR for order-independent aggregate hash
+                    for (_, hash) in &new_hashes {
+                        h ^= hash;
                     }
                     h
                 };
@@ -603,6 +674,11 @@ async fn commit_outputs(
                     changed_any = true;
                     propagate_dirty(key, slot_idx, ctx).await;
                 }
+
+                // Step 2: Update element hashes AFTER propagate_dirty completed.
+                ctx.workstate.update_collection_hashes(
+                    key, slot_idx, new_hashes, &ctx.topology
+                ).await;
             }
             ContextOutput::CollectionMutations { added, removed, clear } => {
                 // Incremental mutations: apply add/set/remove operations.
@@ -616,14 +692,15 @@ async fn commit_outputs(
                         ctx.value_store.remove_element(ElementKey::new(slot_key, old_ek));
                     }
                     ctx.workstate.set_collection_keys(
-                        key, slot_idx, vec![], HashMap::new(), &ctx.topology
+                        key, slot_idx, vec![], &ctx.topology
                     ).await;
                     any_element_changed = true;
                 }
 
-                // Get current state (after potential clear).
-                let mut current_hashes = ctx.workstate
+                // Get current element keys and start building new state.
+                let prev_hashes = ctx.workstate
                     .get_collection_hashes(key, slot_idx, &ctx.topology).await;
+                let mut current_hashes: HashMap<u64, ValueHash> = prev_hashes;
                 let mut current_keys: Vec<u64> = current_hashes.keys().copied().collect();
 
                 // Apply removals.
@@ -658,17 +735,17 @@ async fn commit_outputs(
                     }
                 }
 
-                // Update workstate.
+                // Step 1: Update element keys only.
                 current_keys.sort_unstable();
                 ctx.workstate.set_collection_keys(
-                    key, slot_idx, current_keys, current_hashes, &ctx.topology
+                    key, slot_idx, current_keys.clone(), &ctx.topology
                 ).await;
 
-                // Compute aggregate hash.
+                // Aggregate hash from new hashes for mark_present.
+                let new_hashes_snapshot = current_hashes.clone();
                 let agg_hash: ValueHash = {
                     let mut h: ValueHash = 0;
-                    for (_, hash) in ctx.workstate
-                        .get_collection_hashes(key, slot_idx, &ctx.topology).await {
+                    for (_, hash) in &current_hashes {
                         h ^= hash;
                     }
                     h
@@ -680,6 +757,11 @@ async fn commit_outputs(
                     changed_any = true;
                     propagate_dirty(key, slot_idx, ctx).await;
                 }
+
+                // Step 2: Update element hashes AFTER propagate_dirty.
+                ctx.workstate.update_collection_hashes(
+                    key, slot_idx, new_hashes_snapshot, &ctx.topology
+                ).await;
             }
             ContextOutput::Absent => {
                 // Transform did not write to this slot; leave state unchanged.

@@ -131,7 +131,7 @@ async fn main() {
 
     // 5. Open the semantic session (auto-detects warm/cold start)
     let fs = Arc::new(RealFileAccess);
-    let storage_arc: Arc<dyn nova_incremental_neo::Storage> = Arc::clone(&storage) as _;
+    let storage_arc: Arc<dyn nova_incremental::Storage> = Arc::clone(&storage) as _;
     let fs_arc: Arc<dyn nova_analyze::semantic::file_access::FileAccess> = Arc::clone(&fs) as _;
 
     let session = SemanticSession::open(storage_arc, fs_arc).await.unwrap_or_else(|e| {

@@ -1,16 +1,13 @@
-//! Public `Transform` trait + `TransformContext` + supporting types.
+//! Public [`Transform`] trait, [`TransformContext`], and supporting types.
 //!
-//! ## Design: One Public Trait, Zero Internal Leakage
+//! ## What external crates see
+//! - [`Transform`] — the trait to implement.
+//! - [`TransformContext`] — typed I/O passed to [`Transform::apply`].
+//! - [`TransformRegisterContext`] — slot-declaration DSL (sealed, not externally implementable).
+//! - [`TransformError`], [`IncrementalValue`], [`KeyExtractor`],
+//!   [`CollectionInput`], [`CollectionOutputBuilder`].
 //!
-//! External crates only see:
-//! - `Transform` – the trait to implement
-//! - `TransformContext` – typed I/O injected per `apply()` call
-//! - `TransformRegisterContext` – slot declaration DSL (sealed, not implementable externally)
-//! - `TransformError`, `IncrementalValue`, `KeyExtractor`,
-//!   `CollectionInput`, `CollectionChange`
-//!
-//! All internal execution machinery (`SlotSpec`, `SlotLayout`, `Value`, etc.)
-//! stays `pub(crate)` in this module.
+//! All internal machinery is `pub(crate)` only.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -25,6 +22,7 @@ use serde::{Serialize, de::DeserializeOwned};
 pub trait IncrementalValue:
     Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static
 {}
+
 impl<T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static>
     IncrementalValue for T {}
 
@@ -34,7 +32,7 @@ impl<T: Any + Send + Sync + Clone + Serialize + DeserializeOwned + 'static>
 
 /// Derives a stable `u64` identity key from a collection element.
 ///
-/// Implement on a zero-sized marker struct.  Key must be:
+/// Implement on a zero-sized marker struct. Keys must be:
 /// - **Stable**: same logical element → same key across sessions.
 /// - **Unique** within a collection.
 /// - **Pure**: no side effects.
@@ -72,170 +70,170 @@ impl std::fmt::Display for TransformError {
 impl std::error::Error for TransformError {}
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// SlotInfo (pub(crate)) — type identity for one slot
+// CollectionInput — typed facade for reading collection inputs
 // ---------------------------------------------------------------------------
 
-/// Minimal erased type info for one slot: identity + collection flag only.
-/// Stored in [`SlotLayout`] and used at runtime for type checking.
+use std::collections::HashMap;
+
+/// Owned typed facade for a gathered collection input slot.
+///
+/// Provides key-based access to elements and exposes incremental diff information.
+/// The transform can query elements by key, iterate over all elements, or
+/// iterate only over added/changed elements.
+pub struct CollectionInput<T> {
+    /// All current elements, keyed by their extracted key.
+    elements_by_key: HashMap<u64, T>,
+    /// All current keys in sorted order.
+    current_keys: Vec<u64>,
+    /// Keys of elements that were added since last evaluation.
+    added_keys: Vec<u64>,
+    /// Keys of elements whose value changed since last evaluation.
+    changed_keys: Vec<u64>,
+    /// Keys of elements that were removed since last evaluation.
+    removed_keys: Vec<u64>,
+}
+
+impl<T> CollectionInput<T> {
+    /// Create a new CollectionInput from the given data.
+    pub(crate) fn new(
+        elements_by_key: HashMap<u64, T>,
+        current_keys: Vec<u64>,
+        added_keys: Vec<u64>,
+        changed_keys: Vec<u64>,
+        removed_keys: Vec<u64>,
+    ) -> Self {
+        Self { elements_by_key, current_keys, added_keys, changed_keys, removed_keys }
+    }
+
+    /// Get a reference to an element by key.
+    pub fn get(&self, key: u64) -> Option<&T> {
+        self.elements_by_key.get(&key)
+    }
+
+    /// Check if an element with the given key exists.
+    pub fn contains(&self, key: u64) -> bool {
+        self.elements_by_key.contains_key(&key)
+    }
+
+    /// Get the number of elements in the collection.
+    pub fn len(&self) -> usize {
+        self.elements_by_key.len()
+    }
+
+    /// Check if the collection is empty.
+    pub fn is_empty(&self) -> bool {
+        self.elements_by_key.is_empty()
+    }
+
+    /// Get all current keys in the collection (sorted).
+    pub fn keys(&self) -> &[u64] {
+        &self.current_keys
+    }
+
+    /// Iterate over all (key, element) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &T)> {
+        self.current_keys.iter().filter_map(move |&k| {
+            self.elements_by_key.get(&k).map(|v| (k, v))
+        })
+    }
+
+    /// Iterate over all elements (without keys).
+    pub fn values(&self) -> impl Iterator<Item = &T> {
+        self.current_keys.iter().filter_map(move |&k| self.elements_by_key.get(&k))
+    }
+
+    /// Get keys of elements that were added since last evaluation.
+    pub fn added_keys(&self) -> &[u64] {
+        &self.added_keys
+    }
+
+    /// Get keys of elements whose value changed since last evaluation.
+    pub fn changed_keys(&self) -> &[u64] {
+        &self.changed_keys
+    }
+
+    /// Get keys of elements that were removed since last evaluation.
+    pub fn removed_keys(&self) -> &[u64] {
+        &self.removed_keys
+    }
+
+    /// Iterate over elements that were added since last evaluation.
+    pub fn added(&self) -> impl Iterator<Item = &T> {
+        self.added_keys.iter().filter_map(move |&k| self.elements_by_key.get(&k))
+    }
+
+    /// Iterate over elements that changed since last evaluation.
+    pub fn changed(&self) -> impl Iterator<Item = &T> {
+        self.changed_keys.iter().filter_map(move |&k| self.elements_by_key.get(&k))
+    }
+
+    /// Check if this collection has any changes (added, changed, or removed).
+    pub fn has_changes(&self) -> bool {
+        !self.added_keys.is_empty() || !self.changed_keys.is_empty() || !self.removed_keys.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CollectionOutputBuilder — typed facade for mutating collection outputs
+// ---------------------------------------------------------------------------
+
+/// Builder for incrementally mutating a collection output slot.
+///
+/// Allows the transform to add, set, or remove individual elements without
+/// rebuilding the entire collection. The engine tracks mutations and computes
+/// the actual diff during commit.
+pub struct CollectionOutputBuilder<'a, T: IncrementalValue> {
+    slot: usize,
+    ctx: &'a mut TransformContext,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<'a, T: IncrementalValue> CollectionOutputBuilder<'a, T> {
+    pub(crate) fn new(slot: usize, ctx: &'a mut TransformContext) -> Self {
+        Self { slot, ctx, _phantom: std::marker::PhantomData }
+    }
+
+    /// Add a new element to the collection.
+    /// The key is extracted via the registered KeyExtractor.
+    pub fn add(&mut self, element: T) -> Result<(), TransformError> {
+        self.ctx.add_collection_element::<T>(self.slot, element)
+    }
+
+    /// Set or replace an element with a specific key.
+    /// Use this when you know the key and want to ensure a specific value.
+    pub fn set(&mut self, key: u64, element: T) -> Result<(), TransformError> {
+        self.ctx.set_collection_element::<T>(self.slot, key, element)
+    }
+
+    /// Remove an element by key.
+    /// If the element doesn't exist, this is a no-op.
+    pub fn remove(&mut self, key: u64) -> Result<(), TransformError> {
+        self.ctx.remove_collection_element(self.slot, key)
+    }
+
+    /// Clear all elements from the collection.
+    pub fn clear(&mut self) -> Result<(), TransformError> {
+        self.ctx.clear_collection(self.slot)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SlotKind — internal slot descriptor
+// ---------------------------------------------------------------------------
+
+/// Function type for deserializing bytes into an ErasedValue.
+pub(crate) type DeserializeFn = fn(&[u8]) -> Result<ErasedValue, String>;
+
+/// Minimal type descriptor for one slot. `pub(crate)` only.
 #[derive(Clone, Debug)]
-pub(crate) struct SlotInfo {
-    pub(crate) type_id:   TypeId,
+pub(crate) struct SlotKind {
+    pub(crate) type_id: TypeId,
     pub(crate) type_name: &'static str,
-    pub(crate) is_col:    bool,
-}
-
-// ---------------------------------------------------------------------------
-// SlotSpec (pub(crate), build-time only) — SlotInfo + dispatch fn ptrs
-// ---------------------------------------------------------------------------
-
-/// Full slot descriptor used only during [`crate::engine::EngineBuilder::build()`].
-/// The dispatch fn pointers are extracted into a [`DispatchTable`]; then only
-/// [`SlotInfo`] survives in [`SlotLayout`].
-pub(crate) struct SlotSpec {
-    pub(crate) info:             SlotInfo,
-    /// Register T into the registry builder.
-    pub(crate) register:         fn(&mut crate::value::ValueTypeRegistryBuilder),
-    /// Downcast a Value → Box<dyn Any> (for feeding into TransformContext).
-    pub(crate) downcast:         fn(&crate::value::Value, &crate::value::ValueTypeRegistry)
-                                    -> Result<Box<dyn Any + Send + Sync>, String>,
-    /// Extract stable key from Value (collection output slots only).
-    pub(crate) extract_key:      Option<fn(&crate::value::Value, &crate::value::ValueTypeRegistry) -> u64>,
-    /// Reconstruct a typed ErasedCollection from raw graph elements (collection input slots only).
-    pub(crate) build_collection: Option<
-        fn(Vec<crate::value::Value>, Vec<u64>, &crate::value::ValueTypeRegistry) -> ErasedCollection
-    >,
-}
-
-// ---------------------------------------------------------------------------
-// DispatchEntry + DispatchTable (pub(crate), runtime)
-// ---------------------------------------------------------------------------
-
-/// Erased dispatch functions for one value type.
-/// Built from [`SlotSpec`] fn pointers during the build phase; stored in
-/// [`DispatchTable`] keyed by `TypeId`.
-#[derive(Clone)]
-pub(crate) struct DispatchEntry {
-    pub(crate) downcast:         fn(&crate::value::Value, &crate::value::ValueTypeRegistry)
-                                    -> Result<Box<dyn Any + Send + Sync>, String>,
-    pub(crate) extract_key:      Option<fn(&crate::value::Value, &crate::value::ValueTypeRegistry) -> u64>,
-    pub(crate) build_collection: Option<
-        fn(Vec<crate::value::Value>, Vec<u64>, &crate::value::ValueTypeRegistry) -> ErasedCollection
-    >,
-}
-
-/// Per-transform dispatch table, indexed by slot index (inputs then outputs).
-/// Stored alongside the transform's [`SlotLayout`] in `Topology`.
-#[derive(Clone, Default)]
-pub(crate) struct DispatchTable {
-    pub(crate) inputs:  Vec<DispatchEntry>,
-    pub(crate) outputs: Vec<DispatchEntry>,
-}
-
-// ---------------------------------------------------------------------------
-// SlotSpec constructors + helpers
-// ---------------------------------------------------------------------------
-
-fn slot_register<T: IncrementalValue>(b: &mut crate::value::ValueTypeRegistryBuilder) {
-    let _ = b.register::<T>();
-}
-
-fn slot_downcast<T: IncrementalValue>(
-    v: &crate::value::Value,
-    reg: &crate::value::ValueTypeRegistry,
-) -> Result<Box<dyn Any + Send + Sync>, String> {
-    reg.downcast_value::<T>(v)
-        .map(|t| Box::new(t) as Box<dyn Any + Send + Sync>)
-        .map_err(|e| e.message)
-}
-
-fn slot_extract_key<T: IncrementalValue, K: KeyExtractor<T>>(
-    v: &crate::value::Value,
-    reg: &crate::value::ValueTypeRegistry,
-) -> u64 {
-    let t: T = reg.downcast_value::<T>(v).expect("KeyExtractor: type mismatch");
-    K::extract_key(&t)
-}
-
-fn slot_build_collection<T: IncrementalValue>(
-    values:     Vec<crate::value::Value>,
-    dirty_keys: Vec<u64>,
-    reg:        &crate::value::ValueTypeRegistry,
-) -> ErasedCollection {
-    let dirty_set: std::collections::HashSet<u64> = dirty_keys.into_iter().collect();
-    let mut elements: Vec<T> = vec![];
-    let mut added:    Vec<T> = vec![];
-
-    for v in &values {
-        if let Ok(t) = reg.downcast_value::<T>(v) {
-            let h = crate::value::hash_value(v, reg);
-            if dirty_set.contains(&h) {
-                added.push(t.clone());
-            }
-            elements.push(t);
-        }
-    }
-
-    let diff = CollectionChange { added, changed: vec![], removed: vec![] };
-    ErasedCollection::new(elements, diff)
-}
-
-impl SlotSpec {
-    pub(crate) fn single<T: IncrementalValue>() -> Self {
-        Self {
-            info:             SlotInfo {
-                type_id:   TypeId::of::<T>(),
-                type_name: std::any::type_name::<T>(),
-                is_col:    false,
-            },
-            register:         slot_register::<T>,
-            downcast:         slot_downcast::<T>,
-            extract_key:      None,
-            build_collection: None,
-        }
-    }
-
-    pub(crate) fn collection<T: IncrementalValue, K: KeyExtractor<T>>() -> Self {
-        Self {
-            info:             SlotInfo {
-                type_id:   TypeId::of::<T>(),
-                type_name: std::any::type_name::<T>(),
-                is_col:    true,
-            },
-            register:         slot_register::<T>,
-            downcast:         slot_downcast::<T>,
-            extract_key:      Some(slot_extract_key::<T, K>),
-            build_collection: Some(slot_build_collection::<T>),
-        }
-    }
-
-    /// Extract the [`DispatchEntry`] from this spec (used during build phase).
-    pub(crate) fn dispatch_entry(&self) -> DispatchEntry {
-        DispatchEntry {
-            downcast:         self.downcast,
-            extract_key:      self.extract_key,
-            build_collection: self.build_collection,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SlotLayout (pub(crate)) — internal replacement for the old public TransformSchema
-// ---------------------------------------------------------------------------
-
-/// Internal slot description for a transform.  Not part of the public API.
-/// Produced by [`TransformRegistrar`] during the build phase and stored in
-/// `Topology`.  Contains only type identity — no fn pointers.
-#[derive(Clone, Debug)]
-pub(crate) struct SlotLayout {
-    pub(crate) inputs:  Vec<SlotInfo>,
-    pub(crate) outputs: Vec<SlotInfo>,
-}
-
-impl SlotLayout {
-    pub(crate) fn new(inputs: Vec<SlotInfo>, outputs: Vec<SlotInfo>) -> Self {
-        Self { inputs, outputs }
-    }
+    pub(crate) is_collection: bool,
+    /// For collection output slots: extracts a stable `u64` key from a boxed value.
+    pub(crate) extract_key: Option<fn(&dyn Any) -> u64>,
+    /// Deserialize bytes into ErasedValue for this slot's type.
+    pub(crate) deserialize: DeserializeFn,
 }
 
 // ---------------------------------------------------------------------------
@@ -246,10 +244,7 @@ mod sealed { pub trait Sealed {} }
 
 /// DSL for declaring a transform's input/output slot layout.
 ///
-/// Passed to [`Transform::register`] once at build time.  Users call the
-/// fluent methods to declare slots; errors are accumulated and surfaced later
-/// by [`EngineBuilder::build`].
-///
+/// Passed to [`Transform::register`] once at build time.
 /// This trait is **sealed** — it cannot be implemented outside this crate.
 pub trait TransformRegisterContext: sealed::Sealed {
     /// Declare a single-value input slot of type `T`.
@@ -262,319 +257,882 @@ pub trait TransformRegisterContext: sealed::Sealed {
     fn output_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self);
 }
 
-/// Build-phase accumulator implementing [`TransformRegisterContext`].
-/// Holds the full [`SlotSpec`] (including fn pointers) during registration;
-/// produces [`SlotLayout`] + [`DispatchTable`] via [`finish`](Self::finish).
-pub(crate) struct TransformRegistrar {
-    inputs:  Vec<SlotSpec>,
-    outputs: Vec<SlotSpec>,
+/// Internal accumulator implementing [`TransformRegisterContext`].
+pub(crate) struct SlotRegistrar {
+    pub(crate) inputs: Vec<SlotKind>,
+    pub(crate) outputs: Vec<SlotKind>,
 }
 
-impl TransformRegistrar {
-    pub(crate) fn new() -> Self { Self { inputs: vec![], outputs: vec![] } }
-
-    /// Register all slot types into the builder and produce the frozen
-    /// [`SlotLayout`] + [`DispatchTable`] for runtime use.
-    pub(crate) fn finish_into(
-        self,
-        builder: &mut crate::value::ValueTypeRegistryBuilder,
-    ) -> (SlotLayout, DispatchTable) {
-        let mut layout_inputs  = Vec::with_capacity(self.inputs.len());
-        let mut layout_outputs = Vec::with_capacity(self.outputs.len());
-        let mut disp_inputs    = Vec::with_capacity(self.inputs.len());
-        let mut disp_outputs   = Vec::with_capacity(self.outputs.len());
-
-        for spec in self.inputs {
-            (spec.register)(builder);
-            disp_inputs.push(spec.dispatch_entry());
-            layout_inputs.push(spec.info);
-        }
-        for spec in self.outputs {
-            (spec.register)(builder);
-            disp_outputs.push(spec.dispatch_entry());
-            layout_outputs.push(spec.info);
-        }
-
-        (
-            SlotLayout::new(layout_inputs, layout_outputs),
-            DispatchTable { inputs: disp_inputs, outputs: disp_outputs },
-        )
-    }
-
-    /// Convenience: produce a [`SlotLayout`] without registering types.
-    /// Used in tests that build a `TransformContext` directly.
-    pub(crate) fn finish(self) -> SlotLayout {
-        SlotLayout::new(
-            self.inputs.into_iter().map(|s| s.info).collect(),
-            self.outputs.into_iter().map(|s| s.info).collect(),
-        )
+impl SlotRegistrar {
+    pub(crate) fn new() -> Self {
+        Self { inputs: vec![], outputs: vec![] }
     }
 }
 
-impl sealed::Sealed for TransformRegistrar {}
+impl sealed::Sealed for SlotRegistrar {}
 
-impl TransformRegisterContext for TransformRegistrar {
+impl TransformRegisterContext for SlotRegistrar {
     fn input<T: IncrementalValue>(&mut self) {
-        self.inputs.push(SlotSpec::single::<T>());
+        self.inputs.push(SlotKind {
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
+            is_collection: false,
+            extract_key: None,
+            deserialize: make_deserialize_fn::<T>(),
+        });
     }
     fn input_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self) {
-        self.inputs.push(SlotSpec::collection::<T, K>());
+        self.inputs.push(SlotKind {
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
+            is_collection: true,
+            extract_key: None,
+            deserialize: make_deserialize_fn::<T>(),
+        });
     }
     fn output<T: IncrementalValue>(&mut self) {
-        self.outputs.push(SlotSpec::single::<T>());
+        self.outputs.push(SlotKind {
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
+            is_collection: false,
+            extract_key: None,
+            deserialize: make_deserialize_fn::<T>(),
+        });
     }
     fn output_collection<T: IncrementalValue, K: KeyExtractor<T>>(&mut self) {
-        self.outputs.push(SlotSpec::collection::<T, K>());
+        self.outputs.push(SlotKind {
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
+            is_collection: true,
+            extract_key: Some(|any: &dyn Any| -> u64 {
+                let t = any.downcast_ref::<T>()
+                    .expect("KeyExtractor: type mismatch at runtime");
+                K::extract_key(t)
+            }),
+            deserialize: make_deserialize_fn::<T>(),
+        });
     }
 }
 
 // ---------------------------------------------------------------------------
-// CollectionChange / CollectionInput (public) — unchanged
+// SerializableValue trait — object-safe serialization
 // ---------------------------------------------------------------------------
 
-/// Incremental diff for a collection input slot.
-#[derive(Debug, Clone)]
-pub struct CollectionChange<T> {
-    pub added:   Vec<T>,
-    pub changed: Vec<(T, T)>,
-    pub removed: Vec<u64>,
+/// Object-safe trait for values that can be serialized to bytes.
+/// All `IncrementalValue` types automatically implement this via blanket impl.
+pub trait SerializableValue: Any + Send + Sync {
+    /// Downcast to `dyn Any` for type checking.
+    fn as_any(&self) -> &dyn Any;
+    /// Serialize this value to msgpack bytes.
+    fn to_bytes(&self) -> Result<Vec<u8>, String>;
+    /// Get the type name for this value.
+    fn type_name(&self) -> &'static str;
 }
 
-impl<T> Default for CollectionChange<T> {
-    fn default() -> Self { Self { added: vec![], changed: vec![], removed: vec![] } }
-}
-
-/// Typed view of a gathered collection input.
-pub struct CollectionInput<'a, T> {
-    pub elements: &'a [T],
-    pub diff:     &'a CollectionChange<T>,
-}
-
-pub(crate) struct TypedCollection<T: 'static> {
-    pub elements: Vec<T>,
-    pub diff:     CollectionChange<T>,
-}
-
-pub(crate) struct ErasedCollection {
-    inner:   Box<dyn Any + Send + Sync>,
-    type_id: TypeId,
-}
-
-impl ErasedCollection {
-    pub(crate) fn new<T: IncrementalValue>(elements: Vec<T>, diff: CollectionChange<T>) -> Self {
-        let type_id = TypeId::of::<T>();
-        Self { inner: Box::new(TypedCollection { elements, diff }), type_id }
+impl<T: IncrementalValue> SerializableValue for T {
+    fn as_any(&self) -> &dyn Any { self }
+    fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        rmp_serde::to_vec(self).map_err(|e| e.to_string())
     }
+    fn type_name(&self) -> &'static str { std::any::type_name::<T>() }
+}
 
-    pub(crate) fn type_id(&self) -> TypeId { self.type_id }
+// ---------------------------------------------------------------------------
+// Erased value type alias
+// ---------------------------------------------------------------------------
 
-    pub(crate) fn get<T: IncrementalValue>(&self) -> Option<&TypedCollection<T>> {
-        self.inner.downcast_ref::<TypedCollection<T>>()
+/// A heap-allocated, type-erased value that can flow through the graph.
+/// Uses `SerializableValue` trait to enable serialization via `to_bytes()`.
+pub(crate) type ErasedValue = Arc<dyn SerializableValue>;
+
+// ---------------------------------------------------------------------------
+// Serialization helpers
+// ---------------------------------------------------------------------------
+
+/// Serialize an erased value to msgpack bytes.
+pub(crate) fn serialize_erased<T: IncrementalValue>(value: &T) -> Result<Vec<u8>, String> {
+    rmp_serde::to_vec(value).map_err(|e| e.to_string())
+}
+
+/// Deserialize msgpack bytes into a concrete `T`, returning it as an [`ErasedValue`].
+pub(crate) fn deserialize_erased<T: IncrementalValue>(bytes: &[u8]) -> Result<ErasedValue, String> {
+    let v: T = rmp_serde::from_slice(bytes).map_err(|e| e.to_string())?;
+    Ok(Arc::new(v) as ErasedValue)
+}
+
+/// Compute a simple 64-bit hash over msgpack bytes. Used as `ValueHash`.
+pub(crate) fn hash_bytes(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h);
+    h.finish()
+}
+
+/// Helper to create a deserialize function for a specific type.
+pub(crate) fn make_deserialize_fn<T: IncrementalValue>() -> DeserializeFn {
+    |bytes| {
+        let v: T = rmp_serde::from_slice(bytes).map_err(|e| e.to_string())?;
+        Ok(Arc::new(v) as ErasedValue)
     }
 }
 
 // ---------------------------------------------------------------------------
-// ContextOutput (pub(crate))
+// ContextInput / ContextOutput — internal representations
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+/// How a value appears on one input slot of a [`TransformContext`].
+pub(crate) enum ContextInput {
+    Single(ErasedValue),
+    Collection {
+        elements: Vec<ErasedValue>,
+        keys: Vec<u64>,
+        /// element keys that are new (added or changed) in this evaluation.
+        dirty_keys: Vec<u64>,
+        /// element keys that were removed since the last evaluation.
+        removed_keys: Vec<u64>,
+    },
+    /// Required but not yet available.
+    Absent,
+}
+
+/// How a value appears on one output slot after [`Transform::apply`].
 pub(crate) enum ContextOutput {
-    Single(crate::value::Value, crate::value::ValueHash),
-    Collection(Vec<(u64, crate::value::Value, crate::value::ValueHash)>),
+    Single(ErasedValue),
+    Collection(Vec<(u64, ErasedValue)>),
+    /// Incremental mutations for collection output.
+    CollectionMutations {
+        /// Elements to add/set (key, value).
+        added: Vec<(u64, ErasedValue)>,
+        /// Keys to remove.
+        removed: Vec<u64>,
+        /// Whether to clear all existing elements first.
+        clear: bool,
+    },
+    /// Transform did not write to this slot.
+    Absent,
 }
 
 // ---------------------------------------------------------------------------
-// TransformContext (public)
+// TransformContext
 // ---------------------------------------------------------------------------
 
 /// Per-invocation typed I/O context injected into [`Transform::apply`].
+///
+/// Use [`TransformContext::input`] / [`TransformContext::input_collection`] to
+/// read inputs, and [`TransformContext::output`] /
+/// [`TransformContext::output_collection`] to write results.
 pub struct TransformContext {
-    pub(crate) single_inputs:      Vec<Option<Box<dyn Any + Send + Sync>>>,
-    pub(crate) collection_inputs:  Vec<Option<ErasedCollection>>,
-    pub(crate) slot_is_collection: Vec<bool>,
-    pub(crate) outputs:            Vec<Option<ContextOutput>>,
-    pub(crate) layout:             Arc<SlotLayout>,
-    pub(crate) dispatch:           Arc<DispatchTable>,
-    pub(crate) registry:           Arc<crate::value::ValueTypeRegistry>,
+    pub(crate) inputs: Vec<ContextInput>,
+    pub(crate) outputs: Vec<ContextOutput>,
+    pub(crate) slot_kinds_in: Vec<SlotKind>,
+    pub(crate) slot_kinds_out: Vec<SlotKind>,
 }
 
 impl TransformContext {
     pub(crate) fn new(
-        layout:   Arc<SlotLayout>,
-        dispatch: Arc<DispatchTable>,
-        registry: Arc<crate::value::ValueTypeRegistry>,
+        inputs: Vec<ContextInput>,
+        slot_kinds_in: Vec<SlotKind>,
+        slot_kinds_out: Vec<SlotKind>,
     ) -> Self {
-        let n_in  = layout.inputs.len();
-        let n_out = layout.outputs.len();
-        let slot_is_collection = layout.inputs.iter().map(|s| s.is_col).collect();
+        let n_out = slot_kinds_out.len();
         Self {
-            single_inputs:      (0..n_in).map(|_| None).collect(),
-            collection_inputs:  (0..n_in).map(|_| None).collect(),
-            slot_is_collection,
-            outputs:            (0..n_out).map(|_| None).collect(),
-            layout,
-            dispatch,
-            registry,
+            inputs,
+            outputs: (0..n_out).map(|_| ContextOutput::Absent).collect(),
+            slot_kinds_in,
+            slot_kinds_out,
         }
     }
 
     /// Read single-value input slot `slot` as `&T`.
     pub fn input<T: IncrementalValue>(&self, slot: usize) -> Result<&T, TransformError> {
-        let is_col = self.slot_is_collection.get(slot).copied().unwrap_or(false);
-        if is_col {
+        let kind = self.slot_kinds_in.get(slot)
+            .ok_or_else(|| TransformError::new(format!("input slot {slot}: out of range")))?;
+        if kind.is_collection {
             return Err(TransformError::new(format!(
-                "slot {slot}: is a collection — use input_collection()"
+                "input slot {slot}: is a collection — use input_collection()"
             )));
         }
-        self.single_inputs
-            .get(slot)
-            .and_then(|o| o.as_ref())
-            .and_then(|b| b.downcast_ref::<T>())
-            .ok_or_else(|| TransformError::new(format!(
-                "slot {slot}: no value or type mismatch (expected {})",
-                std::any::type_name::<T>()
-            )))
+        if kind.type_id != TypeId::of::<T>() {
+            return Err(TransformError::new(format!(
+                "input slot {slot}: type mismatch (schema: {}, requested: {})",
+                kind.type_name, std::any::type_name::<T>()
+            )));
+        }
+        match self.inputs.get(slot) {
+            Some(ContextInput::Single(v)) => {
+                v.as_any().downcast_ref::<T>()
+                    .ok_or_else(|| TransformError::new(format!("input slot {slot}: downcast failed")))
+            }
+            Some(ContextInput::Absent) | None => {
+                Err(TransformError::new(format!("input slot {slot}: no value available")))
+            }
+            _ => Err(TransformError::new(format!("input slot {slot}: unexpected collection")))
+        }
     }
 
-    /// Read collection input slot `slot` as `CollectionInput<T>`.
+    /// Read collection input slot `slot` as an owned [`CollectionInput<T>`].
+    ///
+    /// Returns a typed facade that provides key-based access to elements
+    /// and exposes incremental diff information (added, changed, removed keys).
     pub fn input_collection<T: IncrementalValue>(
         &self,
         slot: usize,
-    ) -> Result<CollectionInput<'_, T>, TransformError> {
-        let is_col = self.slot_is_collection.get(slot).copied().unwrap_or(false);
-        if !is_col {
+    ) -> Result<CollectionInput<T>, TransformError> {
+        let kind = self.slot_kinds_in.get(slot)
+            .ok_or_else(|| TransformError::new(format!("input slot {slot}: out of range")))?;
+        if !kind.is_collection {
             return Err(TransformError::new(format!(
-                "slot {slot}: is not a collection — use input()"
+                "input slot {slot}: is not a collection — use input()"
             )));
         }
-        let erased = self.collection_inputs
-            .get(slot)
-            .and_then(|o| o.as_ref())
-            .ok_or_else(|| TransformError::new(format!("slot {slot}: no collection data")))?;
-
-        if erased.type_id() != TypeId::of::<T>() {
+        if kind.type_id != TypeId::of::<T>() {
             return Err(TransformError::new(format!(
-                "slot {slot}: type mismatch in collection (expected {})",
-                std::any::type_name::<T>()
+                "input slot {slot}: type mismatch (schema: {}, requested: {})",
+                kind.type_name, std::any::type_name::<T>()
             )));
         }
-        let typed = erased.get::<T>()
-            .ok_or_else(|| TransformError::new(format!("slot {slot}: internal downcast failed")))?;
-
-        Ok(CollectionInput {
-            elements: &typed.elements,
-            diff:     &typed.diff,
-        })
+        match self.inputs.get(slot) {
+            Some(ContextInput::Collection { elements, keys, dirty_keys, removed_keys }) => {
+                // Build a typed HashMap from the erased elements.
+                let mut elements_by_key: HashMap<u64, T> = HashMap::with_capacity(elements.len());
+                for (i, e) in elements.iter().enumerate() {
+                    let typed = e.as_any().downcast_ref::<T>()
+                        .expect("collection element type mismatch")
+                        .clone();
+                    let key = keys.get(i).copied().unwrap_or(0);
+                    elements_by_key.insert(key, typed);
+                }
+                Ok(CollectionInput::new(
+                    elements_by_key,
+                    keys.clone(),
+                    dirty_keys.clone(),
+                    vec![], // changed_keys - would need old values to compute
+                    removed_keys.clone(),
+                ))
+            }
+            Some(ContextInput::Absent) | None => {
+                // Return an empty CollectionInput for absent slots.
+                Ok(CollectionInput::new(
+                    HashMap::new(),
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                ))
+            }
+            _ => Err(TransformError::new(format!("input slot {slot}: unexpected single value")))
+        }
     }
 
-    /// Write single value to output slot `slot`.
+    /// Write a single value to output slot `slot`.
     pub fn output<T: IncrementalValue>(
         &mut self,
         slot: usize,
         value: T,
     ) -> Result<(), TransformError> {
-        if slot >= self.outputs.len() {
-            return Err(TransformError::new(format!("output slot {slot}: out of range")));
-        }
-        let spec = &self.layout.outputs[slot];
-        if spec.is_col {
+        let kind = self.slot_kinds_out.get(slot)
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: out of range")))?;
+        if kind.is_collection {
             return Err(TransformError::new(format!(
                 "output slot {slot}: is collection — use output_collection()"
             )));
         }
-        if spec.type_id != TypeId::of::<T>() {
+        if kind.type_id != TypeId::of::<T>() {
             return Err(TransformError::new(format!(
                 "output slot {slot}: type mismatch (schema: {}, got: {})",
-                spec.type_name, std::any::type_name::<T>()
+                kind.type_name, std::any::type_name::<T>()
             )));
         }
-        let v = self.registry.make_value(value)
-            .map_err(|e| TransformError::new(e.message))?;
-        let h = crate::value::hash_value(&v, &self.registry);
-        self.outputs[slot] = Some(ContextOutput::Single(v, h));
+        self.outputs[slot] = ContextOutput::Single(Arc::new(value));
         Ok(())
     }
 
-    /// Write collection values to output slot `slot`.
+    /// Write a collection to output slot `slot`.
+    ///
+    /// This replaces the entire collection. For incremental updates,
+    /// use [`output_collection_builder`](Self::output_collection_builder) instead.
     pub fn output_collection<T: IncrementalValue>(
         &mut self,
         slot: usize,
         items: Vec<T>,
     ) -> Result<(), TransformError> {
-        if slot >= self.outputs.len() {
-            return Err(TransformError::new(format!("output slot {slot}: out of range")));
-        }
-        let spec = &self.layout.outputs[slot];
-        if !spec.is_col {
+        let kind = self.slot_kinds_out.get(slot)
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: out of range")))?;
+        if !kind.is_collection {
             return Err(TransformError::new(format!(
-                "output slot {slot}: not collection — use output()"
+                "output slot {slot}: not a collection — use output()"
             )));
         }
-        if spec.type_id != TypeId::of::<T>() {
+        if kind.type_id != TypeId::of::<T>() {
             return Err(TransformError::new(format!(
                 "output slot {slot}: type mismatch (schema: {}, got: {})",
-                spec.type_name, std::any::type_name::<T>()
+                kind.type_name, std::any::type_name::<T>()
             )));
         }
-        let extract_key = self.dispatch.outputs.get(slot)
-            .and_then(|d| d.extract_key)
-            .ok_or_else(|| TransformError::new("output slot: missing key extractor"))?;
-        let mut pairs = Vec::with_capacity(items.len());
-        for item in items {
-            let v = self.registry.make_value(item)
-                .map_err(|e| TransformError::new(e.message))?;
-            let h = crate::value::hash_value(&v, &self.registry);
-            let key = extract_key(&v, &self.registry);
-            pairs.push((key, v, h));
+        let extract_key = kind.extract_key
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: missing KeyExtractor")))?;
+        let pairs: Vec<(u64, ErasedValue)> = items.into_iter()
+            .map(|item| {
+                let erased: ErasedValue = Arc::new(item);
+                let key = extract_key(erased.as_ref());
+                (key, erased)
+            })
+            .collect();
+        self.outputs[slot] = ContextOutput::Collection(pairs);
+        Ok(())
+    }
+
+    /// Get a builder for incrementally mutating a collection output slot.
+    ///
+    /// This allows adding, setting, or removing individual elements without
+    /// rebuilding the entire collection. More efficient for large collections
+    /// with small deltas.
+    pub fn output_collection_builder<T: IncrementalValue>(
+        &mut self,
+        slot: usize,
+    ) -> Result<CollectionOutputBuilder<'_, T>, TransformError> {
+        let kind = self.slot_kinds_out.get(slot)
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: out of range")))?;
+        if !kind.is_collection {
+            return Err(TransformError::new(format!(
+                "output slot {slot}: not a collection — use output()"
+            )));
         }
-        self.outputs[slot] = Some(ContextOutput::Collection(pairs));
+        if kind.type_id != TypeId::of::<T>() {
+            return Err(TransformError::new(format!(
+                "output slot {slot}: type mismatch (schema: {}, requested: {})",
+                kind.type_name, std::any::type_name::<T>()
+            )));
+        }
+        Ok(CollectionOutputBuilder::new(slot, self))
+    }
+
+    // -----------------------------------------------------------------------
+    // Internal methods for CollectionOutputBuilder
+    // -----------------------------------------------------------------------
+
+    /// Add an element to a collection output slot (called by CollectionOutputBuilder).
+    pub(crate) fn add_collection_element<T: IncrementalValue>(
+        &mut self,
+        slot: usize,
+        element: T,
+    ) -> Result<(), TransformError> {
+        let kind = self.slot_kinds_out.get(slot)
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: out of range")))?;
+        let extract_key = kind.extract_key
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: missing KeyExtractor")))?;
+        let erased: ErasedValue = Arc::new(element);
+        let key = extract_key(erased.as_ref());
+        
+        // Initialize or update the CollectionMutations variant.
+        match &mut self.outputs[slot] {
+            ContextOutput::Absent => {
+                self.outputs[slot] = ContextOutput::CollectionMutations {
+                    added: vec![(key, erased)],
+                    removed: vec![],
+                    clear: false,
+                };
+            }
+            ContextOutput::CollectionMutations { added, .. } => {
+                added.push((key, erased));
+            }
+            _ => {
+                return Err(TransformError::new(format!(
+                    "output slot {slot}: already written as full collection"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Set an element with a specific key in a collection output slot.
+    pub(crate) fn set_collection_element<T: IncrementalValue>(
+        &mut self,
+        slot: usize,
+        key: u64,
+        element: T,
+    ) -> Result<(), TransformError> {
+        let kind = self.slot_kinds_out.get(slot)
+            .ok_or_else(|| TransformError::new(format!("output slot {slot}: out of range")))?;
+        if kind.type_id != TypeId::of::<T>() {
+            return Err(TransformError::new(format!(
+                "output slot {slot}: type mismatch"
+            )));
+        }
+        let erased: ErasedValue = Arc::new(element);
+        
+        match &mut self.outputs[slot] {
+            ContextOutput::Absent => {
+                self.outputs[slot] = ContextOutput::CollectionMutations {
+                    added: vec![(key, erased)],
+                    removed: vec![],
+                    clear: false,
+                };
+            }
+            ContextOutput::CollectionMutations { added, .. } => {
+                // Remove from removed if present, then add.
+                added.push((key, erased));
+            }
+            _ => {
+                return Err(TransformError::new(format!(
+                    "output slot {slot}: already written as full collection"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove an element by key from a collection output slot.
+    pub(crate) fn remove_collection_element(
+        &mut self,
+        slot: usize,
+        key: u64,
+    ) -> Result<(), TransformError> {
+        match &mut self.outputs[slot] {
+            ContextOutput::Absent => {
+                self.outputs[slot] = ContextOutput::CollectionMutations {
+                    added: vec![],
+                    removed: vec![key],
+                    clear: false,
+                };
+            }
+            ContextOutput::CollectionMutations { removed, .. } => {
+                removed.push(key);
+            }
+            _ => {
+                return Err(TransformError::new(format!(
+                    "output slot {slot}: already written as full collection"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear all elements from a collection output slot.
+    pub(crate) fn clear_collection(&mut self, slot: usize) -> Result<(), TransformError> {
+        match &mut self.outputs[slot] {
+            ContextOutput::Absent => {
+                self.outputs[slot] = ContextOutput::CollectionMutations {
+                    added: vec![],
+                    removed: vec![],
+                    clear: true,
+                };
+            }
+            ContextOutput::CollectionMutations { clear, added, removed } => {
+                *clear = true;
+                added.clear();
+                removed.clear();
+            }
+            _ => {
+                return Err(TransformError::new(format!(
+                    "output slot {slot}: already written as full collection"
+                )));
+            }
+        }
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Transform trait (public)
+// ErasedTransform — internal dyn-safe wrapper
+// ---------------------------------------------------------------------------
+
+/// Object-safe wrapper over [`Transform`]. `pub(crate)` only.
+pub(crate) trait ErasedTransform: Send + Sync {
+    fn slot_inputs(&self) -> &[SlotKind];
+    fn slot_outputs(&self) -> &[SlotKind];
+    fn apply_erased<'a>(
+        &'a self,
+        ctx: &'a mut TransformContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TransformError>> + Send + 'a>>;
+}
+
+/// Concrete wrapper produced once per `Transform` type during the build phase.
+pub(crate) struct TypedErasedTransform<T: Transform> {
+    instance: Arc<T>,
+    inputs: Vec<SlotKind>,
+    outputs: Vec<SlotKind>,
+}
+
+impl<T: Transform> TypedErasedTransform<T> {
+    pub(crate) fn new(instance: T, inputs: Vec<SlotKind>, outputs: Vec<SlotKind>) -> Self {
+        Self { instance: Arc::new(instance), inputs, outputs }
+    }
+}
+
+impl<T: Transform> ErasedTransform for TypedErasedTransform<T> {
+    fn slot_inputs(&self) -> &[SlotKind] { &self.inputs }
+    fn slot_outputs(&self) -> &[SlotKind] { &self.outputs }
+    fn apply_erased<'a>(
+        &'a self,
+        ctx: &'a mut TransformContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), TransformError>> + Send + 'a>> {
+        Box::pin(self.instance.apply(ctx))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transform trait
 // ---------------------------------------------------------------------------
 
 #[async_trait]
 pub trait Transform: Send + Sync + 'static {
-    /// Declare this transform's slot layout.
-    /// Called once at build time; use `ctx.input::<T>()` etc. to declare slots.
+    /// Declare this transform's slot layout. Called once at build time.
     fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized;
 
-    /// Execute one invocation.  Use `?` to propagate `TransformError`.
+    /// Execute one invocation. Use `?` to propagate [`TransformError`].
     async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError>;
 }
 
-// ---------------------------------------------------------------------------
-// ErasedTransform (pub(crate)) — object-safe wrapper
-// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Object-safe wrapper holding a `Transform` instance (via `Arc<dyn Transform>`) and its
-/// slot layout + dispatch table.  `async_trait` makes `Transform` dyn-compatible.
-#[derive(Clone)]
-pub(crate) struct ErasedTransform {
-    pub(crate) schema:    Arc<SlotLayout>,
-    pub(crate) dispatch:  Arc<DispatchTable>,
-    pub(crate) instance:  Arc<dyn Transform>,
-}
+    // -----------------------------------------------------------------------
+    // SlotRegistrar tests
+    // -----------------------------------------------------------------------
 
-impl ErasedTransform {
-    pub(crate) fn new<T: Transform>(layout: SlotLayout, dispatch: DispatchTable, instance: T) -> Self {
-        Self {
-            schema:   Arc::new(layout),
-            dispatch: Arc::new(dispatch),
-            instance: Arc::new(instance),
+    #[test]
+    fn test_slot_registrar_inputs_outputs() {
+        let mut reg = SlotRegistrar::new();
+        reg.input::<u64>();
+        reg.input_collection::<u64, TestExtractor>();
+        reg.output::<String>();
+        reg.output_collection::<u64, TestExtractor>();
+
+        assert_eq!(reg.inputs.len(), 2);
+        assert_eq!(reg.outputs.len(), 2);
+        assert!(!reg.inputs[0].is_collection);
+        assert!(reg.inputs[1].is_collection);
+        assert!(!reg.outputs[0].is_collection);
+        assert!(reg.outputs[1].is_collection);
+        assert_eq!(reg.inputs[0].type_id, TypeId::of::<u64>());
+        assert_eq!(reg.inputs[1].type_id, TypeId::of::<u64>());
+        assert_eq!(reg.outputs[0].type_id, TypeId::of::<String>());
+        assert_eq!(reg.outputs[1].type_id, TypeId::of::<u64>());
+    }
+
+    struct TestExtractor;
+    impl KeyExtractor<u64> for TestExtractor {
+        fn extract_key(item: &u64) -> u64 { *item }
+    }
+
+    // -----------------------------------------------------------------------
+    // TransformContext tests
+    // -----------------------------------------------------------------------
+
+    fn make_single_context(input_val: u64) -> TransformContext {
+        let erased: ErasedValue = Arc::new(input_val);
+        TransformContext::new(
+            vec![ContextInput::Single(erased)],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: false,
+                extract_key: None,
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: false,
+                extract_key: None,
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        )
+    }
+
+    fn make_collection_context(
+        elements: Vec<(u64, u64)>,
+    ) -> TransformContext {
+        let keys: Vec<u64> = elements.iter().map(|(k, _)| *k).collect();
+        let erased: Vec<ErasedValue> = elements.iter()
+            .map(|(_, v)| Arc::new(*v) as ErasedValue).collect();
+        TransformContext::new(
+            vec![ContextInput::Collection {
+                elements: erased,
+                keys: keys.clone(),
+                dirty_keys: keys.clone(),
+                removed_keys: vec![],
+            }],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| {
+                    *a.downcast_ref::<u64>().unwrap()
+                }),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn test_context_single_input() {
+        let ctx = make_single_context(42);
+        assert_eq!(*ctx.input::<u64>(0).unwrap(), 42);
+    }
+
+    #[test]
+    fn test_context_input_type_mismatch_error() {
+        let ctx = make_single_context(42);
+        let err = ctx.input::<String>(0).unwrap_err();
+        assert!(err.message.contains("type mismatch"));
+    }
+
+    #[test]
+    fn test_context_input_out_of_range() {
+        let ctx = make_single_context(42);
+        let err = ctx.input::<u64>(5).unwrap_err();
+        assert!(err.message.contains("out of range"));
+    }
+
+    #[test]
+    fn test_context_input_collection_as_single_error() {
+        let ctx = make_collection_context(vec![(1, 10)]);
+        let err = ctx.input::<u64>(0).unwrap_err();
+        assert!(err.message.contains("collection"));
+    }
+
+    #[test]
+    fn test_context_output() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: false,
+                extract_key: None,
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        ctx.output(0, 42u64).unwrap();
+        match &ctx.outputs[0] {
+            ContextOutput::Single(v) => {
+                let val = v.as_any().downcast_ref::<u64>().unwrap();
+                assert_eq!(*val, 42);
+            }
+            _ => panic!("expected Single"),
         }
     }
 
-    pub(crate) async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
-        self.instance.apply(ctx).await
+    #[test]
+    fn test_context_output_collection() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| *a.downcast_ref::<u64>().unwrap()),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        ctx.output_collection(0, vec![3u64, 1u64, 2u64]).unwrap();
+        match &ctx.outputs[0] {
+            ContextOutput::Collection(pairs) => {
+                assert_eq!(pairs.len(), 3);
+                // Keys from ByValue: 3, 1, 2
+                let mut keys: Vec<u64> = pairs.iter().map(|(k, _)| *k).collect();
+                keys.sort_unstable();
+                assert_eq!(keys, vec![1, 2, 3]);
+            }
+            _ => panic!("expected Collection"),
+        }
     }
-}
 
-impl std::fmt::Debug for ErasedTransform {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ErasedTransform({}→{})", self.schema.inputs.len(), self.schema.outputs.len())
+    #[test]
+    fn test_context_output_type_mismatch() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: false,
+                extract_key: None,
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        let err = ctx.output::<String>(0, "hello".to_string()).unwrap_err();
+        assert!(err.message.contains("type mismatch"));
+    }
+
+    // -----------------------------------------------------------------------
+    // CollectionInput tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_collection_input_basic() {
+        let mut elements = std::collections::HashMap::new();
+        elements.insert(1u64, 10u64);
+        elements.insert(2u64, 20u64);
+        let ci = CollectionInput::new(
+            elements,
+            vec![1, 2],
+            vec![1],
+            vec![],
+            vec![],
+        );
+        assert_eq!(ci.len(), 2);
+        assert!(ci.contains(1));
+        assert!(!ci.contains(3));
+        assert_eq!(*ci.get(1).unwrap(), 10);
+        assert!(ci.has_changes());
+    }
+
+    #[test]
+    fn test_collection_input_empty() {
+        let ci: CollectionInput<u64> = CollectionInput::new(
+            std::collections::HashMap::new(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(ci.is_empty());
+        assert_eq!(ci.len(), 0);
+        assert!(!ci.has_changes());
+    }
+
+    #[test]
+    fn test_collection_input_diff_info() {
+        let mut elements = std::collections::HashMap::new();
+        elements.insert(1u64, 10u64);
+        elements.insert(3u64, 30u64);
+        let ci = CollectionInput::new(
+            elements,
+            vec![1, 3],
+            vec![1],       // added
+            vec![],        // changed
+            vec![2],       // removed
+        );
+        assert_eq!(ci.added_keys(), &[1]);
+        assert_eq!(ci.removed_keys(), &[2]);
+        assert!(ci.changed_keys().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // CollectionOutputBuilder tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_collection_builder_add() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| *a.downcast_ref::<u64>().unwrap()),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        {
+            let mut builder = ctx.output_collection_builder::<u64>(0).unwrap();
+            builder.add(10u64).unwrap();
+            builder.add(20u64).unwrap();
+        }
+        match &ctx.outputs[0] {
+            ContextOutput::CollectionMutations { added, .. } => {
+                assert_eq!(added.len(), 2);
+                assert_eq!(added[0].0, 10);
+                assert_eq!(added[1].0, 20);
+            }
+            _ => panic!("expected CollectionMutations"),
+        }
+    }
+
+    #[test]
+    fn test_collection_builder_remove() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| *a.downcast_ref::<u64>().unwrap()),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        {
+            let mut builder = ctx.output_collection_builder::<u64>(0).unwrap();
+            builder.remove(42).unwrap();
+        }
+        match &ctx.outputs[0] {
+            ContextOutput::CollectionMutations { removed, .. } => {
+                assert_eq!(removed, &[42]);
+            }
+            _ => panic!("expected CollectionMutations"),
+        }
+    }
+
+    #[test]
+    fn test_collection_builder_clear() {
+        let mut ctx = TransformContext::new(
+            vec![],
+            vec![],
+            vec![SlotKind {
+                type_id: TypeId::of::<u64>(),
+                type_name: "u64",
+                is_collection: true,
+                extract_key: Some(|a: &dyn Any| *a.downcast_ref::<u64>().unwrap()),
+                deserialize: |_| Err("not needed".to_string()),
+            }],
+        );
+        {
+            let mut builder = ctx.output_collection_builder::<u64>(0).unwrap();
+            builder.clear().unwrap();
+            builder.add(99u64).unwrap();
+        }
+        match &ctx.outputs[0] {
+            ContextOutput::CollectionMutations { added, clear, .. } => {
+                assert!(*clear);
+                assert_eq!(added.len(), 1);
+                assert_eq!(added[0].0, 99);
+            }
+            _ => panic!("expected CollectionMutations"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // TransformError tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_transform_error_display() {
+        let err = TransformError::new("something broke");
+        assert_eq!(err.to_string(), "something broke");
+
+        let err2 = TransformError::with_source("outer", "inner");
+        assert_eq!(err2.to_string(), "outer: inner");
+    }
+
+    // -----------------------------------------------------------------------
+    // IncrementalValue blanket
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_u64_is_incremental_value() {
+        fn check<T: IncrementalValue>() {}
+        check::<u64>();
+        check::<String>();
+        check::<i32>();
+    }
+
+    // -----------------------------------------------------------------------
+    // hash_bytes determinism
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hash_bytes_deterministic() {
+        let bytes = b"hello world";
+        assert_eq!(hash_bytes(bytes), hash_bytes(bytes));
+        assert_ne!(hash_bytes(b"hello"), hash_bytes(b"world"));
     }
 }

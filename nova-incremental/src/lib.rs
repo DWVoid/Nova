@@ -1,49 +1,47 @@
 //! `nova-incremental` — incremental computation engine for the Nova compiler.
 //!
-//! ## Public API (unchanged from user perspective)
+//! ## Public API
 //!
 //! ```text
 //! Engine, EngineBuilder, EngineError
 //! UpdateReport
 //! Storage, StorageError, StorageKey, StorageValue, MemoryStorage
 //! Transform, TransformContext, TransformRegisterContext, TransformError
-//! IncrementalValue, KeyExtractor, CollectionInput, CollectionChange
+//! IncrementalValue, KeyExtractor, CollectionInput, CollectionOutputBuilder
+//! TaskQueue, SequentialTaskQueue
 //! Uuid
 //! ```
 
 mod engine;
-mod loader;
-mod node_id;
-mod scheduler;
+mod keys;
+mod report;
+mod runner;
 mod storage;
+mod task_queue;
 mod topology;
 mod transform;
-mod value;
+mod value_store;
 mod workstate;
-
-#[cfg(test)]
-mod tests;
 
 // ---------------------------------------------------------------------------
 // Public re-exports
 // ---------------------------------------------------------------------------
 
-// Engine lifecycle
 pub use engine::Engine;
 pub use engine::EngineBuilder;
 pub use engine::EngineError;
 
-// Update result
-pub use scheduler::UpdateReport;
+pub use report::UpdateReport;
 
-// Storage backend
 pub use storage::Storage;
 pub use storage::StorageError;
 pub use storage::StorageKey;
 pub use storage::StorageValue;
 pub use storage::MemoryStorage;
 
-// Transform authoring
+pub use task_queue::TaskQueue;
+pub use task_queue::SequentialTaskQueue;
+
 pub use transform::Transform;
 pub use transform::TransformContext;
 pub use transform::TransformRegisterContext;
@@ -51,7 +49,6 @@ pub use transform::TransformError;
 pub use transform::IncrementalValue;
 pub use transform::KeyExtractor;
 pub use transform::CollectionInput;
-pub use transform::CollectionChange;
+pub use transform::CollectionOutputBuilder;
 
-// Stable node identity
 pub use uuid::Uuid;

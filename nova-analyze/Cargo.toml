@@ -10,5 +10,5 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 rmp-serde = { workspace = true }
-nova-incremental-neo = { path = "../nova-incremental-neo" }
+nova-incremental = { path = "../nova-incremental" }
 

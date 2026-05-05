@@ -19,7 +19,7 @@ use std::hash::{Hash, Hasher, DefaultHasher};
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 
-use nova_incremental_neo::{
+use nova_incremental::{
     Transform, TransformContext, TransformRegisterContext, TransformError,
     KeyExtractor,
 };
@@ -258,7 +258,7 @@ mod tests {
     use super::*;
     use crate::semantic::file_access::MockFileAccess;
     use crate::semantic::file_content::FileContent;
-    use nova_incremental_neo::{EngineBuilder, MemoryStorage, Uuid};
+    use nova_incremental::{EngineBuilder, MemoryStorage, Uuid};
     use std::sync::Arc;
 
     fn node(name: &str) -> Uuid {

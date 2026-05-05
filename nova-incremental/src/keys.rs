@@ -68,7 +68,7 @@ impl SlotStateKey {
 
     /// Derive a [`StorageKey`] via UUIDv5 over the serialised key tuple.
     pub(crate) fn to_storage_key(self) -> StorageKey {
-        // Namespace: a fixed UUID representing "nova-incremental-neo slot"
+        // Namespace: a fixed UUID representing "nova-incremental slot"
         const NS: Uuid = Uuid::from_bytes([
             0x6e, 0x69, 0x6e, 0x2d, 0x73, 0x6c, 0x6f, 0x74,
             0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

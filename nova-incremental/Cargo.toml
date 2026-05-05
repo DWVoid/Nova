@@ -9,6 +9,5 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 rmp-serde = { workspace = true }
-dashmap = { workspace = true }
 parking_lot = { workspace = true }
-crossbeam-queue = "0.3.12"
+dashmap = { workspace = true }

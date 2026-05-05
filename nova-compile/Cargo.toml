@@ -8,7 +8,7 @@ name = "nvc"
 path = "src/main.rs"
 
 [dependencies]
-nova-incremental-neo = { path = "../nova-incremental-neo" }
+nova-incremental = { path = "../nova-incremental" }
 nova-analyze     = { path = "../nova-analyze" }
 serde            = { workspace = true }
 tokio            = { workspace = true }

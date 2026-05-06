@@ -3,7 +3,8 @@ resolver = "3"
 members = [
     "nova-incremental",
     "nova-analyze",
-    "nova-compile"
+    "nova-compile",
+    "nova-run"
 ]
 
 [workspace.dependencies]

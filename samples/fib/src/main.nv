@@ -1,0 +1,15 @@
+namespace Samples;
+
+define fib(n: int): int
+  if n < 2 then
+    return n
+  else
+    return fib(n - 1) + fib(n - 2)
+  end
+end
+
+define main(): int
+  val result = fib(21)
+  std.println(result)
+  return result
+end

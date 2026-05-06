@@ -1,0 +1,8 @@
+[package]
+name = "fib"
+version = "1.0.0"
+description = "fibonacci computation e2e test"
+
+output = "target/fib.nvb"
+
+source_files = ["src/main.nv"]

@@ -61,6 +61,11 @@ struct RawPackage {
     /// to the `package` table.
     #[serde(default)]
     source_files: Vec<String>,
+    /// Optional output path for the compiled NVIL bundle.
+    /// If absent, the bundle is only cached incrementally and not written
+    /// as a standalone file.
+    #[serde(default)]
+    output: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,10 +84,11 @@ pub struct ProjectManifest {
     /// Absolute path to the directory containing `bundle.toml`.
     pub root: PathBuf,
     /// Absolute path to `<root>/target/nova-incremental/`.
-    ///
-    /// The compiler driver creates this directory if it does not exist and
-    /// passes it to the loose-file storage backend.
     pub incremental_dir: PathBuf,
+    /// Optional output path for the compiled NVIL bundle.
+    /// If set, the [`Bundle`](nova_analyze::bundle::Bundle) is encoded and
+    /// written to this file after each successful update.
+    pub output: Option<PathBuf>,
     /// Source files in declaration order, with absolute paths.
     pub source_files: Vec<PathBuf>,
 }
@@ -147,6 +153,7 @@ pub fn load_manifest(manifest_path: &Path) -> Result<ProjectManifest, ProjectErr
         .collect();
 
     let incremental_dir = root.join("target").join("nova-incremental");
+    let output = raw.package.output.map(|rel| root.join(rel));
 
     Ok(ProjectManifest {
         name: raw.package.name,
@@ -154,6 +161,7 @@ pub fn load_manifest(manifest_path: &Path) -> Result<ProjectManifest, ProjectErr
         description: raw.package.description,
         root,
         incremental_dir,
+        output,
         source_files,
     })
 }

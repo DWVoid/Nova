@@ -15,7 +15,7 @@
 //! stat_source_files()          – real fs::metadata for each file
 //!     │
 //!     ▼
-//! SemanticSession::open()      – backed by FileSystemStorage + RealFileAccess
+//! SemanticSession::open()      – backed by RedbStorage + RealFileAccess
 //!     │  auto-detects warm/cold start
 //!     ▼
 //! session.update_files(stats)  – register / update input nodes
@@ -30,20 +30,23 @@
 //! session.commit().await       – persist graph topology + all values atomically
 //!     │
 //!     ▼
+//! encode_bundle() + fs::write  – write NVIL binary to configured output path
+//!     │
+//!     ▼
 //! report printed to stdout
 //! ```
 
-mod file_storage;
 mod project;
 mod real_fs;
+mod redb_storage;
 
 use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 
-use file_storage::FileSystemStorage;
 use project::{find_manifest, load_manifest, stat_source_files};
 use real_fs::RealFileAccess;
+use redb_storage::RedbStorage;
 
 use nova_analyze::semantic::SemanticSession;
 
@@ -117,12 +120,12 @@ async fn main() {
     if !manifest.description.is_empty() { println!("     {}", manifest.description); }
     println!("     {} source file(s)", manifest.source_files.len());
 
-    // 3. Set up incremental storage
-    let storage = Arc::new(FileSystemStorage::new(&manifest.incremental_dir));
-    storage.ensure_dir().await.unwrap_or_else(|e| {
-        eprintln!("error: {e}"); process::exit(1);
-    });
-    println!("     incremental cache: {}", manifest.incremental_dir.display());
+    // 3. Set up incremental storage (redb-backed)
+    let storage = Arc::new(RedbStorage::new(&manifest.incremental_dir).unwrap_or_else(|e| {
+        eprintln!("error: cannot initialise storage: {e}"); process::exit(1);
+    }));
+    println!("     incremental cache: {}/{}",
+             manifest.incremental_dir.display(), "storage.redb");
 
     // 4. Stat source files
     let stats = stat_source_files(&manifest).unwrap_or_else(|e| {
@@ -154,19 +157,47 @@ async fn main() {
     println!("nvc: running incremental update …");
     let report = session.run().await;
 
+    let had_errors = !report.errors.is_empty();
+
     // 8. Always commit (preserves partial results for next run)
     session.commit().await.unwrap_or_else(|e| {
         eprintln!("warning: failed to commit incremental state: {e}");
     });
 
-    // 9. Print report
+    // 9. Write the compiled NVIL bundle to the configured output path.
+    if !had_errors {
+        if let Some(output_path) = &manifest.output {
+            if let Ok(Some(bundle)) = session.get_bundle_intermediate().await {
+                let bytes = nova_analyze::bundle::encode::encode_bundle(&bundle)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: failed to encode bundle: {e}");
+                        process::exit(1);
+                    });
+                if let Some(parent) = output_path.parent() {
+                    std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                        eprintln!("error: cannot create output directory '{}': {e}",
+                                  parent.display());
+                        process::exit(1);
+                    });
+                }
+                std::fs::write(output_path, &bytes).unwrap_or_else(|e| {
+                    eprintln!("error: failed to write bundle to '{}': {e}",
+                              output_path.display());
+                    process::exit(1);
+                });
+                println!("     bundle written: {}", output_path.display());
+            }
+        }
+    }
+
+    // 10. Print report
     println!("nvc: update complete");
     println!("     transforms evaluated : {}", report.transforms_evaluated);
     println!("     transforms changed   : {}", report.transforms_changed);
     println!("     transforms skipped   : {}", report.transforms_skipped);
     println!("     transforms blocked   : {}", report.transforms_blocked);
 
-    if !report.errors.is_empty() {
+    if had_errors {
         eprintln!("nvc: {} error(s) during update:", report.errors.len());
         for (node_id, err) in &report.errors {
             eprintln!("     - {node_id}: {err:?}");

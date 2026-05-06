@@ -9,15 +9,58 @@
 //! run incrementally on only the changed files.
 //!
 //! ```text
-//! PROJECT_INPUT → [expand] → Collection<FileStat>
-//!                                └─[load]  → Collection<FileContent>
-//!                                              └─[lex]  → Collection<LexOutput>
-//!                                                           └─[parse] → Collection<ParseOutput>
-//!                                                                          ├─[collect] → bundle_output (String)
-//!                                                                          ├─[symbol] → Collection<BundleExports>
-//!                                                                          │              └─[symbol_collect] → symbol_output
-//!                                                                          └─[bundle_fragment] → Collection<BundleFragment>
-//!                                                                                                └─[bundle_assemble] → bundle_intermediate_output
+//! Legend:
+//!   [node]             transform node
+//!   {node}             output node (terminal, read by consumers)
+//!   (value)            single value edge
+//!   <value>            collection edge (fan-out or fan-in boundary)
+//!   ───►               value edge (single → single)
+//!   ═══►               collection edge
+//!   ┌───┐              subgraph boundary (one instance per file)
+//!
+//!
+//!  PROJECT_INPUT ───► [expand] ═══► <FileStat>
+//!                                        │
+//!                          ┌─────────────┘
+//!                          │  per-file subgraph instance
+//!                         ┌▼───────────────────────────────────────┐
+//!                         │                                         │
+//!                         │  [load] ───► (FileContent)              │
+//!                         │    │                                     │
+//!                         │    ▼                                     │
+//!                         │  [lex] ───► (LexOutput)                 │
+//!                         │    │                                     │
+//!                         │    ▼                                     │
+//!                         │  [parse] ───► (ParseOutput)             │
+//!                         │      │           │           │          │
+//!                         │  (per-elem)  (per-elem)  (per-elem)    │
+//!                         │      ▼           ▼           ▼          │
+//!                         │  [symbol]  [bundle_fragment]            │
+//!                         │      │           │                      │
+//!                         │      ▼           ▼                      │
+//!                         │ (BundleExports) (BundleFragment)        │
+//!                         └─────────────────────────────────────────┘
+//!                      ════╪═══════════════════╪═════════════════════════
+//!                          │        │          │
+//!                          │  (coll of all     │
+//!                          │   ParseOutputs)   │
+//!                          │        │          │
+//!                          │        ▼          │
+//!                          │  [collect]        │
+//!                          │        │          │
+//!                          │        ▼          │
+//!                          │  {bundle_output}  │
+//!                          │      String       │
+//!                          │                   │
+//!          (coll of all    │    (coll of all   │
+//!           BundleExports) │    BundleFrags)   │
+//!                    │     │         │         │
+//!                    ▼     │         ▼         │
+//!             [symbol_collect]  [bundle_assemble]
+//!                    │                  │
+//!                    ▼                  ▼
+//!             {symbol_output}    {bundle_intermediate_output}
+//!             Vec<BundleExports>        Bundle
 //! ```
 
 use std::sync::Arc;

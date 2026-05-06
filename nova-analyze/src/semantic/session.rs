@@ -13,7 +13,11 @@
 //!                                └─[load]  → Collection<FileContent>
 //!                                              └─[lex]  → Collection<LexOutput>
 //!                                                           └─[parse] → Collection<ParseOutput>
-//!                                                                          └─[collect] → bundle_output
+//!                                                                          ├─[collect] → bundle_output (String)
+//!                                                                          ├─[symbol] → Collection<BundleExports>
+//!                                                                          │              └─[symbol_collect] → symbol_output
+//!                                                                          └─[bundle_fragment] → Collection<BundleFragment>
+//!                                                                                                └─[bundle_assemble] → bundle_intermediate_output
 //! ```
 
 use std::sync::Arc;
@@ -27,8 +31,14 @@ use crate::semantic::file_stat::FileStat;
 use crate::semantic::project_descriptor::ProjectDescriptor;
 use crate::semantic::load_transform::{
     EXPAND_KEY, LOAD_KEY, LEX_KEY, PARSE_KEY, COLLECT_KEY,
+    SYMBOL_KEY, SYMBOL_COLLECT_KEY,
+    BUNDLE_FRAGMENT_KEY, BUNDLE_ASSEMBLE_KEY,
     ExpandTransform, LoadTransform, LexTransform, ParseTransform, CollectTransform,
+    SymbolTransform, SymbolCollectTransform,
+    BundleFragmentTransform, BundleAssembleTransform,
 };
+use crate::semantic::symbol_model::BundleExports;
+use crate::bundle::Bundle;
 
 // ---------------------------------------------------------------------------
 // Stable node UUID constants
@@ -41,13 +51,19 @@ const NODE_NS: Uuid = Uuid::from_bytes([
 
 fn node(name: &str) -> Uuid { Uuid::new_v5(&NODE_NS, name.as_bytes()) }
 
-pub fn project_input_id() -> Uuid  { node("project_input") }
-pub fn expand_transform_id() -> Uuid  { node("expand_t") }
-pub fn load_transform_id()   -> Uuid  { node("load_t") }
-pub fn lex_transform_id()    -> Uuid  { node("lex_t") }
-pub fn parse_transform_id()  -> Uuid  { node("parse_t") }
-pub fn collect_transform_id() -> Uuid { node("collect_t") }
-pub fn bundle_output_id()    -> Uuid  { node("bundle_output") }
+pub fn project_input_id()       -> Uuid { node("project_input") }
+pub fn expand_transform_id()    -> Uuid { node("expand_t") }
+pub fn load_transform_id()      -> Uuid { node("load_t") }
+pub fn lex_transform_id()       -> Uuid { node("lex_t") }
+pub fn parse_transform_id()     -> Uuid { node("parse_t") }
+pub fn collect_transform_id()   -> Uuid { node("collect_t") }
+pub fn symbol_transform_id()          -> Uuid { node("symbol_t") }
+pub fn symbol_collect_transform_id()  -> Uuid { node("symbol_collect_t") }
+pub fn bundle_fragment_transform_id() -> Uuid { node("bundle_fragment_t") }
+pub fn bundle_assemble_transform_id() -> Uuid { node("bundle_assemble_t") }
+pub fn bundle_output_id()             -> Uuid { node("bundle_output") }
+pub fn symbol_output_id()             -> Uuid { node("symbol_output") }
+pub fn bundle_intermediate_output_id()-> Uuid { node("bundle_intermediate_output") }
 
 // ---------------------------------------------------------------------------
 // SemanticSession
@@ -117,6 +133,24 @@ impl SemanticSession {
     pub async fn get_bundle_string(&self) -> Result<Option<String>, EngineError> {
         self.get_bundle().await
     }
+
+    /// Retrieve the aggregated per-file symbol models from the pipeline.
+    ///
+    /// Returns `None` if the pipeline has not been run yet or was discarded.
+    /// The returned vector contains one [`BundleExports`] per source file,
+    /// in arbitrary order; callers should index or sort by namespace.
+    pub async fn get_symbol_exports(&self) -> Result<Option<Vec<BundleExports>>, EngineError> {
+        self.engine.get::<Vec<BundleExports>>(symbol_output_id()).await
+    }
+
+    /// Retrieve the assembled [`Bundle`] intermediate representation.
+    ///
+    /// Returns `None` if the pipeline has not been run or was discarded.
+    /// The bundle contains the complete file list, type list, type
+    /// declarations, function list and source locations for the project.
+    pub async fn get_bundle_intermediate(&self) -> Result<Option<Bundle>, EngineError> {
+        self.engine.get::<Bundle>(bundle_intermediate_output_id()).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -128,24 +162,41 @@ async fn build_engine(
     storage: Arc<dyn Storage>,
 ) -> Result<Engine, EngineError> {
     EngineBuilder::new()
-        .register(EXPAND_KEY,  ExpandTransform)
-        .register(LOAD_KEY,    LoadTransform(Arc::clone(&fs)))
-        .register(LEX_KEY,     LexTransform)
-        .register(PARSE_KEY,   ParseTransform)
-        .register(COLLECT_KEY, CollectTransform)
+        .register(EXPAND_KEY,        ExpandTransform)
+        .register(LOAD_KEY,          LoadTransform(Arc::clone(&fs)))
+        .register(LEX_KEY,           LexTransform)
+        .register(PARSE_KEY,         ParseTransform)
+        .register(COLLECT_KEY,       CollectTransform)
+        .register(SYMBOL_KEY,            SymbolTransform)
+        .register(SYMBOL_COLLECT_KEY,    SymbolCollectTransform)
+        .register(BUNDLE_FRAGMENT_KEY,   BundleFragmentTransform)
+        .register(BUNDLE_ASSEMBLE_KEY,   BundleAssembleTransform)
         .input_node::<ProjectDescriptor>(project_input_id())
         .output_node(bundle_output_id())
-        .transform_node(expand_transform_id(),  EXPAND_KEY)
-        .transform_node(load_transform_id(),    LOAD_KEY)
-        .transform_node(lex_transform_id(),     LEX_KEY)
-        .transform_node(parse_transform_id(),   PARSE_KEY)
-        .transform_node(collect_transform_id(), COLLECT_KEY)
+        .output_node(symbol_output_id())
+        .output_node(bundle_intermediate_output_id())
+        .transform_node(expand_transform_id(),              EXPAND_KEY)
+        .transform_node(load_transform_id(),                LOAD_KEY)
+        .transform_node(lex_transform_id(),                 LEX_KEY)
+        .transform_node(parse_transform_id(),               PARSE_KEY)
+        .transform_node(collect_transform_id(),             COLLECT_KEY)
+        .transform_node(symbol_transform_id(),              SYMBOL_KEY)
+        .transform_node(symbol_collect_transform_id(),      SYMBOL_COLLECT_KEY)
+        .transform_node(bundle_fragment_transform_id(),     BUNDLE_FRAGMENT_KEY)
+        .transform_node(bundle_assemble_transform_id(),     BUNDLE_ASSEMBLE_KEY)
         .wire_into_slot(project_input_id(), expand_transform_id(), 0)
         .wire_slot_to_slot(expand_transform_id(),  0, load_transform_id(),    0)
         .wire_slot_to_slot(load_transform_id(),    0, lex_transform_id(),     0)
         .wire_slot_to_slot(lex_transform_id(),     0, parse_transform_id(),   0)
+        // Parallel fan-out: collect (String), symbol, bundle_fragment
         .wire_slot_to_slot(parse_transform_id(),   0, collect_transform_id(), 0)
+        .wire_slot_to_slot(parse_transform_id(),   0, symbol_transform_id(),  0)
+        .wire_slot_to_slot(parse_transform_id(),   0, bundle_fragment_transform_id(), 0)
         .wire_slot_to(collect_transform_id(), 0, bundle_output_id())
+        .wire_slot_to_slot(symbol_transform_id(), 0, symbol_collect_transform_id(), 0)
+        .wire_slot_to(symbol_collect_transform_id(), 0, symbol_output_id())
+        .wire_slot_to_slot(bundle_fragment_transform_id(), 0, bundle_assemble_transform_id(), 0)
+        .wire_slot_to(bundle_assemble_transform_id(), 0, bundle_intermediate_output_id())
         .with_storage(storage)
         .build()
         .await
@@ -372,5 +423,220 @@ mod tests {
         // After discard, bundle is absent (nothing was committed).
         let bundle = s.get_bundle().await.unwrap();
         assert!(bundle.is_none(), "after discard bundle must be absent: {:?}", bundle);
+    }
+
+    // -----------------------------------------------------------------------
+    // Symbol pipeline tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn empty_project_produces_no_symbols() {
+        let s = make_session(&[]).await;
+        s.set_files(vec![]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        // With no files the engine may not evaluate the symbol_collect
+        // transform at all, so `None` or `Some(vec![])` are both valid.
+        let symbols = s.get_symbol_exports().await.unwrap();
+        assert!(
+            symbols.as_ref().map_or(true, |v| v.is_empty()),
+            "empty project should have no symbols: {:?}", symbols
+        );
+    }
+
+    #[tokio::test]
+    async fn file_with_no_exports_produces_empty_exports() {
+        let s = make_session(&[("lib.nova", "namespace lib;")]).await;
+        s.set_files(vec![FileStat::new("lib.nova", 14, 0)]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let symbols = s.get_symbol_exports().await.unwrap().unwrap();
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].namespace, "lib");
+        assert!(symbols[0].imports.is_empty());
+        assert!(symbols[0].exports.is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_with_exported_value_appears_in_symbols() {
+        let src = "namespace mylib; export define answer 42;";
+        let s = make_session(&[("lib.nova", src)]).await;
+        s.set_files(vec![FileStat::new("lib.nova", src.len() as u64, 0)]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let symbols = s.get_symbol_exports().await.unwrap().unwrap();
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].exports.len(), 1);
+        assert!(matches!(
+            &symbols[0].exports[0],
+            crate::semantic::symbol_model::ExportedDef::Value { name, .. } if name == "answer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn unexported_definitions_are_excluded() {
+        let src = "namespace mylib; define hidden 0; export define visible 1;";
+        let s = make_session(&[("lib.nova", src)]).await;
+        s.set_files(vec![FileStat::new("lib.nova", src.len() as u64, 0)]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let symbols = s.get_symbol_exports().await.unwrap().unwrap();
+        assert_eq!(symbols[0].exports.len(), 1);
+        assert!(matches!(
+            &symbols[0].exports[0],
+            crate::semantic::symbol_model::ExportedDef::Value { name, .. } if name == "visible"
+        ));
+    }
+
+    #[tokio::test]
+    async fn multiple_files_each_produce_symbols() {
+        let s = make_session(&[
+            ("a.nova", "namespace mod_a; export define x 1;"),
+            ("b.nova", "namespace mod_b; export define y 2;"),
+        ]).await;
+        s.set_files(vec![
+            FileStat::new("a.nova", 30, 0),
+            FileStat::new("b.nova", 30, 0),
+        ]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let symbols = s.get_symbol_exports().await.unwrap().unwrap();
+        assert_eq!(symbols.len(), 2);
+        // Both namespaces appear.
+        let namespaces: Vec<&str> = symbols.iter().map(|s| s.namespace.as_str()).collect();
+        assert!(namespaces.contains(&"mod_a"));
+        assert!(namespaces.contains(&"mod_b"));
+    }
+
+    #[tokio::test]
+    async fn import_statement_appears_in_symbols() {
+        let src = "use Std.Collections; namespace mylib; export define x 0;";
+        let s = make_session(&[("lib.nova", src)]).await;
+        s.set_files(vec![FileStat::new("lib.nova", src.len() as u64, 0)]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let symbols = s.get_symbol_exports().await.unwrap().unwrap();
+        assert_eq!(symbols[0].imports.len(), 1);
+        assert_eq!(symbols[0].imports[0].name, "Collections");
+    }
+
+    #[tokio::test]
+    async fn symbol_output_available_after_incremental_change() {
+        let mut s = make_session(&[
+            ("a.nova", "namespace a; export define x 1;"),
+        ]).await;
+        // First run.
+        s.set_files(vec![FileStat::new("a.nova", 24, 0)]).unwrap();
+        let r1 = s.run().await;
+        assert!(r1.is_ok(), "{:?}", r1.errors);
+        let sym1 = s.get_symbol_exports().await.unwrap().unwrap();
+        assert_eq!(sym1[0].exports.len(), 1);
+
+        // Add a second file.
+        let mut mock = MockFileAccess::new();
+        mock.add("a.nova", b"namespace a; export define x 1;");
+        mock.add("b.nova", b"namespace b; export define y 2;");
+        let fs: Arc<dyn FileAccess> = Arc::new(mock);
+        s.engine = build_engine(Arc::clone(&fs), Arc::new(MemoryStorage::new())).await.unwrap();
+        s.set_files(vec![
+            FileStat::new("a.nova", 24, 0),
+            FileStat::new("b.nova", 24, 1),
+        ]).unwrap();
+        let r2 = s.run().await;
+        assert!(r2.is_ok(), "{:?}", r2.errors);
+        let sym2 = s.get_symbol_exports().await.unwrap().unwrap();
+        assert_eq!(sym2.len(), 2, "after adding b.nova, symbol count should be 2");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bundle intermediate pipeline tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn empty_project_produces_empty_bundle_intermediate() {
+        let s = make_session(&[]).await;
+        s.set_files(vec![]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        // With no files the engine may not evaluate the assemble transform.
+        let bundle = s.get_bundle_intermediate().await.unwrap();
+        assert!(bundle.as_ref().map_or(true, |b| b.files.is_empty()),
+            "empty project should have no files: {:?}", bundle);
+    }
+
+    #[tokio::test]
+    async fn bundle_intermediate_contains_file_list() {
+        let src = "namespace App;";
+        let s = make_session(&[("main.nv", src)]).await;
+        s.set_files(vec![FileStat::new("main.nv", src.len() as u64, 0)]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let bundle = s.get_bundle_intermediate().await.unwrap().unwrap();
+        assert_eq!(bundle.files, vec!["main.nv"]);
+    }
+
+    #[tokio::test]
+    async fn bundle_intermediate_contains_type_declarations() {
+        let src = "namespace App; define Point struct x: int y: int end";
+        let s = make_session(&[("geom.nv", src)]).await;
+        s.set_files(vec![FileStat::new("geom.nv", src.len() as u64, 0)]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let bundle = s.get_bundle_intermediate().await.unwrap().unwrap();
+        assert_eq!(bundle.type_declarations.len(), 1);
+        assert!(matches!(&bundle.type_declarations[0].body, crate::bundle::TypeBody::Struct { fields } if fields.len() == 2));
+    }
+
+    #[tokio::test]
+    async fn bundle_intermediate_contains_function_list() {
+        let src = "namespace Math; define add(x: int): int end";
+        let s = make_session(&[("math.nv", src)]).await;
+        s.set_files(vec![FileStat::new("math.nv", src.len() as u64, 0)]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let bundle = s.get_bundle_intermediate().await.unwrap().unwrap();
+        assert_eq!(bundle.func_list.len(), 1);
+        assert!(bundle.func_list.iter().any(|f| f.name == "Math.add"));
+    }
+
+    #[tokio::test]
+    async fn bundle_intermediate_contains_impl_bodies() {
+        let src = "namespace App; implement for Foo define bar(): unit end end";
+        let s = make_session(&[("app.nv", src)]).await;
+        s.set_files(vec![FileStat::new("app.nv", src.len() as u64, 0)]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let bundle = s.get_bundle_intermediate().await.unwrap().unwrap();
+        assert_eq!(bundle.impl_bodies.len(), 1);
+        assert_eq!(bundle.impl_bodies[0].methods.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bundle_intermediate_has_correct_format_version() {
+        let src = "namespace App;";
+        let s = make_session(&[("a.nv", src)]).await;
+        s.set_files(vec![FileStat::new("a.nv", 14, 0)]).unwrap();
+        s.run().await;
+        let bundle = s.get_bundle_intermediate().await.unwrap().unwrap();
+        assert_eq!(bundle.version.major, 1);
+        assert_eq!(bundle.version.minor, 0);
+        assert_eq!(bundle.version.patch, 0);
+    }
+
+    #[tokio::test]
+    async fn bundle_intermediate_multi_file() {
+        let s = make_session(&[
+            ("a.nv", "namespace A; define S struct x: int end"),
+            ("b.nv", "namespace B; define T struct y: int end"),
+        ]).await;
+        s.set_files(vec![
+            FileStat::new("a.nv", 35, 0),
+            FileStat::new("b.nv", 35, 0),
+        ]).unwrap();
+        let report = s.run().await;
+        assert!(report.is_ok(), "{:?}", report.errors);
+        let bundle = s.get_bundle_intermediate().await.unwrap().unwrap();
+        assert_eq!(bundle.files.len(), 2);
+        assert_eq!(bundle.type_declarations.len(), 2);
     }
 }

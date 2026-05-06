@@ -8,7 +8,6 @@
 //! ## Design Decisions
 //!
 //! * **Imports** — every `use` declaration is converted into one
-#![allow(dead_code, unused_imports)]
 //!   [`ImportedName`], preserving the source path, the imported symbol name,
 //!   and the optional local alias.
 //!
@@ -31,7 +30,7 @@
 use serde::{Deserialize, Serialize};
 use crate::syntax::SyntaxResult;
 use crate::syntax::ast::{
-    Chunk, DefExpr, TopItem, UseDecl, UseTail, Visibility,
+    DefExpr, TopItem, UseDecl, UseTail,
 };
 
 // ---------------------------------------------------------------------------
@@ -321,6 +320,288 @@ fn extract_definition(
             } else {
                 Some(ExportedDef::Value { name, type_annotation })
             }
+        }
+    }
+}
+
+/// Extract exported definitions from top-level items.
+///
+/// Only `Definition`s with a visibility modifier (`export`) are included.
+/// `Implementation` blocks are always included (trait impls as `TraitImpl`,
+/// inherent impls as `InherentImpl` with their exported methods lifted).
+fn extract_exports(items: &[TopItem]) -> Vec<ExportedDef> {
+    let mut exports = Vec::new();
+    for item in items {
+        match item {
+            TopItem::Definition(def) => {
+                // Only include definitions marked with `export`.
+                if def.visibility.is_some() {
+                    if let Some(exported) = extract_definition(def) {
+                        exports.push(exported);
+                    }
+                }
+            }
+            TopItem::Implementation(imp) => {
+                let target_type = type_name_str(&imp.target);
+                if let Some(trait_type) = &imp.trait_type {
+                    // Trait implementation — record trait + target type.
+                    exports.push(ExportedDef::TraitImpl {
+                        trait_name: type_name_str(trait_type),
+                        target_type,
+                    });
+                } else {
+                    // Inherent implementation — lift exported methods.
+                    let methods: Vec<ExportedDef> = imp
+                        .items
+                        .iter()
+                        .filter(|def| def.visibility.is_some())
+                        .filter_map(|def| extract_definition(def))
+                        .collect();
+                    exports.push(ExportedDef::InherentImpl {
+                        target_type,
+                        methods,
+                    });
+                }
+            }
+        }
+    }
+    exports
+}
+
+/// Build a [`BundleExports`] from a parsed syntax result.
+///
+/// This is the main entry point for the semantic extraction stage.
+/// It processes the chunk's namespace, use declarations, and top-level
+/// items to produce a complete symbol model for one source file.
+pub fn extract(result: &SyntaxResult) -> BundleExports {
+    let chunk = &result.chunk;
+    let namespace = join_path(&chunk.namespace.path);
+    let imports = extract_imports(&chunk.uses);
+    let exports = extract_exports(&chunk.items);
+    BundleExports {
+        namespace,
+        imports,
+        exports,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexical;
+    use crate::syntax;
+
+    fn parse(src: &str) -> SyntaxResult {
+        let lex = lexical::transform(src).unwrap();
+        syntax::transform(lex).unwrap()
+    }
+
+    // ── Namespace ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_namespace() {
+        let result = parse("namespace Foo.Bar;");
+        let model = extract(&result);
+        assert_eq!(model.namespace, "Foo.Bar");
+        assert!(model.imports.is_empty());
+        assert!(model.exports.is_empty());
+    }
+
+    // ── Imports ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_simple_import() {
+        let result = parse("use Std.Collections; namespace M;");
+        let model = extract(&result);
+        assert_eq!(model.imports.len(), 1);
+        assert_eq!(model.imports[0].path, vec!["Std"]);
+        assert_eq!(model.imports[0].name, "Collections");
+        assert!(model.imports[0].alias.is_none());
+    }
+
+    #[test]
+    fn extract_import_with_alias() {
+        let result = parse("use Std.IO as StdIO; namespace M;");
+        let model = extract(&result);
+        assert_eq!(model.imports.len(), 1);
+        assert_eq!(model.imports[0].path, vec!["Std"]);
+        assert_eq!(model.imports[0].name, "IO");
+        assert_eq!(model.imports[0].alias.as_deref(), Some("StdIO"));
+    }
+
+    #[test]
+    fn extract_import_selector() {
+        let result = parse("use Std.Math.{sin, cos as cosine}; namespace M;");
+        let model = extract(&result);
+        assert_eq!(model.imports.len(), 2);
+        assert_eq!(model.imports[0].name, "sin");
+        assert!(model.imports[0].alias.is_none());
+        assert_eq!(model.imports[1].name, "cos");
+        assert_eq!(model.imports[1].alias.as_deref(), Some("cosine"));
+    }
+
+    #[test]
+    fn extract_multi_segment_path_import() {
+        let result = parse("use A.B.C.D; namespace M;");
+        let model = extract(&result);
+        assert_eq!(model.imports.len(), 1);
+        assert_eq!(model.imports[0].path, vec!["A", "B", "C"]);
+        assert_eq!(model.imports[0].name, "D");
+    }
+
+    // ── Exported definitions ──────────────────────────────────────────────
+
+    #[test]
+    fn extract_exported_value() {
+        let result = parse("namespace M; export define x 42;");
+        let model = extract(&result);
+        assert_eq!(model.exports.len(), 1);
+        assert!(matches!(&model.exports[0], ExportedDef::Value { name, .. } if name == "x"));
+    }
+
+    #[test]
+    fn extract_exported_function() {
+        let result = parse("namespace M; export define add(x: int, y: int): int end;");
+        let model = extract(&result);
+        assert_eq!(model.exports.len(), 1);
+        match &model.exports[0] {
+            ExportedDef::Function { name, signature, .. } => {
+                assert_eq!(name, "add");
+                assert_eq!(signature.params.len(), 2);
+                assert_eq!(signature.params[0].name, "x");
+                assert_eq!(signature.params[1].name, "y");
+                assert_eq!(signature.return_type.as_deref(), Some("int"));
+            }
+            other => panic!("expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_exported_struct() {
+        let result = parse("namespace M; export define Point struct x: int y: int end;");
+        let model = extract(&result);
+        assert_eq!(model.exports.len(), 1);
+        match &model.exports[0] {
+            ExportedDef::Struct { name, fields } => {
+                assert_eq!(name, "Point");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "x");
+                assert_eq!(fields[0].type_name, "int");
+            }
+            other => panic!("expected Struct, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_exported_enum() {
+        let result = parse("namespace M; export define Color enum: int Red = 0 Green = 1 Blue = 2 end;");
+        let model = extract(&result);
+        assert_eq!(model.exports.len(), 1);
+        match &model.exports[0] {
+            ExportedDef::Enum { name, base_type, members } => {
+                assert_eq!(name, "Color");
+                assert_eq!(base_type, "int");
+                assert_eq!(members.len(), 3);
+            }
+            other => panic!("expected Enum, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_exported_variant() {
+        let result = parse("namespace M; export define Shape variant Circle: float Rect: float end");
+        let model = extract(&result);
+        assert_eq!(model.exports.len(), 1);
+        match &model.exports[0] {
+            ExportedDef::Variant { name, cases } => {
+                assert_eq!(name, "Shape");
+                assert_eq!(cases.len(), 2);
+                assert_eq!(cases[0].name, "Circle");
+                assert_eq!(cases[1].name, "Rect");
+            }
+            other => panic!("expected Variant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_exported_trait() {
+        let result = parse(
+            "namespace M; export define Iterable trait next(): unit has_next(): bool end",
+        );
+        let model = extract(&result);
+        assert_eq!(model.exports.len(), 1);
+        match &model.exports[0] {
+            ExportedDef::Trait { name, signatures } => {
+                assert_eq!(name, "Iterable");
+                assert_eq!(signatures.len(), 2);
+                assert_eq!(signatures[0].name, "next");
+                assert_eq!(signatures[1].name, "has_next");
+            }
+            other => panic!("expected Trait, got {:?}", other),
+        }
+    }
+
+    // ── Non-exported definitions are excluded ──────────────────────────────
+
+    #[test]
+    fn extract_ignores_non_exported_defs() {
+        let result = parse("namespace M; define hidden 42; export define visible 1;");
+        let model = extract(&result);
+        assert_eq!(model.exports.len(), 1);
+        assert!(matches!(&model.exports[0], ExportedDef::Value { name, .. } if name == "visible"));
+    }
+
+    // ── Implementations ───────────────────────────────────────────────────
+
+    #[test]
+    fn extract_trait_impl() {
+        let result = parse(
+            "namespace M; implement fmt.Display for MyType end",
+        );
+        let model = extract(&result);
+        // Trait impls are always included even without `export`.
+        assert_eq!(model.exports.len(), 1);
+        match &model.exports[0] {
+            ExportedDef::TraitImpl { trait_name, target_type } => {
+                assert_eq!(trait_name, "fmt.Display");
+                assert_eq!(target_type, "MyType");
+            }
+            other => panic!("expected TraitImpl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_inherent_impl_with_exported_methods() {
+        let result = parse(
+            "namespace M; implement for Foo export define bar(): unit end define hidden 0 end",
+        );
+        let model = extract(&result);
+        assert_eq!(model.exports.len(), 1);
+        match &model.exports[0] {
+            ExportedDef::InherentImpl { target_type, methods } => {
+                assert_eq!(target_type, "Foo");
+                assert_eq!(methods.len(), 1);
+                assert!(matches!(&methods[0], ExportedDef::Function { name, .. } if name == "bar"));
+            }
+            other => panic!("expected InherentImpl, got {:?}", other),
+        }
+    }
+
+    // ── Type annotation ───────────────────────────────────────────────────
+
+    #[test]
+    fn extract_value_with_type_annotation() {
+        let result = parse("namespace M; export define x: int 42;");
+        let model = extract(&result);
+        match &model.exports[0] {
+            ExportedDef::Value { name, type_annotation } => {
+                assert_eq!(name, "x");
+                assert_eq!(type_annotation.as_deref(), Some("int"));
+            }
+            other => panic!("expected Value, got {:?}", other),
         }
     }
 }

@@ -8,7 +8,9 @@
 //!                    └─[load]──► Collection<FileContent>   (per FileStat)
 //!                                   └─[lex]──► Collection<LexOutput>
 //!                                                └─[parse]──► Collection<ParseOutput>
-//!                                                               └─[collect]──► String
+//!                                                               ├─[collect]──► String
+//!                                                               └─[symbol]──► Collection<BundleExports>
+//!                                                                               └─[symbol_collect]──► Vec<BundleExports>
 //! ```
 //!
 //! All transforms implement the new [`Transform`] trait so they are fully
@@ -28,6 +30,8 @@ use crate::semantic::project_descriptor::ProjectDescriptor;
 use crate::semantic::file_access::FileAccess;
 use crate::semantic::file_stat::FileStat;
 use crate::semantic::file_content::FileContent;
+use crate::semantic::symbol_model::BundleExports;
+use crate::bundle::{Bundle, BundleFragment};
 
 // ---------------------------------------------------------------------------
 // LexOutput / ParseOutput (public value types)
@@ -99,6 +103,16 @@ impl KeyExtractor<ParseOutput> for ParseOutputByPath {
     fn extract_key(po: &ParseOutput) -> u64 {
         let mut h = DefaultHasher::new();
         po.path.hash(&mut h);
+        h.finish()
+    }
+}
+
+/// Extract a `u64` key for a `BundleExports` by hashing its namespace.
+pub struct SymbolOutputByPath;
+impl KeyExtractor<BundleExports> for SymbolOutputByPath {
+    fn extract_key(exports: &BundleExports) -> u64 {
+        let mut h = DefaultHasher::new();
+        exports.namespace.hash(&mut h);
         h.finish()
     }
 }
@@ -240,6 +254,104 @@ impl Transform for CollectTransform {
 }
 
 // ---------------------------------------------------------------------------
+// SymbolTransform: ParseOutput → BundleExports  (invoked per element)
+// ---------------------------------------------------------------------------
+
+/// Runs symbol-model extraction on parsed output.
+pub struct SymbolTransform;
+
+#[async_trait]
+impl Transform for SymbolTransform {
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<ParseOutput>();
+        ctx.output::<BundleExports>();
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let po = ctx.input::<ParseOutput>(0)?;
+        let exports = crate::semantic::symbol_model::extract(&po.result);
+        ctx.output(0, exports)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SymbolCollectTransform: Collection<BundleExports> → Vec<BundleExports>
+// ---------------------------------------------------------------------------
+
+/// Aggregates all per-file symbol models into a single vector.
+///
+/// This is the terminal stage of the symbol pipeline.  The output order is
+/// *not* guaranteed to be stable; callers should sort by namespace if needed.
+pub struct SymbolCollectTransform;
+
+#[async_trait]
+impl Transform for SymbolCollectTransform {
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input_collection::<BundleExports, SymbolOutputByPath>();
+        ctx.output::<Vec<BundleExports>>();
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let col = ctx.input_collection::<BundleExports>(0)?;
+        let values: Vec<BundleExports> = col.values().cloned().collect();
+        ctx.output(0, values)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BundleFragmentTransform: ParseOutput → BundleFragment  (per element)
+// ---------------------------------------------------------------------------
+
+/// Runs bundle-fragment extraction on parsed output.
+pub struct BundleFragmentTransform;
+
+#[async_trait]
+impl Transform for BundleFragmentTransform {
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input::<ParseOutput>();
+        ctx.output::<BundleFragment>();
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let po = ctx.input::<ParseOutput>(0)?;
+        let fragment = crate::bundle::extract_fragment(&po.path, &po.result);
+        ctx.output(0, fragment)
+    }
+}
+
+/// Extract a `u64` key for a `BundleFragment` by hashing its path.
+pub struct BundleFragmentByPath;
+impl KeyExtractor<BundleFragment> for BundleFragmentByPath {
+    fn extract_key(f: &BundleFragment) -> u64 {
+        let mut h = std::hash::DefaultHasher::new();
+        f.path.hash(&mut h);
+        h.finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BundleAssembleTransform: Collection<BundleFragment> → Bundle
+// ---------------------------------------------------------------------------
+
+/// Assembles all per-file fragments into the final [`Bundle`].
+pub struct BundleAssembleTransform;
+
+#[async_trait]
+impl Transform for BundleAssembleTransform {
+    fn register(ctx: &mut impl TransformRegisterContext) where Self: Sized {
+        ctx.input_collection::<BundleFragment, BundleFragmentByPath>();
+        ctx.output::<Bundle>();
+    }
+
+    async fn apply(&self, ctx: &mut TransformContext) -> Result<(), TransformError> {
+        let col = ctx.input_collection::<BundleFragment>(0)?;
+        let fragments: Vec<BundleFragment> = col.values().cloned().collect();
+        let bundle = crate::bundle::assemble(fragments);
+        ctx.output(0, bundle)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Re-exported type aliases / constants (backwards compat for session.rs)
 // ---------------------------------------------------------------------------
 
@@ -249,6 +361,10 @@ pub const LOAD_KEY:    &str = "load";
 pub const LEX_KEY:     &str = "lex";
 pub const PARSE_KEY:   &str = "parse";
 pub const COLLECT_KEY: &str = "collect";
+pub const SYMBOL_KEY:  &str = "symbol";
+pub const SYMBOL_COLLECT_KEY: &str = "symbol_collect";
+pub const BUNDLE_FRAGMENT_KEY: &str = "bundle_fragment";
+pub const BUNDLE_ASSEMBLE_KEY: &str = "bundle_assemble";
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -333,7 +449,7 @@ mod tests {
         let s = Arc::new(MemoryStorage::new());
         let mut mock = MockFileAccess::new();
         mock.add("test.nova", b"namespace test;".to_vec());
-        let fs: Arc<dyn FileAccess> = Arc::new(mock);
+        let _fs: Arc<dyn FileAccess> = Arc::new(mock);
         let content_in = node("lex_content_in");
         let lex_t      = node("lex_t_solo");
         let lex_out    = node("lex_out_solo");
